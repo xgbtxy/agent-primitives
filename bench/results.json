@@ -1,13 +1,15 @@
 {
-  "generated_at": "2026-11-15T05:44:58Z",
+  "generated_at": "2026-11-15T08:14:14Z",
   "python_version": "3.12.0",
   "platform": "win32",
   "idle_frontmatter_tokens_per_folder": {
     "atlas": 73,
     "baton": 70,
     "guard": 63,
+    "probe": 64,
     "recall": 71,
-    "sieve": 83
+    "sieve": 83,
+    "splice": 68
   },
   "sieve_benchmarks": [
     {
@@ -17,7 +19,7 @@
       "raw_tokens_est": 43019,
       "out_tokens_est": 520,
       "reduction_pct": 98.8,
-      "latency_ms": 24.6,
+      "latency_ms": 24.31,
       "signal_preserved": true
     },
     {
@@ -27,7 +29,7 @@
       "raw_tokens_est": 26972,
       "out_tokens_est": 106,
       "reduction_pct": 99.6,
-      "latency_ms": 2.96,
+      "latency_ms": 2.6,
       "signal_preserved": true
     },
     {
@@ -37,7 +39,7 @@
       "raw_tokens_est": 12040,
       "out_tokens_est": 195,
       "reduction_pct": 98.4,
-      "latency_ms": 7.78,
+      "latency_ms": 8.54,
       "signal_preserved": true
     },
     {
@@ -47,7 +49,7 @@
       "raw_tokens_est": 18,
       "out_tokens_est": 30,
       "reduction_pct": 0.0,
-      "latency_ms": 2.27,
+      "latency_ms": 1.63,
       "signal_preserved": true
     }
   ],
@@ -57,7 +59,7 @@
     "avg_injected_tokens_top2": 39.9,
     "token_reduction_pct": 99.4,
     "top1_recall_accuracy": "20/20 (100%)",
-    "median_query_latency_ms": 4.24
+    "median_query_latency_ms": 3.84
   },
   "atlas_real_scan_benchmark": {
     "scanned_target": "sdk_corpus (64 Python modules)",
@@ -65,6 +67,28 @@
     "raw_corpus_tokens_est": 42710,
     "atlas_map_tokens_est": 446,
     "orientation_reduction_pct": 99.0,
-    "scan_latency_ms": 22.5
+    "scan_latency_ms": 19.5
+  },
+  "probe_microscope_benchmark": {
+    "total_py_files": 25,
+    "reachable_files": 3,
+    "pruned_dead_files": 20,
+    "dead_code_pruned_pct": 80.0,
+    "slice_latency_ms": 17.68,
+    "trace_latency_ms": 10.34,
+    "auto_detected_hazards": {
+      "alias_hazards": 2,
+      "in_place_mutations": 1,
+      "state_noops": 1
+    }
+  },
+  "splice_surgeon_benchmark": {
+    "full_module_tokens_est": 1376,
+    "symbol_view_tokens_est": 77,
+    "symbol_read_reduction_pct": 94.4,
+    "view_latency_ms": 1.22,
+    "atomic_apply_latency_ms": 3.72,
+    "crlf_preserved": true,
+    "repo_check_latency_ms": 10.58
   }
 }

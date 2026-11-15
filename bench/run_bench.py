@@ -27,10 +27,14 @@ SKILLS = ROOT / "skills"
 sys.path.insert(0, str(SKILLS / "sieve" / "scripts"))
 sys.path.insert(0, str(SKILLS / "recall" / "scripts"))
 sys.path.insert(0, str(SKILLS / "atlas" / "scripts"))
+sys.path.insert(0, str(SKILLS / "probe" / "scripts"))
+sys.path.insert(0, str(SKILLS / "splice" / "scripts"))
 
 import atlas  # noqa: E402
+import probe  # noqa: E402
 import recall  # noqa: E402
 import sieve  # noqa: E402
+import splice  # noqa: E402
 
 
 def bench_sieve(tmp: Path) -> list[dict[str, Any]]:
@@ -244,12 +248,173 @@ def bench_atlas(tmp: Path) -> dict[str, Any]:
     }
 
 
+def bench_probe(tmp: Path) -> dict[str, Any]:
+    """Deterministic micro-benchmark of probe slice + run + diff latency & dead-file pruning."""
+    import io
+    from contextlib import redirect_stdout
+
+    repo = tmp / "probe_corpus"
+    pkg = repo / " runtime_pkg".strip()
+    (pkg / "active").mkdir(parents=True, exist_ok=True)
+    (pkg / "dead").mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("from .active.engine import ServiceEngine\n", encoding="utf-8")
+    (pkg / "active" / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "dead" / "__init__.py").write_text("", encoding="utf-8")
+    for k in range(20):
+        (pkg / "dead" / f"unused_{k:02d}.py").write_text(
+            f"class DeadModule{k:02d}:\n    def unused(self) -> int:\n        return {k}\n",
+            encoding="utf-8",
+        )
+    (pkg / "active" / "state.py").write_text(
+        "class WindowMap:\n"
+        "    def __init__(self) -> None:\n"
+        "        self._items = {}\n"
+        "    def put(self, digest: str) -> None:\n"
+        "        self._items[digest] = 1\n"
+        "    def evict(self, key_token: str) -> None:\n"
+        "        self._items.pop(key_token, None)\n",
+        encoding="utf-8",
+    )
+    (pkg / "active" / "engine.py").write_text(
+        "from .state import WindowMap\n"
+        "class Envelope:\n"
+        "    def __init__(self, eid: str, body: dict) -> None:\n"
+        "        self.eid = eid\n"
+        "        self.body = body\n"
+        "    def clone(self) -> 'Envelope':\n"
+        "        return Envelope(self.eid, dict(self.body))\n"
+        "class ServiceEngine:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.w = WindowMap()\n"
+        "    def handle(self, env: Envelope) -> Envelope:\n"
+        "        snap = env.clone()\n"
+        "        env.body['meta']['count'] += 1\n"
+        "        self.w.put('sha:999')\n"
+        "        self.w.evict(env.eid)\n"
+        "        return snap\n",
+        encoding="utf-8",
+    )
+
+    buf_s = io.StringIO()
+    with redirect_stdout(buf_s):
+        probe.run_slice(repo, ["runtime_pkg"], as_json=True)
+    sl_data = json.loads(buf_s.getvalue())
+
+    buf_r = io.StringIO()
+    with redirect_stdout(buf_r):
+        probe.run_trace(
+            cwd=repo,
+            focus="runtime_pkg",
+            code="from runtime_pkg.active.engine import Envelope, ServiceEngine; ServiceEngine().handle(Envelope('e1', {'meta': {'count': 1}}))",
+            script=None,
+            unittest_target=None,
+            as_json=True,
+        )
+    tr_data = json.loads(buf_r.getvalue())
+
+    return {
+        "total_py_files": sl_data["total_py_files"],
+        "reachable_files": sl_data["reachable_count"],
+        "pruned_dead_files": sl_data["pruned_unreferenced_count"],
+        "dead_code_pruned_pct": round(sl_data["pruned_unreferenced_count"] / max(1, sl_data["total_py_files"]) * 100.0, 1),
+        "slice_latency_ms": sl_data["elapsed_ms"],
+        "trace_latency_ms": tr_data["elapsed_ms"],
+        "auto_detected_hazards": {
+            "alias_hazards": len(tr_data["alias_hazards"]),
+            "in_place_mutations": len(tr_data["mutation_alerts"]),
+            "state_noops": len(tr_data["state_noop_alerts"]),
+        },
+    }
+
+
+def bench_splice(tmp: Path) -> dict[str, Any]:
+    """Deterministic micro-benchmark of splice AST symbol view + atomic multi-file apply + check."""
+    import io
+    from contextlib import redirect_stdout
+
+    repo = tmp / "splice_corpus"
+    pkg = repo / "billing_pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("from .service import BillingService\n", encoding="utf-8")
+
+    lines = ["from __future__ import annotations", "", "class BillingService:"]
+    for idx in range(28):
+        lines.extend([
+            f"    def helper_step_{idx:02d}(self, amount_cents: int) -> int:",
+            f"        # Deterministic accounting invariant block #{idx:02d} (non-ASCII UTF-8 note: 账单校验_{idx:02d})",
+            f"        return amount_cents + {idx}",
+            "",
+        ])
+    lines.extend([
+        "    def commit_invoice(self, subtotal_cents: int, tax_bps: int) -> int:",
+        "        tax = (subtotal_cents * tax_bps) // 10000",
+        "        return subtotal_cents + tax",
+    ])
+    svc_file = pkg / "service.py"
+    svc_src = "\r\n".join(lines) + "\r\n"
+    svc_file.write_bytes(svc_src.encode("utf-8"))
+    for k in range(10):
+        (pkg / f"worker_{k:02d}.py").write_text(
+            f"from .service import BillingService\ndef run_{k:02d}() -> int:\n    return BillingService().commit_invoice(1000, 500)\n",
+            encoding="utf-8",
+        )
+
+    full_tokens = (len(svc_src.encode("utf-8")) + 3) // 4
+    t0 = time.perf_counter()
+    buf_v = io.StringIO()
+    with redirect_stdout(buf_v):
+        splice.run_view(svc_file, ["BillingService.commit_invoice"], "", as_json=False)
+    view_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    view_out = buf_v.getvalue()
+    symbol_tokens = (len(view_out.encode("utf-8")) + 3) // 4
+
+    spec_file = tmp / "edits.json"
+    spec_file.write_text(
+        json.dumps([
+            {
+                "path": "billing_pkg/service.py",
+                "op": "replace_symbol",
+                "symbol": "BillingService.commit_invoice",
+                "new": "def commit_invoice(self, subtotal_cents: int, tax_bps: int) -> int:\n    tax = round(subtotal_cents * tax_bps / 10000)\n    return subtotal_cents + tax",
+            },
+            {
+                "path": "billing_pkg/worker_00.py",
+                "op": "replace",
+                "old": "commit_invoice(1000, 500)",
+                "new": "commit_invoice(2000, 750)",
+            },
+        ]),
+        encoding="utf-8",
+    )
+    buf_a = io.StringIO()
+    with redirect_stdout(buf_a):
+        splice.run_apply(repo, str(spec_file), from_stdin=False, as_json=True)
+    apply_res = json.loads(buf_a.getvalue())
+
+    buf_c = io.StringIO()
+    with redirect_stdout(buf_c):
+        splice.run_check(repo, as_json=True)
+    check_res = json.loads(buf_c.getvalue())
+
+    return {
+        "full_module_tokens_est": full_tokens,
+        "symbol_view_tokens_est": symbol_tokens,
+        "symbol_read_reduction_pct": round((1.0 - symbol_tokens / max(1, full_tokens)) * 100.0, 1),
+        "view_latency_ms": view_ms,
+        "atomic_apply_latency_ms": apply_res["elapsed_ms"],
+        "crlf_preserved": b"\r\n" in svc_file.read_bytes(),
+        "repo_check_latency_ms": check_res["elapsed_ms"],
+    }
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_s:
         tmp = Path(tmp_s)
         sieve_res = bench_sieve(tmp)
         recall_res = bench_recall(tmp)
         atlas_res = bench_atlas(tmp)
+        probe_res = bench_probe(tmp)
+        splice_res = bench_splice(tmp)
 
     idle_skill_tokens = {}
     for sdir in sorted(SKILLS.iterdir()):
@@ -268,6 +433,8 @@ def main() -> int:
         "sieve_benchmarks": sieve_res,
         "recall_benchmark_200_rules": recall_res,
         "atlas_real_scan_benchmark": atlas_res,
+        "probe_microscope_benchmark": probe_res,
+        "splice_surgeon_benchmark": splice_res,
     }
     out_path = ROOT / "bench" / "results.json"
     out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

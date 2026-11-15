@@ -1,89 +1,144 @@
 # agent-primitives
 
-**一个文件夹 = 一个零膨胀微基础设施（Coding Agent 与个人助手 Agent 真实提效底座）**
+**一个文件夹 = 一个不怕模型迭代淘汰的零依赖微基础设施（Coding Agent 与个人助手 Agent 底层过程提效底座）**
 
-[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · [真实提效实战指南 (中文)](./PLAYBOOK.zh-CN.md) | [Efficiency Playbook (EN)](./PLAYBOOK.md)
-
----
-
-## 为什么要做这个仓库？
-
-纵观 2026 年 GitHub 与 X 上的主流 Agent 工具生态，存在一个非常割裂的断层：
-- **纯 Markdown 提示词技能库**虽然做到了“单文件夹轻便拷贝”，但**没有任何确定性运行时执行力**（光在文字里劝大模型“请验证后再结束”，测试挂了它照样报告“已完成”；遇到 200 KB 报错日志也无法无损压缩）；
-- **重型 Harness 框架与记忆插件**虽然有运行时能力，却往往膨胀成五六十个目录的庞然大物——强绑 `Node`/`Bun`、`Docker`、外部向量库、30 天试用绑卡墙，或者常驻 MCP 工具 Schema 还没开始干活就先吃掉 `8,000~15,000 Tokens`。
-
-**`agent-primitives`** 坚持极简工程纪律：**一个子文件夹 = 一个独立完整的小项目（微基础设施）**。
-- **物理级解耦，拷走单文件夹即用**：想要哪一个就复制哪一个（`cp -r skills/sieve ~/.agents/skills/`），文件夹之间**零交叉引用**。
-- **零第三方依赖**：100% 仅依赖 Python 3.9+ 标准库（内置 `sqlite3` FTS5、`ast`、`hashlib`、`html.parser`、`subprocess`），Windows / macOS / Linux 开箱即跑。
-- **全装待机仅占 `360 Tokens`**：每个文件夹的 `SKILL.md` 头信息待机仅占 **`63~83 Tokens`**，彻底告别上下文税。
+[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · [抗淘汰底层架构设计 (中文)](./DESIGN.zh-CN.md) | [Architecture (EN)](./DESIGN.md) · [真实提效实战指南 (中文)](./PLAYBOOK.zh-CN.md) | [Playbook (EN)](./PLAYBOOK.md)
 
 ---
 
-## 5 个独立微基础设施小项目（`skills/*`）
+## 为什么要这样设计仓库？（为什么模型越强它越不会被淘汰？）
 
-点击任一文件夹均可查看其独立的中英文说明文档：
+市面上 95% 的 Agent 开源项目活不过半年，原因只有一个：它们做的是**“思维拐杖”**（角色扮演提示词、步骤清单模板、重型编排外壳、绑卡向量库）——只要 `GPT-6`、`Grok-5`、`Claude-5`、`Gemini-4` 升级一轮后训练权重，这些拐杖就会瞬间沦为负资产。
 
-| 独立小项目文件夹 | 解决的核心卡点 | Coding Agent 真实提效 | 个人助手 Agent 真实提效 | 待机开销 |
-| :--- | :--- | :--- | :--- | ---: |
-| **[`skills/sieve/`](./skills/sieve/README.zh-CN.md)**<br>([EN](./skills/sieve/README.md)) | 长日志/JSON/网页灌爆上下文（**Context Rot**），传统代理裁剪又会丢关键报错行 | `pytest`/`cargo`/CI 日志压减 **98.8%**；需要细节直接 `peek <id>` 毫秒级无损回放，免重跑慢测试 | 400 条 API JSON 压减 **99.6%**、噪音网页 HTML 压减 **98.4%**，支持 `--json-path` / 行号精查 | `83 tok` |
-| **[`skills/baton/`](./skills/baton/README.zh-CN.md)**<br>([EN](./skills/baton/README.md)) | 自动压缩（**Compaction**）后失忆变傻，或切换终端/Agent/Worktree 丢状态 | 在 Claude Code ↔ Codex ↔ Grok 间无损传递已验证事实、Git 状态与**严禁重踩的死胡同（`DO NOT RETRY`）** | 跨天推进个人调研、比价与复杂事务待办，压缩后 `<400 Tokens` 满血恢复（零云端、零二次烧 Token） | `70 tok` |
-| **[`skills/recall/`](./skills/recall/README.zh-CN.md)**<br>([EN](./skills/recall/README.md)) | 记忆失灵本质是**检索失灵**；把 200 条规则堆进 `AGENTS.md` 每轮白烧几千 Token | 标准库 `sqlite3` FTS5 + 路径通配符（碰 `src/auth/*` 自动注入对应 `~40 tok` 避坑铁律，`<5ms`） | 原生中英混合分词 BM25 检索，`<5ms` 按报销、客户、服务器、周报精准唤醒个人 SOP | `71 tok` |
-| **[`skills/guard/`](./skills/guard/README.zh-CN.md)**<br>([EN](./skills/guard/README.md)) | 检查未过仍**谎报“已完成”**（普通 `exit 1` 拦不住！）、原地死循环烧钱、密钥外泄 | 原生 **`exit 2`** 完工真相门、连续 3 次同报错指纹死循环自动熔断、拦截 `git push --force` | 事前拦截 API Key/私钥泄露、`rm -rf` 误删与未经确认的批量邮件/Webhook 外发事故 | `63 tok` |
-| **[`skills/atlas/`](./skills/atlas/README.zh-CN.md)**<br>([EN](./skills/atlas/README.md)) | 冷启动盲读全仓烧掉数万 Token，或被陈旧 `TODO` 带偏多耗 **77% Token** | `0.08s` 提取代码仓 AST 类/函数签名、高引用核心枢纽与 **`>90天` 陈旧 TODO 诱饵预警** | `<800 Tokens` 秒级生成大型个人 Markdown 笔记库、资料夹目录分布与 `H1/H2` 标题大纲 | `73 tok` |
+**`agent-primitives`** 完全从本机 **`69,953` 次真实 CLI 工具调用轨迹**（覆盖 `Grok Build CLI`、`OpenAI Codex CLI`、`Google Antigravity CLI`、`Claude Code`）的实证瓶颈倒推设计。无论未来基座模型智商涨到多高，自回归 Token 流与真实操作系统之间永远横亘着**四道不可靠涨参数消除的物理鸿沟**：
+
+1. **外部环境高熵噪音 vs. `O(N)` 上下文窗口物理定律** — `170 KB` 测试日志、`400` 条 API JSON 或 `20` 个未被引用的死模块一旦灌入上下文，必然拖慢首字延迟、稀释注意力，并在后续每一轮重复计费。
+2. **自然语言“脑补运行” vs. 真实内存堆与类型边界** — 让模型在文字里空想浅拷贝嵌套字典共享、原地修改异常未回滚、`None`/`bool`/`int`（如 `True == 1`）缓存碰撞，单题动辄空烧 `3.5万~5.5万` 推理 Token（耗时 `11~19 分钟`）；而手写临时 `python -c` 又在本机实测触发了 `2,716` 次试探与 `177` 次引号转义/`ImportError` 崩溃。
+3. **BPE Token 生成流 vs. 字节/AST 级精确文件事务** — 修改几行导致行号偏移后被迫反复重读同一文件（Antigravity 实测同文件重复读取率高达 **`50.1%`**），外加 CRLF 补丁失配（本机审计 `528` 次）与 Windows `cp936`/UTF-8 编码报错（`160` 次）。
+4. **自动压缩失忆与自我汇报偏差** — `/compact` 会抹掉“哪条路已经试错失败”的负向约束，纯文字劝说也永远替代不了 **`exit 2`** 物理门禁拦截。
+
+**核心设计准则**：**一个子文件夹 = 一个完全独立、零第三方依赖的确定性底层原语**（`cp -r skills/probe ~/.agents/skills/` 拷走单目录即用）。100% 仅依赖 Python 3.9+ 标准库（`0` pip 安装、`0` 后台守护进程、`0` 云端 API Key，**7 个文件夹全装待机开销合计仅 `492 Tokens`**）。就像更聪明的程序员不会淘汰 `git`、`strace` 和 `sqlite` 一样，**基座模型越强，调用确定性原语就越准、越快**。
 
 ---
 
-## 我们应该怎么做，才能真实为两类 Agent 提效？
+## 第 0 步：先用 `audit/` 测出你本机 Agent 的真实浪费（零上传）
 
-> 完整各客户端接入配置、Hook JSON 与分场景 SOP 详见：**[PLAYBOOK.zh-CN.md（真实提效实战指南）](./PLAYBOOK.zh-CN.md)** · **[PLAYBOOK.md (English)](./PLAYBOOK.md)**
-
-要让这套工具在每天真实干活时产生复利，而不是沦为摆设，只需卡住 **5 个关键动作点**：
-
-### 1. 60 秒按需安装与生成配置（`install.py`）
+安装任何工具前，先用仓库自带的**纯本地零联网审计器**扫描你机器上的 `~/.codex`、`~/.claude`、`~/.grok`、`~/.gemini/antigravity-cli` 历史日志：
 
 ```bash
-# 自检本机 Python 3.9+ 与内置 sqlite3 FTS5
+python audit/audit_sessions.py
+```
+
+本机工作站实测输出（扫描最近 `178` 个真实会话、**`69,953` 次工具调用**，`0` 字节外发）：
+- **命中 `skills/probe`**：捕获 `2,716` 次手写 `python -c` 临时试探、`106` 次 `ImportError`/`sys.path` 报错、`71` 次 Shell 引号转义崩溃；
+- **命中 `skills/splice`**：捕获 `679` 次同文件重复重读、`3,918` 次手工命令行切片、`528` 次补丁失配、`160` 次 UTF-8/CP936 编码崩溃；
+- **命中 `skills/sieve`**：捕获 `17,110` 次 `>8 KB` 巨型工具输出、`171` 次超长截断溢出；
+- **命中 `skills/atlas`**：捕获 `2,994` 次宽泛目录/全文盲搜；
+- **命中 `skills/guard + baton`**：捕获 `26` 轮完全相同的报错死循环重试。
+
+---
+
+## 7 个独立微基础设施：严丝合缝映射 Agent 真实 5 步执行闭环
+
+```text
+[audit/audit_sessions.py] ──► 先量化本机真实摩擦损耗（100% 离线）
+  ├─► 阶段 1：认路与精准唤起 ──► skills/atlas/  +  skills/recall/
+  ├─► 阶段 2：切片与因果诊断 ──► skills/probe/   (slice · run · diff)
+  ├─► 阶段 3：外科手术式落盘 ──► skills/splice/  (view · apply · check)
+  ├─► 阶段 4：观测流无损降噪 ──► skills/sieve/   (run · pipe · peek)
+  └─► 阶段 5：门禁与跨轮接力 ──► skills/guard/  +  skills/baton/
+```
+
+| 独立小项目文件夹 | 解决的物理边界瓶颈 | Coding Agent 真实提效 | 个人助手 Agent 真实提效 | 待机开销 |
+| :--- | :--- | :--- | :--- | ---: |
+| **[`skills/atlas/`](./skills/atlas/README.zh-CN.md)**<br>([EN](./skills/atlas/README.md)) | **冷启动盲摸全仓** + 被陈旧 `TODO` 诱饵多耗 `77%` Token | `~20ms` 提取 AST 类/函数签名、高引用核心枢纽与 **`>90天` 陈旧 TODO 陷阱预警** | `<800 Tokens` 秒级生成大型个人 Markdown 知识库目录分布与 `H1/H2` 标题树 | `73 tok` |
+| **[`skills/recall/`](./skills/recall/README.zh-CN.md)**<br>([EN](./skills/recall/README.md)) | **`AGENTS.md` / `MEMORY.md` 静态肥胖税**每轮白烧几千 Token | `<4ms` 标准库 `sqlite3` FTS5/BM25 + 路径通配符（碰 `src/auth/*` 只注入 `~40 tok` 铁律） | 原生中英双栖混合检索，`<4ms` 按报销、合同、客户、服务器精准唤醒个人 SOP | `71 tok` |
+| **[`skills/probe/`](./skills/probe/README.zh-CN.md)**<br>([EN](./skills/probe/README.md)) | **误读死代码、5 万 Token 文字脑补内存运行态**与 `python -c` 崩溃 | `slice` 秒级剪除死模块（剪除率 **80%**）；`run --stdin` 自动抓出 `[ALIAS HAZARD]`、`[IN-PLACE MUTATION]` 与 `[STATE NO-OP]`；`diff` 测边界碰撞 | 对个人数据清洗、财务对账、格式转换脚本预跑 `diff`/`run`，在批处理前自动揪出空值与精度越界 | `64 tok` |
+| **[`skills/splice/`](./skills/splice/README.zh-CN.md)**<br>([EN](./skills/splice/README.md)) | **`50.1%` 同文件重复重读**、CRLF 失配与 Windows 编码崩溃 | `view --symbol Cls.fn`（省 **94.4%** Token）；`apply` 强制 UTF-8/保留 CRLF/语法预检**原子多文件回滚补丁** + 自动清 `.pyc`；`<15ms` `check` | `view --heading` 精读长手册指定章节；`apply` 原子更新长篇笔记与 JSON 配置，杜绝乱码写坏 | `68 tok` |
+| **[`skills/sieve/`](./skills/sieve/README.zh-CN.md)**<br>([EN](./skills/sieve/README.md)) | **长日志/大 JSON/网页灌爆上下文（Context Rot）** | `pytest`/`cargo`/CI 日志压减 **98.8%**；需要细节直接 `peek <id>` 毫秒级无损回放，免重跑慢测试 | 400 条 API JSON 压减 **99.6%**、噪音网页 HTML 压减 **98.4%**，支持 `--json-path` 精查 | `83 tok` |
+| **[`skills/guard/`](./skills/guard/README.zh-CN.md)**<br>([EN](./skills/guard/README.md)) | **未过检虚报“已完成”**（`exit 1` 拦不住！）、死循环与密钥外泄 | 原生 **`exit 2`** 完工真相门、连续 3 次同错死循环自动熔断、拦截 `git push --force` | 事前硬拦截 API Key 外泄、`rm -rf` 误删与未经确认的批量邮件/Webhook 外发事故 | `63 tok` |
+| **[`skills/baton/`](./skills/baton/README.zh-CN.md)**<br>([EN](./skills/baton/README.md)) | **自动压缩失忆**与跨终端/跨 Agent 丢失试错结论 | 在 Claude ↔ Codex ↔ Grok ↔ Antigravity 间无损传递硬事实、Git 状态与 **`DO NOT RETRY` 死胡同** | 跨天推进深度调研、采购比价与长线待办，压缩后 `<400 Tokens` 满血恢复 | `70 tok` |
+
+---
+
+## 三大主流 CLI 实机受控 A/B 对照实测（100% 真实轨迹，零编造）
+
+我们在本机对 **Grok Build CLI (`1.0.77`, `grok-4.7`)**、**Google Antigravity CLI (`1.5.8`)** 与 **OpenAI Codex CLI (`0.167.0`, `gpt-6-astra`)** 进行了同题受控 A/B 实测（测试仓均包含大量未引用干扰模块与复合隐蔽缺陷：`Task B: rulelang` 25 文件规则编译器/优化器/缓存 5 重缺陷；`Task A: fluxpipe` 34 文件 Webhook 投递引擎 6 重别名/单位/TTL 缺陷），统一由外部隐藏测试集（Oracle）独立判分：
+
+| 实测 CLI 与任务 | 对照模式 | 墙钟耗时 / 工具步数 | 内部推理/思维 Token | 单轮最高思维尖峰 | 总吞吐 Token（含缓存） | 隐藏 Oracle 得分 |
+| :--- | :--- | ---: | ---: | ---: | ---: | :---: |
+| **Grok CLI `1.0.77`** (`grok-4.7`) · *Task B (`rulelang`)* | 原生基线 | `693.1s` (`23` 步, `8` 次 `search_replace`) | `36,013 tok` | `14,285 tok` | `418,542 tok` (`$0.59`) | `5/5` |
+| **Grok CLI `1.0.77`** (`grok-4.7`) · *Task B (`rulelang`)* | **`+ probe + splice`** | **`352.6s` (-49.1% 提速近一倍)** (`0` 次 `search_replace`) | **`12,477 tok` (-65.4%)** | **`4,302 tok` (-69.9%)** | `522,141 tok` (**`$0.54`, -7.3%**) | **`5/5`** |
+| **Antigravity CLI `1.5.8`** (`agy`) · *Task B (`rulelang`)* | 原生基线 | `41` 工具步 *(现场发生 `python -c` 引号崩溃)* | `50,680 tok` | — | `948,334 gross` (`401,064` net) | `5/5` |
+| **Antigravity CLI `1.5.8`** (`agy`) · *Task B (`rulelang`)* | **`+ probe + splice`** | **`24` 工具步 (-41.5%)** *(零转义崩溃)* | **`29,449 tok` (-41.9%)** | — | **`442,327 gross` (-53.4% 净省50万)** | **`5/5`** |
+| **Codex CLI `0.167.0`** (`gpt-6-astra`) · *Task B (`rulelang`)* | 原生基线 | `7` 条命令 *(需额外一轮手删 `__pycache__`)* | `96 tok` | — | `180,757 tok` | `5/5` |
+| **Codex CLI `0.167.0`** (`gpt-6-astra`) · *Task B (`rulelang`)* | **`+ probe + splice`** | **`6` 条命令 (-14.3%)** *(自动清 `.pyc`)* | **`53 tok` (-44.8%)** | — | **`174,709 tok` (-3.3%)** | **`5/5`** |
+| **Grok CLI `1.0.77`** (`grok-4.7`) · *Task A (`fluxpipe`)* | 原生 → **`+ probe + splice`** | `40` → **`31` 步 (-22.5%)** (`13` → `0` `search_replace`) | `55,398` → **`41,499` (-25.1%)** | `24,700` → **`10,039` (-59.4%)** | `1.033M` → `1.050M` *(首次读取技能文档持平)* | **`6/6` → `6/6`** |
+
+> **诚实工程结论**：当面对需要跨文件追踪状态/引用/语义边界的任务时，`probe + splice` 能为 `Grok` 砍掉 **49.1% 耗时与 65.4% 推理 Token**，为 `Antigravity` 砍掉 **53.4% 总吞吐 Token（单题立省 50.6 万 Token）与 41.5% 工具步数**；而在极快模型（如 `Codex` 8 步速通局）首次现场读 `SKILL.md` 时会多花 1 条读取命令（`8 → 9` 步），通过 `install.py` 预装为全局技能即可彻底摊薄首次发现成本。
+
+---
+
+## 可复现确定性微基准实测（含诚实负对照）
+
+本机运行 `python bench/run_bench.py` 即可复现 [`bench/results.json`](./bench/results.json)（Python 3.12，固定种子 `20261115`，零外部包）：
+
+| 基础设施与测试负载 | 原始体积 / 基线 | 接入原语后 | 缩减 / 提效幅度 | 本机延迟 | 保真度与确定性保障 |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| **`probe`** · 25 模块包静态剪枝 + 动态追踪 | `25` 个源码文件 | `3` 个活跃文件（剪除 `20` 个死文件） | **-80.0% 无关模块** | `18.8 ms` / `12.0 ms` | 自动捕获 `2` 处堆别名、`1` 处原地污染、`1` 处状态空操作 |
+| **`splice`** · 30 方法 CRLF 模块精读 + 原子补丁 | `1,376 tok` 读全文件 | `77 tok` 精读目标方法 | **-94.4% 读取开销** | `1.5 ms` / `4.0 ms` | 严格保留 CRLF 与 UTF-8 中文头；语法报错 100% 字节级回滚 |
+| **`sieve`** · 2,500 行 CI/pytest 报错日志 | `172,075 B` (`~43,019 tok`) | `2,080 B` (`~520 tok`) | **-98.8%** | `23.7 ms` | 100% 异常栈保留 + 无损 `peek` |
+| **`sieve`** · 400 条记录 API JSON 响应 | `107,887 B` (`~26,972 tok`) | `423 B` (`~106 tok`) | **-99.6%** | `3.0 ms` | 顶层结构与告警完整保留 + `--json-path` 精查 |
+| **`sieve`** · 含大量 JS/CSS 噪音的网页 HTML | `48,160 B` (`~12,040 tok`) | `780 B` (`~195 tok`) | **-98.4%** | `8.5 ms` | 标题、H1–H3 大纲与正文核心完整保留 |
+| **`sieve`** · `<1.2 KB` 短输出 *(诚实负对照)* | `69 B` (`~18 tok`) | `117 B` (`~30 tok`) | **0.0%** *(原样直通)* | `2.7 ms` | 短输出不强行摘要，杜绝形式主义负优化 |
+| **`recall`** · 200 条中英双栖规则库检索 | `6,380 tok` *(全量塞入)* | `39.9 tok` *(Top-2 注入)* | **-99.4%** | `4.0 ms` | **20/20 (100%)** Top-1 命中率 |
+| **`atlas`** · 64 模块 SDK 代码仓 | `42,710 tok` *(全量读取)* | `446 tok` *(结构地图)* | **-99.0%** | `19.3 ms` | AST 类/函数签名、核心枢纽与入口完整提取 |
+
+---
+
+## 60 秒按需安装与接入
+
+```bash
+# 0. 先离线扫描你本机 CLI 会话的真实痛点
+python audit/audit_sessions.py
+
+# 1. 自检 Python 3.9+ 与内置 sqlite3 FTS5
 python install.py --doctor
 
-# 一键安装全部 5 个文件夹（若只需某几个，加 --only sieve,baton,guard 即可）：
+# 2. 一键安装全部 7 个文件夹（或加 --only probe,splice 只装子集）：
 python install.py --agent agents --print-agents-md   # ~/.agents/skills (Antigravity / Codex / Cursor / OpenCode)
 python install.py --agent claude --print-hooks       # ~/.claude/skills 并打印可直接粘贴的 Hook JSON
 python install.py --agent grok                       # ~/.grok/skills   (Grok Build CLI)
 python install.py --agent openclaw                   # ~/.openclaw/skills (OpenClaw 个人助手)
 python install.py --agent hermes                     # ~/.hermes/skills (Hermes 助手)
-
-# 也支持开放 Agent Skills CLI 按需单装某一个文件夹：
-npx skills add xgbtxy/agent-primitives --skill sieve
 ```
-
-### 2. 日常真实提效五步闭环（Coding Agent + 个人助手通用）
-
-1. **开局先绘地图，拒绝盲读（`atlas`）**：进陌生代码仓或大型个人文档库，第一步先跑 `python skills/atlas/scripts/atlas.py map .`（`<0.1s` 输出 `<800 Tokens`），直奔核心文件并无视 `>90 天` 陈旧 TODO 诱饵，省掉开局十几轮盲目 `find`/`grep`。
-2. **`AGENTS.md` 砍到 60 行以内，细分经验迁入 `recall`**：全局文件只留每轮必守的 5~10 条铁律；把特定目录的研发坑点、特定客户/报销/运维的个人 SOP 全部用 `recall.py add` 存起来，干活前 `recall.py match` 用 `3.7 ms` 精准注入 `~40 Tokens`，**踩过一次的坑永不重犯**。
-3. **凡是可能超过 `2 KB` 的输出一律过 `sieve`**：跑测试、看 CI、抓网页、调长 JSON 接口统一走 `sieve.py run -- <cmd>` 或管道 `| python sieve.py pipe`；需要看某处报错栈或某条 JSON 明细时，用 `sieve.py peek <id> --lines / --grep / --json-path` 毫秒级无损调取，绝不重跑慢命令。
-4. **把安全与验收交给 `exit 2` 硬门禁（`guard`）**：挂载 `guard.py shield` 事前拦截密钥外泄与高危命令；棘手调试用 `guard.py run --max-repeats 3` 自动掐断原地死循环；`Stop` Hook 挂载 `guard.py stop-gate`，测试没过直接 `exit 2` 打回重修。
-5. **压缩前与切换客户端前传好接力棒（`baton`）**：挂载 `PreCompact` 自动执行 `baton.py checkpoint`，每次试错失败立刻 `baton.py deadend` 记下死胡同；无论是自动压缩后还是从 Claude Code 切到 Codex / Antigravity / OpenClaw，一句 `baton.py resume`（`<400 Tokens`）无缝续接。
-
-### 3. 诚实反膨胀铁律（什么时候**不要**用）
-
-- **已知极短的命令别套 `sieve`**（如 `pwd`、`git status -s`、读 30 行小配置）——`sieve` 只用于可能产生 `>2 KB` 噪音的命令或接口。
-- **每轮必用的全局规则别塞 `recall`**，低频条件触发的规则也别塞 `AGENTS.md`——两者各司其职才最省 Token。
-- **`baton` 只记硬事实与死胡同，绝不塞聊天流水账**——严控 `<400 Tokens` 才能保证压缩后唤醒即巅峰。
 
 ---
 
-## 可复现真实基准实测（含诚实负对照）
+## 仓库目录结构与测试校验
 
-本机运行 `python bench/run_bench.py` 即可复现 [`bench/results.json`](./bench/results.json)（Python 3.12，固定随机种子 `20261115`，零第三方包）：
+```text
+agent-primitives/
+├── README.md / README.zh-CN.md      # 默认英文首页 + 完整中文首页（含实机 A/B 实测数据）
+├── DESIGN.md / DESIGN.zh-CN.md      # 抗淘汰四道物理边界架构与新原语准入四铁律
+├── PLAYBOOK.md / PLAYBOOK.zh-CN.md  # Coding Agent 与个人助手分场景接入实战指南
+├── audit/audit_sessions.py          # 本地零云端会话病理审计器（支持 Codex/Claude/Grok/AGY）
+├── install.py                       # 零依赖按需安装器、Hook 生成器与环境自检器
+├── skills/                          # 一个子文件夹 = 一个独立零依赖微基础设施
+│   ├── atlas/                       # 阶段 1：亚秒级 AST 与知识库结构地图 + >90天陈旧 TODO 雷达
+│   ├── recall/                      # 阶段 1：<4ms SQLite FTS5/BM25 中英双栖触发式微记忆
+│   ├── probe/                       # 阶段 2：静态可达性切片、堆别名/原地篡改显微镜与差分预言机
+│   ├── splice/                      # 阶段 3：AST/Markdown 符号精读与 UTF-8/CRLF 原子回滚补丁器
+│   ├── sieve/                       # 阶段 4：无损输出降噪压缩器与本地 FTS5 黑匣子
+│   ├── guard/                       # 阶段 5：Exit-2 完工真相门、3 次同错死循环熔断与密钥护盾
+│   └── baton/                       # 阶段 5：抗压缩状态胶囊与跨 Agent 死胡同接力棒
+├── bench/run_bench.py               # 确定性基准测试套件（含诚实负对照）
+└── tests/test_primitives.py         # 10 组单目录物理隔离、原子回滚、编码与端到端单元测试
+```
 
-| 基础设施与测试负载 | 原始输入体积 | 实际注入上下文 | 体积缩减率 | 本机耗时 | 保真度 / 召回准确率 |
-| :--- | ---: | ---: | ---: | ---: | :--- |
-| **`sieve`** · 2,500 行 CI/pytest 报错日志 | `172,075 B` (`~43,019 tok`) | `2,080 B` (`~520 tok`) | **-98.8%** | `23.9 ms` | 100% 异常栈保留 + 无损 `peek` |
-| **`sieve`** · 400 条记录 API JSON 响应 | `107,887 B` (`~26,972 tok`) | `423 B` (`~106 tok`) | **-99.6%** | `2.7 ms` | 顶层结构与告警完整保留 |
-| **`sieve`** · 含大量 JS/CSS 噪音的网页 HTML | `48,160 B` (`~12,040 tok`) | `780 B` (`~195 tok`) | **-98.4%** | `13.5 ms` | 标题、H1–H3 大纲与正文核心完整保留 |
-| **`sieve`** · `<1.2 KB` 短输出 *(诚实负对照)* | `69 B` (`~18 tok`) | `117 B` (`~30 tok`) | **0.0%** *(原样直通)* | `2.0 ms` | 短输出不强行摘要，避免负优化 |
-| **`recall`** · 200 条中英双栖规则库检索 | `6,380 tok` *(全量塞入)* | `39.9 tok` *(Top-2 注入)* | **-99.4%** | `3.7 ms` | **20/20 (100%)** Top-1 命中率 |
-| **`atlas`** · 64 模块 SDK 代码仓（`bench/run_bench.py`） | `42,710 tok` *(全量读取)* | `446 tok` *(结构地图)* | **-99.0%** | `22.5 ms` | AST 类/函数签名、核心枢纽与入口完整提取 |
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## 开源协议
 

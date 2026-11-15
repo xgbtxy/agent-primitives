@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SKILLS_DIR = ROOT / "skills"
-ALL_PRIMITIVES = ("sieve", "baton", "recall", "guard", "atlas")
+ALL_PRIMITIVES = ("sieve", "baton", "recall", "guard", "atlas", "probe", "splice")
 
 AGENT_TARGETS: dict[str, str] = {
     "agents": "~/.agents/skills",       # Universal Agent Skills (Antigravity, Codex, OpenCode, Cursor)
@@ -78,10 +78,12 @@ def render_agents_md_snippet(dest_skills_dir: Path) -> str:
     base = _posix_cmd_path(dest_skills_dir)
     return f"""## Runtime Efficiency Primitives (Zero-Bloat Protocol)
 1. **Cold Start (`atlas`)**: Before running broad `find`/`grep` in an unfamiliar repo or vault, run `python "{base}/atlas/scripts/atlas.py" map .` (<800 tok). Ignore stale TODO traps unless asked.
-2. **Targeted Memory (`recall`)**: Before editing tricky subsystems or executing recurring personal SOPs, query `python "{base}/recall/scripts/recall.py" match --query "<task>" --files "<paths>"`. Store new reusable lessons with `recall.py add`.
-3. **Noisy Outputs (`sieve`)**: Wrap commands/scrapes/APIs that may emit >2 KB via `python "{base}/sieve/scripts/sieve.py" run -- <cmd>` (or pipe to `sieve.py pipe`). Inspect details losslessly via `sieve.py peek <id> --lines/--grep`.
-4. **Anti-Loop & Truth Gate (`guard`)**: Never repeat an identical failing command >2 times (`guard.py run --max-repeats 3 -- <cmd>`). Before declaring completion, verify via `python "{base}/guard/scripts/guard.py" stop-gate`.
-5. **Compaction & Handoff (`baton`)**: Record verified facts (`baton.py fact`) and falsified hypotheses (`baton.py deadend`) during multi-step work; run `baton.py resume` immediately after context compaction or session handoff.
+2. **Causal Reachability & Runtime Microscope (`probe`)**: Before hunting across multi-file codebases or mentally simulating state/aliasing in prose, run `python "{base}/probe/scripts/probe.py" slice . --entry <pkg>` to prune dead modules, `probe.py run --cwd . --focus <pkg> --code "<repro>"` (or `--stdin`) to surface `[ALIAS HAZARD]`, `[IN-PLACE MUTATION]`, and `[STATE NO-OP]`, and `probe.py diff` to verify boundary/cache equivalence.
+3. **Surgical AST Read & Atomic Patch (`splice`)**: Inspect individual symbols/sections via `python "{base}/splice/scripts/splice.py" view <file> --symbol <Class.method>` instead of re-reading whole files; apply multi-file edits atomically with UTF-8/CRLF safety, syntax rollback, and `.pyc` cleanup via `splice.py apply --cwd . --stdin` and verify with `splice.py check .`.
+4. **Targeted Memory (`recall`)**: Before editing tricky subsystems or executing recurring personal SOPs, query `python "{base}/recall/scripts/recall.py" match --query "<task>" --files "<paths>"`. Store new reusable lessons with `recall.py add`.
+5. **Noisy Outputs (`sieve`)**: Wrap commands/scrapes/APIs that may emit >2 KB via `python "{base}/sieve/scripts/sieve.py" run -- <cmd>` (or pipe to `sieve.py pipe`). Inspect details losslessly via `sieve.py peek <id> --lines/--grep`.
+6. **Anti-Loop & Truth Gate (`guard`)**: Never repeat an identical failing command >2 times (`guard.py run --max-repeats 3 -- <cmd>`). Before declaring completion, verify via `python "{base}/guard/scripts/guard.py" stop-gate`.
+7. **Compaction & Handoff (`baton`)**: Record verified facts (`baton.py fact`) and falsified hypotheses (`baton.py deadend`) during multi-step work; run `baton.py resume` immediately after context compaction or session handoff.
 """
 
 
