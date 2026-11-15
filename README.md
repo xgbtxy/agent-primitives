@@ -2,7 +2,7 @@
 
 **One Folder = One Anti-Obsolescence, Zero-Dependency Micro-Infrastructure for Coding Agents & Personal Assistant Agents.**
 
-[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · [Anti-Obsolescence Architecture (EN)](./DESIGN.md) | [抗淘汰底层设计 (中文)](./DESIGN.zh-CN.md) · [Efficiency Playbook (EN)](./PLAYBOOK.md) | [实战指南 (中文)](./PLAYBOOK.zh-CN.md)
+[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[Handbook & Roadmap (EN)](./HANDBOOK.md)** | **[核心理念与演进总手册 (中文)](./HANDBOOK.zh-CN.md)** · [Architecture](./DESIGN.md) · [Playbook](./PLAYBOOK.md)
 
 ---
 
@@ -120,8 +120,10 @@ python install.py --agent hermes                     # ~/.hermes/skills (Hermes 
 ```text
 agent-primitives/
 ├── README.md / README.zh-CN.md      # Default English + full Chinese overview & live A/B data
-├── DESIGN.md / DESIGN.zh-CN.md      # Anti-obsolescence 4-boundary architecture & admission laws
+├── HANDBOOK.md / HANDBOOK.zh-CN.md  # Canonical philosophy, 6 constitutional laws, 5-step iteration loop & roadmap
+├── DESIGN.md / DESIGN.zh-CN.md      # Anti-obsolescence 4-boundary architecture deep dive
 ├── PLAYBOOK.md / PLAYBOOK.zh-CN.md  # Step-by-step wiring for Coding & Personal Assistant Agents
+├── AGENTS.md                        # Slim (<40-line) repo rules for agents iterating on this codebase
 ├── audit/audit_sessions.py          # Local zero-cloud session pathology scanner (Codex/Claude/Grok/AGY)
 ├── install.py                       # Zero-dependency selective installer, hook generator & doctor
 ├── skills/                          # One folder = one standalone zero-dependency mini-project

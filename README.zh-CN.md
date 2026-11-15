@@ -2,7 +2,7 @@
 
 **一个文件夹 = 一个不怕模型迭代淘汰的零依赖微基础设施（Coding Agent 与个人助手 Agent 底层过程提效底座）**
 
-[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · [抗淘汰底层架构设计 (中文)](./DESIGN.zh-CN.md) | [Architecture (EN)](./DESIGN.md) · [真实提效实战指南 (中文)](./PLAYBOOK.zh-CN.md) | [Playbook (EN)](./PLAYBOOK.md)
+[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[核心理念与持续演进总手册 (中文)](./HANDBOOK.zh-CN.md)** | **[Handbook & Roadmap (EN)](./HANDBOOK.md)** · [底层架构](./DESIGN.zh-CN.md) · [实战指南](./PLAYBOOK.zh-CN.md)
 
 ---
 
@@ -120,8 +120,10 @@ python install.py --agent hermes                     # ~/.hermes/skills (Hermes 
 ```text
 agent-primitives/
 ├── README.md / README.zh-CN.md      # 默认英文首页 + 完整中文首页（含实机 A/B 实测数据）
-├── DESIGN.md / DESIGN.zh-CN.md      # 抗淘汰四道物理边界架构与新原语准入四铁律
+├── HANDBOOK.md / HANDBOOK.zh-CN.md  # 核心理念宪章、六条工程红线、五步持续迭代闭环与路线图
+├── DESIGN.md / DESIGN.zh-CN.md      # 抗淘汰四道物理边界底层架构深潜
 ├── PLAYBOOK.md / PLAYBOOK.zh-CN.md  # Coding Agent 与个人助手分场景接入实战指南
+├── AGENTS.md                        # 极简（<40行）仓内自治守则，供后续 AI 迭代本仓时自动遵守
 ├── audit/audit_sessions.py          # 本地零云端会话病理审计器（支持 Codex/Claude/Grok/AGY）
 ├── install.py                       # 零依赖按需安装器、Hook 生成器与环境自检器
 ├── skills/                          # 一个子文件夹 = 一个独立零依赖微基础设施
