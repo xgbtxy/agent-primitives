@@ -1,0 +1,70 @@
+{
+  "generated_at": "2026-11-15T05:44:58Z",
+  "python_version": "3.12.0",
+  "platform": "win32",
+  "idle_frontmatter_tokens_per_folder": {
+    "atlas": 73,
+    "baton": 70,
+    "guard": 63,
+    "recall": 71,
+    "sieve": 83
+  },
+  "sieve_benchmarks": [
+    {
+      "workload": "sieve: 2,500-line CI/pytest log (Coding Agent)",
+      "raw_bytes": 172075,
+      "out_bytes": 2080,
+      "raw_tokens_est": 43019,
+      "out_tokens_est": 520,
+      "reduction_pct": 98.8,
+      "latency_ms": 24.6,
+      "signal_preserved": true
+    },
+    {
+      "workload": "sieve: 400-record JSON API dump (Personal/Coding Agent)",
+      "raw_bytes": 107887,
+      "out_bytes": 423,
+      "raw_tokens_est": 26972,
+      "out_tokens_est": 106,
+      "reduction_pct": 99.6,
+      "latency_ms": 2.96,
+      "signal_preserved": true
+    },
+    {
+      "workload": "sieve: Noisy HTML page w/ JS+CSS bloat (Personal Agent)",
+      "raw_bytes": 48160,
+      "out_bytes": 780,
+      "raw_tokens_est": 12040,
+      "out_tokens_est": 195,
+      "reduction_pct": 98.4,
+      "latency_ms": 7.78,
+      "signal_preserved": true
+    },
+    {
+      "workload": "sieve: Negative control (<1.2 KB short output passthrough)",
+      "raw_bytes": 69,
+      "out_bytes": 117,
+      "raw_tokens_est": 18,
+      "out_tokens_est": 30,
+      "reduction_pct": 0.0,
+      "latency_ms": 2.27,
+      "signal_preserved": true
+    }
+  ],
+  "recall_benchmark_200_rules": {
+    "vault_rules": 200,
+    "monolithic_agents_md_tokens": 6380,
+    "avg_injected_tokens_top2": 39.9,
+    "token_reduction_pct": 99.4,
+    "top1_recall_accuracy": "20/20 (100%)",
+    "median_query_latency_ms": 4.24
+  },
+  "atlas_real_scan_benchmark": {
+    "scanned_target": "sdk_corpus (64 Python modules)",
+    "scanned_files": 64,
+    "raw_corpus_tokens_est": 42710,
+    "atlas_map_tokens_est": 446,
+    "orientation_reduction_pct": 99.0,
+    "scan_latency_ms": 22.5
+  }
+}
