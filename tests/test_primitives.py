@@ -123,6 +123,57 @@ class TestAgentPrimitives(unittest.TestCase):
             self.assertEqual(r3.returncode, 2)
             self.assertIn("LOOP BREAKER", r3.stderr)
 
+            # 4. Antigravity camelCase Hook JSON (`decision: deny|allow` + `stop-gate` loop guard)
+            agy_bad = run_tool(
+                "guard",
+                ["shield"],
+                env_extra=env,
+                stdin_text=json.dumps({
+                    "hookEventName": "PreToolUse",
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "git push --force origin main"}},
+                }),
+            )
+            self.assertEqual(agy_bad.returncode, 0)
+            self.assertEqual(json.loads(agy_bad.stdout)["decision"], "deny")
+
+            agy_ok = run_tool(
+                "guard",
+                ["shield"],
+                env_extra=env,
+                stdin_text=json.dumps({
+                    "hookEventName": "PreToolUse",
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "python -m unittest"}},
+                }),
+            )
+            self.assertEqual(agy_ok.returncode, 0)
+            self.assertEqual(json.loads(agy_ok.stdout), {"decision": "allow"})
+
+            agy_stop = run_tool(
+                "guard",
+                ["stop-gate"],
+                env_extra=env,
+                stdin_text=json.dumps({
+                    "hookEventName": "Stop",
+                    "terminationReason": "NO_TOOL_CALL",
+                    "continuationActive": True,
+                    "cwd": tmp,
+                }),
+            )
+            self.assertEqual(agy_stop.returncode, 0)
+            self.assertEqual(json.loads(agy_stop.stdout), {"decision": "stop"})
+
+            # 5. Claude Code / Codex snake_case Hook JSON (`exit 2` on unsafe command)
+            cl_bad = run_tool(
+                "guard",
+                ["shield"],
+                env_extra=env,
+                stdin_text=json.dumps({
+                    "hook_event_name": "PreToolUse",
+                    "tool_input": {"command": "git reset --hard HEAD~1"},
+                }),
+            )
+            self.assertEqual(cl_bad.returncode, 2)
+
     def test_atlas_code_and_stale_todo_radar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
@@ -329,7 +380,7 @@ class TestAgentPrimitives(unittest.TestCase):
             grok_log.write_text("\n".join(json.dumps(e) for e in grok_events) + "\n", encoding="utf-8")
 
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "audit" / "audit_sessions.py"), "--home", str(fake_home), "--json"],
+                [sys.executable, str(ROOT / "audit" / "audit_sessions.py"), "--home", str(fake_home), "--compare", "--json"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -342,6 +393,255 @@ class TestAgentPrimitives(unittest.TestCase):
             self.assertIn("probe", rec_names)
             self.assertIn("splice", rec_names)
             self.assertIn("sieve", rec_names)
+
+    def test_probe_loop_dedup_prevents_80kb_spill(self) -> None:
+        """Regression test for live AGY Step-19 82KB truncation spill on loops."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            (p / "loop_mod.py").write_text(
+                "class Box:\n"
+                "    def __init__(self) -> None:\n"
+                "        self.v = 1\n"
+                "    def noop(self, x: int) -> None:\n"
+                "        pass\n"
+                "def clobber(d: dict) -> dict:\n"
+                "    d['n'] += 1\n"
+                "    return {'sub': d['sub']}\n",
+                encoding="utf-8",
+            )
+            tr = run_tool(
+                "probe",
+                [
+                    "run",
+                    "--cwd",
+                    str(p),
+                    "--focus",
+                    "loop_mod",
+                    "--code",
+                    "from loop_mod import Box, clobber\nb=Box()\nfor i in range(200):\n    b.noop(i)\n    clobber({'n': i, 'sub': [1, 2]})\n",
+                ],
+            )
+            self.assertEqual(tr.returncode, 0, tr.stderr)
+            self.assertLess(len(tr.stdout.encode("utf-8")), 3500)
+            self.assertIn("(+199 repeats)", tr.stdout)
+
+    def test_polyglot_ts_go_rust_slice_bundle_and_splice(self) -> None:
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            (p / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
+            src = p / "src"
+            src.mkdir()
+            (src / "math.ts").write_text(
+                "export class Calculator {\n"
+                "  multiply(a: number, b: number): number {\n"
+                "    return a + b;\n"
+                "  }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (src / "dead_legacy.ts").write_text(
+                "export function unusedHelper(): number {\n  return 999;\n}\n",
+                encoding="utf-8",
+            )
+            tests_d = p / "tests"
+            tests_d.mkdir()
+            (tests_d / "math.test.ts").write_text(
+                'import test from "node:test";\n'
+                'import assert from "node:assert/strict";\n'
+                'import { Calculator } from "../src/math.ts";\n'
+                'test("mul", () => { assert.equal(new Calculator().multiply(3, 4), 12); });\n',
+                encoding="utf-8",
+            )
+
+            # 1. Polyglot TS slice + bundle prunes dead_legacy.ts and emits math.ts source
+            sl = run_tool("probe", ["slice", str(p), "--bundle"])
+            self.assertEqual(sl.returncode, 0, sl.stderr)
+            self.assertIn("dead_legacy.ts", sl.stdout)
+            self.assertIn("### src/math.ts", sl.stdout)
+
+            # 2. Multi-file / TS symbol view + replace_symbol + --unlink-spec
+            vw = run_tool("splice", ["view", str(src / "math.ts"), "--symbol", "Calculator.multiply"])
+            self.assertEqual(vw.returncode, 0, vw.stderr)
+            self.assertIn("return a + b;", vw.stdout)
+
+            spec_f = p / "_tmp_edits.json"
+            spec_f.write_text(
+                json.dumps([
+                    {
+                        "path": "src/math.ts",
+                        "op": "replace_symbol",
+                        "symbol": "Calculator.multiply",
+                        "new": "multiply(a: number, b: number): number {\n  return a * b;\n}",
+                    }
+                ]),
+                encoding="utf-8",
+            )
+            ap = run_tool("splice", ["apply", "--cwd", str(p), "--spec", str(spec_f), "--unlink-spec"])
+            self.assertEqual(ap.returncode, 0, ap.stderr)
+            self.assertFalse(spec_f.exists())
+
+            # 3. Rust lifetime `'a` brace parsing in splice replace_symbol
+            rs_f = p / "parser.rs"
+            rs_f.write_text(
+                "pub struct Lexer;\n"
+                "impl Lexer {\n"
+                "    pub fn slice_tok<'a>(&self, s: &'a str) -> &'a str {\n"
+                "        let ch = 'x';\n"
+                "        s\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            vw_rs = run_tool("splice", ["view", str(rs_f), "--symbol", "Lexer.slice_tok"])
+            self.assertEqual(vw_rs.returncode, 0, vw_rs.stderr)
+            self.assertIn("let ch = 'x';", vw_rs.stdout)
+
+            # 4. Static + Node 22 auto-test gate (if node >=22 is present)
+            chk_args = ["check", str(p), "--test"] if shutil.which("node") else ["check", str(p)]
+            chk = run_tool("splice", chk_args)
+            if shutil.which("node"):
+                ver = subprocess.run(["node", "-v"], capture_output=True, text=True).stdout.strip().lstrip("v")
+                if int(ver.split(".")[0]) >= 22:
+                    self.assertEqual(chk.returncode, 0, chk.stdout + chk.stderr)
+                    self.assertIn("tests PASSED", chk.stdout)
+
+    def test_ap_one_command_onboarding_idempotence_and_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "demo_repo"
+            repo.mkdir()
+            (repo / "AGENTS.md").write_text("# Team Rules\nKeep commits small.\n", encoding="utf-8")
+
+            # 1. Run `ap.py init --here` twice (must be idempotent!)
+            for _ in range(2):
+                r = subprocess.run(
+                    [sys.executable, str(ROOT / "ap.py"), "init", "--here", "--dir", str(repo), "--with-hooks"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+            agents_txt = (repo / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertEqual(agents_txt.count("<!-- agent-primitives:start -->"), 1)
+            self.assertIn("Keep commits small.", agents_txt)
+            self.assertTrue((repo / ".agents" / "ap.py").is_file())
+            self.assertTrue((repo / ".claude" / "settings.json").is_file())
+
+            # 2. Local `.agents/ap.py` dispatches cleanly
+            disp = subprocess.run(
+                [sys.executable, str(repo / ".agents" / "ap.py"), "probe", "--help"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(disp.returncode, 0, disp.stderr)
+
+            # 3. Clean `ap.py uninstall --here` preserves original AGENTS.md content
+            u = subprocess.run(
+                [sys.executable, str(ROOT / "ap.py"), "uninstall", "--here", "--dir", str(repo)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(u.returncode, 0, u.stderr)
+            after_txt = (repo / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertNotIn("agent-primitives:start", after_txt)
+            self.assertIn("Keep commits small.", after_txt)
+            self.assertFalse((repo / ".agents").exists())
+
+    def test_ap_stdin_zero_clone_bootstrap_across_codex_pi_agy_claude_grok(self) -> None:
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            tar_path = base / "agent-primitives-main.tar.gz"
+            with tarfile.open(tar_path, "w:gz") as tf:
+                tf.add(ROOT / "ap.py", arcname="agent-primitives-main/ap.py")
+                tf.add(ROOT / "audit", arcname="agent-primitives-main/audit")
+                tf.add(ROOT / "skills", arcname="agent-primitives-main/skills")
+
+            fake_home = base / "home"
+            fake_home.mkdir()
+            # Pre-seed user global GEMINI.md to ensure non-destructive preservation
+            agy_md = fake_home / ".gemini" / "config" / "GEMINI.md"
+            agy_md.parent.mkdir(parents=True, exist_ok=True)
+            agy_md.write_text("# Personal Rules\nNever delete backups.\n", encoding="utf-8")
+
+            work_cwd = base / "blank_cwd"
+            work_cwd.mkdir()
+            ap_src = (ROOT / "ap.py").read_text(encoding="utf-8")
+            env = os.environ.copy()
+            env["AP_SOURCE_ARCHIVE"] = str(tar_path)
+
+            # Simulate `curl .../ap.py | python3 - init -a codex,pi,agy,claude,grok --with-hooks`
+            boot = subprocess.run(
+                [
+                    sys.executable,
+                    "-",
+                    "init",
+                    "-a",
+                    "codex,pi,agy,claude,grok",
+                    "--home",
+                    str(fake_home),
+                    "--with-hooks",
+                ],
+                input=ap_src,
+                cwd=str(work_cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(boot.returncode, 0, boot.stderr)
+
+            # Verify exact per-harness global discovery layouts
+            self.assertTrue((fake_home / ".codex" / "skills" / "probe" / "scripts" / "probe.py").is_file())
+            self.assertTrue((fake_home / ".codex" / "AGENTS.md").is_file())
+            self.assertTrue((fake_home / ".codex" / "hooks.json").is_file())
+
+            self.assertTrue((fake_home / ".pi" / "agent" / "skills" / "splice" / "scripts" / "splice.py").is_file())
+            self.assertTrue((fake_home / ".pi" / "agent" / "AGENTS.md").is_file())
+
+            self.assertTrue((fake_home / ".gemini" / "config" / "skills" / "probe" / "scripts" / "probe.py").is_file())
+            self.assertIn("Never delete backups.", agy_md.read_text(encoding="utf-8"))
+            self.assertIn("agent-primitives:start", agy_md.read_text(encoding="utf-8"))
+            agy_hooks = json.loads((fake_home / ".gemini" / "config" / "hooks.json").read_text(encoding="utf-8"))
+            self.assertEqual(agy_hooks["agent-primitives-guard"]["PreToolUse"][0]["matcher"], "run_command")
+
+            self.assertTrue((fake_home / ".claude" / "skills" / "guard" / "scripts" / "guard.py").is_file())
+            self.assertTrue((fake_home / ".claude" / "CLAUDE.md").is_file())
+            self.assertTrue((fake_home / ".claude" / "settings.json").is_file())
+
+            self.assertTrue((fake_home / ".grok" / "skills" / "probe" / "scripts" / "probe.py").is_file())
+            self.assertTrue((fake_home / ".agents" / "ap.py").is_file())
+
+            # Global `~/.agents/ap.py` works offline for doctor & tool dispatch
+            env_offline = os.environ.copy()
+            env_offline.pop("AP_SOURCE_ARCHIVE", None)
+            doc = subprocess.run(
+                [sys.executable, str(fake_home / ".agents" / "ap.py"), "doctor", "--home", str(fake_home)],
+                cwd=str(work_cwd),
+                env=env_offline,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(doc.returncode, 0, doc.stderr)
+
+            # Clean global uninstall preserves user's personal GEMINI.md content
+            un = subprocess.run(
+                [sys.executable, str(fake_home / ".agents" / "ap.py"), "uninstall", "--home", str(fake_home)],
+                cwd=str(work_cwd),
+                env=env_offline,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(un.returncode, 0, un.stderr)
+            self.assertIn("Never delete backups.", agy_md.read_text(encoding="utf-8"))
+            self.assertNotIn("agent-primitives:start", agy_md.read_text(encoding="utf-8"))
+            self.assertFalse((fake_home / ".pi" / "agent" / "skills" / "splice").exists())
 
     def test_installer_selective_and_doctor(self) -> None:
         doc = subprocess.run(

@@ -20,12 +20,6 @@ python scripts/guard.py run --max-repeats 3 -- pytest tests/test_auth.py
 python scripts/guard.py stop-gate --check "python -m unittest discover -s tests"
 ```
 
-## Hook Wiring Example (`.claude/settings.json` / agent hooks)
+## Hook Wiring (`ap.py init --with-hooks`)
 
-```json
-{
-  "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "python skills/guard/scripts/guard.py stop-gate" }] }]
-  }
-}
-```
+`guard.py` auto-detects both **Claude Code / Codex** snake_case hooks (`exit 2` + `stderr`) and **Google Antigravity** camelCase protojson hooks (`{"decision": "deny"|"allow"}` and `{"decision": "continue"|"stop"}` with `continuationActive` loop protection). Run `python ap.py init --with-hooks` to wire automatically.

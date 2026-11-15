@@ -23,7 +23,8 @@ SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
     "env", "dist", "build", "target", ".tox", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", ".next", ".nuxt", ".sieve", ".baton", ".recall", ".guard",
-    "vendor", "coverage", ".idea", ".vscode",
+    ".probe", ".splice", ".agents", ".claude", ".grok", ".codex", ".cursor",
+    ".openclaw", ".hermes", "vendor", "coverage", ".idea", ".vscode",
 }
 
 CODE_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".java", ".rb", ".sh"}

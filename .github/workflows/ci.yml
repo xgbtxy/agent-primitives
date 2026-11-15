@@ -18,8 +18,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Verify zero-dependency doctor & local session auditor CLI
+      - name: Verify 1-command CLI (ap.py doctor), legacy installer & session auditor
         run: |
+          python ap.py doctor
           python install.py --doctor
           python audit/audit_sessions.py --help
       - name: Run standalone isolation & end-to-end tests (zero pip install)

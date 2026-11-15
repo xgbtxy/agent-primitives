@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import io
 import json
 import os
@@ -296,15 +297,337 @@ def _fmt_func_sig(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return f"def {node.name}({', '.join(args_parts)}){ret} [L{node.lineno}-{end_ln}]"
 
 
-def run_slice(root: Path, entries: list[str], as_json: bool = False) -> int:
+TS_JS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+POLYGLOT_EXTS = TS_JS_EXTS | {".go", ".rs"}
+TS_IMPORT_RE = re.compile(
+    r"""(?:import|export)\s+(?:type\s+)?(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]|require\(\s*['"](\.[^'"]+)['"]\s*\)|import\(\s*['"](\.[^'"]+)['"]\s*\)""",
+    re.MULTILINE,
+)
+GO_MOD_RE = re.compile(r"^\s*module\s+(\S+)", re.MULTILINE)
+GO_IMPORT_BLOCK_RE = re.compile(r"import\s*\((.*?)\)", re.DOTALL)
+GO_IMPORT_SINGLE_RE = re.compile(r'^\s*import\s+(?:[A-Za-z0-9_.]+\s+)?"([^"]+)"', re.MULTILINE)
+RS_MOD_RE = re.compile(r"^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE)
+RS_USE_CRATE_RE = re.compile(r"\b(?:use| crate::)([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+
+
+def _find_brace_end_line(lines: list[str], start_idx: int, ext: str = "") -> int:
+    depth = 0
+    opened = False
+    in_str: str | None = None
+    in_block_comment = False
+    for idx in range(start_idx, len(lines)):
+        ln = lines[idx]
+        i = 0
+        n = len(ln)
+        while i < n:
+            ch = ln[i]
+            nxt = ln[i + 1] if i + 1 < n else ""
+            if in_block_comment:
+                if ch == "*" and nxt == "/":
+                    in_block_comment = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if in_str:
+                if ch == "\\" and not (ext == ".go" and in_str == "`"):
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+                i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                in_block_comment = True
+                i += 2
+                continue
+            if ch == "'" and ext == ".rs":
+                # Distinguish Rust char literal `'x'` / `'\n'` from lifetime `'a`
+                close_q = ln.find("'", i + 1)
+                if close_q != -1 and (close_q - i) <= 10 and " " not in ln[i + 1 : close_q]:
+                    i = close_q + 1
+                    continue
+                i += 1
+                continue
+            if ch in ("'", '"', "`") and not (ch == "`" and ext == ".rs"):
+                in_str = ch
+                i += 1
+                continue
+            if ch == "{":
+                depth += 1
+                opened = True
+            elif ch == "}":
+                depth -= 1
+                if opened and depth <= 0:
+                    return idx + 1
+            i += 1
+        if not opened and idx > start_idx + 4:
+            return start_idx + 1
+        if not opened and ln.rstrip().endswith(";"):
+            return idx + 1
+    return len(lines)
+
+
+def _extract_polyglot_signatures(fpath: Path, text: str) -> list[str]:
+    ext = fpath.suffix.lower()
+    lines = text.splitlines()
+    sigs: list[str] = []
+    if ext in TS_JS_EXTS:
+        decl_re = re.compile(
+            r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:async\s+)?"
+            r"(class|interface|type|enum|function)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
+        )
+        arrow_re = re.compile(
+            r"^\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?\([^)]*\)\s*(?::[^=]+)?=>"
+        )
+        method_re = re.compile(
+            r"^\s*(?:public\s+|private\s+|protected\s+|readonly\s+|static\s+|async\s+|get\s+|set\s+)*"
+            r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^{;]+))?\s*\{"
+        )
+        idx = 0
+        while idx < len(lines):
+            ln = lines[idx]
+            m = decl_re.match(ln)
+            if m:
+                kind, name = m.group(1), m.group(2)
+                end_ln = _find_brace_end_line(lines, idx, ext)
+                hdr = ln.strip().rstrip("{").strip()
+                if len(hdr) > 96:
+                    hdr = hdr[:93] + "..."
+                if kind == "class":
+                    m_sigs: list[str] = []
+                    for sub_i in range(idx + 1, min(end_ln, len(lines))):
+                        mm = method_re.match(lines[sub_i])
+                        if mm and mm.group(1) not in ("if", "for", "while", "switch", "catch"):
+                            m_end = _find_brace_end_line(lines, sub_i, ext)
+                            ret_s = f": {mm.group(3).strip()}" if mm.group(3) else ""
+                            m_sigs.append(f"  {mm.group(1)}({mm.group(2).strip()}){ret_s} [L{sub_i + 1}-{m_end}]")
+                    sigs.append("\n".join([f"{hdr} [L{idx + 1}-{end_ln}]:", *m_sigs[:12]]) if m_sigs else f"{hdr} [L{idx + 1}-{end_ln}]")
+                else:
+                    sigs.append(f"{hdr} [L{idx + 1}-{end_ln}]")
+                idx = max(idx + 1, end_ln if kind == "class" else idx + 1)
+                continue
+            ma = arrow_re.match(ln)
+            if ma:
+                end_ln = _find_brace_end_line(lines, idx, ext)
+                sigs.append(f"const {ma.group(1)}(...) => [L{idx + 1}-{end_ln}]")
+            idx += 1
+    elif ext == ".go":
+        go_re = re.compile(r"^\s*(func|type)\s+(.+?)\s*(?:\{|$)")
+        for idx, ln in enumerate(lines):
+            m = go_re.match(ln)
+            if m:
+                end_ln = _find_brace_end_line(lines, idx, ext) if "{" in ln else idx + 1
+                sigs.append(f"{m.group(1)} {m.group(2).strip()} [L{idx + 1}-{end_ln}]")
+    elif ext == ".rs":
+        rs_re = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|impl)\s+([^{;]+)")
+        for idx, ln in enumerate(lines):
+            m = rs_re.match(ln)
+            if m:
+                end_ln = _find_brace_end_line(lines, idx, ext) if "{" in ln else idx + 1
+                sigs.append(f"{m.group(1)} {m.group(2).strip()} [L{idx + 1}-{end_ln}]")
+    return sigs[:20]
+
+
+def _resolve_ts_import(from_file: Path, spec: str, all_set: set[Path]) -> Path | None:
+    base = (from_file.parent / spec).resolve()
+    cands = [base]
+    if base.suffix in (".js", ".mjs", ".cjs"):
+        stem_p = base.with_suffix("")
+        cands.extend([stem_p.with_suffix(".ts"), stem_p.with_suffix(".tsx"), base])
+    elif not base.suffix:
+        for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
+            cands.append(Path(str(base) + ext))
+        for ext in (".ts", ".tsx", ".js", ".mjs"):
+            cands.append((base / f"index{ext}").resolve())
+    for c in cands:
+        rc = c.resolve()
+        if rc in all_set:
+            return rc
+    return None
+
+
+def _render_bundle_section(root: Path, reachable: list[Path], max_bundle_kb: int) -> list[str]:
+    budget_bytes = max(1, max_bundle_kb) * 1024
+    used = 0
+    sec: list[str] = ["\n## Active Reachable Source Bundle (Skip Separate `read_file` Calls)"]
+    skipped = 0
+
+    def _is_test(rel_s: str) -> bool:
+        low = rel_s.lower()
+        return low.startswith(("tests/", "test/", "__tests__/")) or ".test." in low or ".spec." in low or low.endswith("_test.go")
+
+    # Emit non-test source modules first, then starter tests if budget remains
+    ordered = [f for f in reachable if not _is_test(f.relative_to(root).as_posix())] + [
+        f for f in reachable if _is_test(f.relative_to(root).as_posix())
+    ]
+    for f in ordered:
+        rel_s = f.relative_to(root).as_posix()
+        raw = f.read_text(encoding="utf-8", errors="replace")
+        raw_b = len(raw.encode("utf-8"))
+        if used + raw_b > budget_bytes:
+            skipped += 1
+            continue
+        used += raw_b
+        numbered = "\n".join(f"{i + 1:4d}: {ln}" for i, ln in enumerate(raw.splitlines()))
+        sec.append(f"\n### {rel_s} ({len(raw.splitlines())} lines)\n```\n{numbered}\n```")
+    if skipped:
+        sec.append(f"\n[bundle budget {max_bundle_kb} KB reached — {skipped} additional file(s) omitted; use `splice view` on demand]")
+    return sec
+
+
+def _run_polyglot_slice(root: Path, files: list[Path], entries: list[str], as_json: bool, bundle: bool, max_bundle_kb: int, t0: float) -> int:
+    all_set = set(files)
+    imports_graph: dict[Path, list[Path]] = {f: [] for f in files}
+    signatures: dict[Path, list[str]] = {}
+
+    go_mod_name = ""
+    if (root / "go.mod").is_file():
+        m = GO_MOD_RE.search((root / "go.mod").read_text(encoding="utf-8", errors="replace"))
+        if m:
+            go_mod_name = m.group(1).strip()
+
+    for f in files:
+        txt = f.read_text(encoding="utf-8", errors="replace")
+        signatures[f] = _extract_polyglot_signatures(f, txt)
+        ext = f.suffix.lower()
+        if ext in TS_JS_EXTS:
+            for m in TS_IMPORT_RE.finditer(txt):
+                spec = m.group(1) or m.group(2) or m.group(3)
+                if spec:
+                    tgt = _resolve_ts_import(f, spec, all_set)
+                    if tgt and tgt not in imports_graph[f]:
+                        imports_graph[f].append(tgt)
+        elif ext == ".go" and go_mod_name:
+            specs: list[str] = [m.group(1) for m in GO_IMPORT_SINGLE_RE.finditer(txt)]
+            for blk in GO_IMPORT_BLOCK_RE.finditer(txt):
+                specs.extend(re.findall(r'"([^"]+)"', blk.group(1)))
+            for sp in specs:
+                if sp.startswith(go_mod_name):
+                    sub_rel = sp[len(go_mod_name) :].lstrip("/")
+                    pkg_dir = (root / sub_rel).resolve() if sub_rel else root
+                    for cand in files:
+                        if cand.parent == pkg_dir and not cand.name.endswith("_test.go") and cand != f and cand not in imports_graph[f]:
+                            imports_graph[f].append(cand)
+            # Same-package sibling `.go` files share namespace automatically
+            for sib in files:
+                if sib.parent == f.parent and sib.suffix == ".go" and not sib.name.endswith("_test.go") and sib != f and sib not in imports_graph[f]:
+                    imports_graph[f].append(sib)
+        elif ext == ".rs":
+            mods = set(RS_MOD_RE.findall(txt)) | set(RS_USE_CRATE_RE.findall(txt))
+            for mn in mods:
+                for cand in (f.parent / f"{mn}.rs", f.parent / mn / "mod.rs", root / "src" / f"{mn}.rs", root / "src" / mn / "mod.rs"):
+                    rc = cand.resolve()
+                    if rc in all_set and rc != f and rc not in imports_graph[f]:
+                        imports_graph[f].append(rc)
+
+    seed_files: list[Path] = []
+    for e in entries:
+        cand = (root / e).resolve()
+        if cand.is_file() and cand in all_set:
+            seed_files.append(cand)
+        elif cand.is_dir():
+            for entry_nm in ("index.ts", "index.tsx", "index.js", "main.ts", "mod.rs", "lib.rs", "main.rs", "main.go"):
+                ec = (cand / entry_nm).resolve()
+                if ec in all_set:
+                    seed_files.append(ec)
+            if not seed_files:
+                seed_files.extend(f for f in files if str(f).startswith(str(cand)))
+        else:
+            for f in files:
+                if e in f.relative_to(root).as_posix():
+                    seed_files.append(f)
+
+    if not seed_files:
+        for f in files:
+            rel_s = f.relative_to(root).as_posix()
+            low = rel_s.lower()
+            if (
+                low.startswith(("tests/", "test/", "__tests__/"))
+                or ".test." in low
+                or ".spec." in low
+                or f.name in ("index.ts", "index.js", "main.ts", "server.ts", "app.ts", "main.go", "lib.rs", "main.rs")
+            ):
+                seed_files.append(f)
+        if not seed_files:
+            seed_files = files[:1]
+
+    reachable: list[Path] = []
+    visited: set[Path] = set()
+    queue = list(seed_files)
+    while queue:
+        cur = queue.pop(0)
+        if cur in visited:
+            continue
+        visited.add(cur)
+        reachable.append(cur)
+        for nxt in imports_graph.get(cur, []):
+            if nxt not in visited:
+                queue.append(nxt)
+
+    reachable_set = set(reachable)
+    pruned = [f for f in files if f not in reachable_set and f.stat().st_size > 0]
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    payload = {
+        "root": root.as_posix(),
+        "elapsed_ms": elapsed_ms,
+        "total_py_files": len(files),
+        "total_code_files": len(files),
+        "reachable_count": len(reachable),
+        "pruned_unreferenced_count": len(pruned),
+        "reachable_files": [
+            {
+                "path": f.relative_to(root).as_posix(),
+                "imports": [t.relative_to(root).as_posix() for t in imports_graph.get(f, [])],
+                "signatures": signatures.get(f, []),
+            }
+            for f in reachable
+        ],
+        "pruned_files_sample": [f.relative_to(root).as_posix() for f in pruned[:15]],
+        "cross_file_call_contracts": [],
+    }
+    if as_json:
+        sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+        return 0
+
+    out_lines = [
+        f"[probe slice] {len(reachable)}/{len(files)} source files reachable ({len(pruned)} unreferenced distractor files pruned) in {elapsed_ms} ms",
+    ]
+    if pruned:
+        sample = ", ".join(f.relative_to(root).as_posix() for f in pruned[:8])
+        more = f" (+{len(pruned) - 8} more)" if len(pruned) > 8 else ""
+        out_lines.append(f"[PRUNED DEAD/UNREFERENCED]: {sample}{more} — DO NOT waste turns reading these unless explicitly needed.")
+    out_lines.append("\n## Active Reachable Modules & Signatures")
+    for item in payload["reachable_files"]:
+        out_lines.append(f"- `{item['path']}`" + (f" -> imports {', '.join(item['imports'])}" if item["imports"] else ""))
+        for sig in item["signatures"]:
+            for subline in sig.splitlines():
+                out_lines.append(f"    {subline}")
+    if bundle:
+        out_lines.extend(_render_bundle_section(root, reachable, max_bundle_kb))
+    sys.stdout.write("\n".join(out_lines) + "\n")
+    return 0
+
+
+def run_slice(root: Path, entries: list[str], as_json: bool = False, bundle: bool = False, max_bundle_kb: int = 14) -> int:
     t0 = time.perf_counter()
     root = root.resolve()
     py_files: list[Path] = []
+    poly_files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")]
         for fn in sorted(filenames):
+            p_res = (Path(dirpath) / fn).resolve()
             if fn.endswith(".py"):
-                py_files.append((Path(dirpath) / fn).resolve())
+                py_files.append(p_res)
+            elif p_res.suffix.lower() in POLYGLOT_EXTS and not fn.endswith(".d.ts"):
+                poly_files.append(p_res)
+
+    entry_forces_poly = any(any(e.endswith(ext) for ext in POLYGLOT_EXTS) for e in entries)
+    if (not py_files and poly_files) or entry_forces_poly or (len(poly_files) > len(py_files) and not any(e.endswith(".py") for e in entries)):
+        return _run_polyglot_slice(root, poly_files, entries, as_json, bundle, max_bundle_kb, t0)
 
     mod_to_file: dict[str, Path] = {}
     file_to_mod: dict[Path, str] = {}
@@ -511,6 +834,9 @@ def run_slice(root: Path, entries: list[str], as_json: bool = False) -> int:
         for cc in call_contracts[:25]:
             out_lines.append(f"- {cc}")
 
+    if bundle:
+        out_lines.extend(_render_bundle_section(root, reachable, max_bundle_kb))
+
     sys.stdout.write("\n".join(out_lines) + "\n")
     return 0
 
@@ -525,7 +851,7 @@ def run_trace(
     code: str | None,
     script: str | None,
     unittest_target: str | None,
-    max_calls: int = 80,
+    max_calls: int = 30,
     include_tests: bool = False,
     as_json: bool = False,
 ) -> int:
@@ -540,12 +866,12 @@ def run_trace(
         sys.path.insert(0, str(cwd / "src"))
 
     call_log: list[str] = []
-    alias_hazards: list[str] = []
-    mutation_alerts: list[str] = []
-    noop_alerts: list[str] = []
-    exception_events: list[str] = []
+    total_calls = [0]
+    alias_sites: dict[tuple[str, int, str, str], list[Any]] = {}
+    mutation_sites: dict[tuple[str, int, str, str, bool], list[Any]] = {}
+    noop_sites: dict[tuple[str, int, str], list[Any]] = {}
+    exc_sites: dict[tuple[str, int, str, str], list[Any]] = {}
 
-    seen_alerts: set[str] = set()
     # Maps `id(mutable_subobj) -> "Class.method() return.path"`
     shared_alias_registry: dict[int, str] = {}
     frame_state: dict[int, dict[str, Any]] = {}
@@ -605,9 +931,10 @@ def run_trace(
                 if aname != "self":
                     arg_previews.append(f"{aname}={_short_repr(aval, 44)}")
 
-            call_idx = len(call_log)
+            call_idx = len(call_log) if total_calls[0] < max_calls else -1
+            total_calls[0] += 1
             indent = "  " * min(depth_counter[0], 6)
-            if call_idx < max_calls:
+            if call_idx >= 0:
                 call_log.append(f"{indent}-> {rel}:L{frame.f_lineno} {qual_name}({', '.join(arg_previews)})")
 
             frame_state[id(frame)] = {
@@ -637,10 +964,11 @@ def run_trace(
         if event == "exception":
             exc_type, exc_val, _ = arg
             st["exc"] = f"{exc_type.__name__}: {exc_val}"
-            msg = f"{st['rel']}:L{frame.f_lineno} in {st['qual_name']}: {exc_type.__name__}({exc_val})"
-            if msg not in seen_alerts:
-                seen_alerts.add(msg)
-                exception_events.append(msg)
+            ekey = (st["rel"], frame.f_lineno, st["qual_name"], exc_type.__name__)
+            if ekey in exc_sites:
+                exc_sites[ekey][1] += 1
+            elif len(exc_sites) < 12:
+                exc_sites[ekey] = [f"{st['rel']}:L{frame.f_lineno} in {st['qual_name']}: {exc_type.__name__}({exc_val})", 1]
             return tracer
 
         if event == "return":
@@ -651,13 +979,13 @@ def run_trace(
             rel = st["rel"]
             exc_desc = st["exc"]
 
-            if st["call_idx"] < max_calls:
+            if 0 <= st["call_idx"] < len(call_log):
                 if exc_desc and arg is None:
                     call_log[st["call_idx"]] += f"  !! RAISED {exc_desc}"
                 else:
                     call_log[st["call_idx"]] += f" => {_short_repr(arg, 56)}"
 
-            # A. Detect Shallow-Copy / Shared Mutable Nested Heap Aliasing
+            # A. Detect Shallow-Copy / Shared Mutable Nested Heap Aliasing (deduplicated per call-site)
             if exc_desc is None and arg is not None and fn_name != "__init__":
                 ret_muts = _collect_mutable_subobjects(arg, "return")
                 for aname, aval in st["bound_args"]:
@@ -673,15 +1001,17 @@ def run_trace(
                             shared_paths.append(f"{in_path} <-> {r_path} ({r_type})")
                             shared_alias_registry[oid] = f"{qual}() {r_path}"
                     if shared_paths:
-                        alert = (
-                            f"{rel}:L{st['lineno']} `{qual}()` returned a distinct `{type(arg).__name__}`, "
-                            f"but SHARES mutable nested heap object(s) with input `{aname}`: {', '.join(shared_paths[:4])}"
-                        )
-                        if alert not in seen_alerts:
-                            seen_alerts.add(alert)
-                            alias_hazards.append(alert)
+                        akey = (rel, st["lineno"], qual, aname)
+                        if akey in alias_sites:
+                            alias_sites[akey][1] += 1
+                        elif len(alias_sites) < 12:
+                            alert = (
+                                f"{rel}:L{st['lineno']} `{qual}()` returned a distinct `{type(arg).__name__}`, "
+                                f"but SHARES mutable nested heap object(s) with input `{aname}`: {', '.join(shared_paths[:4])}"
+                            )
+                            alias_sites[akey] = [alert, 1]
 
-            # B. Detect In-Place Argument Mutations (including mutations left behind on exception!)
+            # B. Detect In-Place Argument Mutations (deduplicated per call-site)
             any_mutated = False
             for aname, aval in st["bound_args"]:
                 post_snap = _snapshot(aval)
@@ -692,24 +1022,26 @@ def run_trace(
                         continue
                     if aname == "self" and exc_desc is None:
                         continue  # Normal state transition on `self`
-                    diffs: list[tuple[str, str, str]] = []
-                    _diff_snapshots(pre_snap, post_snap, aname, diffs)
-                    if diffs:
-                        # Check if any mutated nested container was registered in shared_alias_registry
-                        alias_notes: list[str] = []
-                        cur_muts = _collect_mutable_subobjects(aval, aname)
-                        for oid in cur_muts:
-                            if oid in shared_alias_registry:
-                                alias_notes.append(shared_alias_registry[oid])
-                        diff_str = "; ".join(f"{p}: {b} -> {a}" for p, b, a in diffs[:4])
-                        prefix_tag = "[MUTATED ON EXCEPTION] " if exc_desc else ""
-                        alias_suffix = f" [ALSO CORRUPTS ALIASED {alias_notes[0]}!]" if alias_notes else ""
-                        alert = f"{prefix_tag}{rel}:L{st['lineno']} `{qual}()` mutated `{aname}` in-place: {diff_str}{alias_suffix}"
-                        if alert not in seen_alerts:
-                            seen_alerts.add(alert)
-                            mutation_alerts.append(alert)
+                    mkey = (rel, st["lineno"], qual, aname, bool(exc_desc))
+                    if mkey in mutation_sites:
+                        mutation_sites[mkey][1] += 1
+                        continue
+                    if len(mutation_sites) < 12:
+                        diffs: list[tuple[str, str, str]] = []
+                        _diff_snapshots(pre_snap, post_snap, aname, diffs)
+                        if diffs:
+                            alias_notes: list[str] = []
+                            cur_muts = _collect_mutable_subobjects(aval, aname)
+                            for oid in cur_muts:
+                                if oid in shared_alias_registry:
+                                    alias_notes.append(shared_alias_registry[oid])
+                            diff_str = "; ".join(f"{p}: {b} -> {a}" for p, b, a in diffs[:4])
+                            prefix_tag = "[MUTATED ON EXCEPTION] " if exc_desc else ""
+                            alias_suffix = f" [ALSO CORRUPTS ALIASED {alias_notes[0]}!]" if alias_notes else ""
+                            alert = f"{prefix_tag}{rel}:L{st['lineno']} `{qual}()` mutated `{aname}` in-place: {diff_str}{alias_suffix}"
+                            mutation_sites[mkey] = [alert, 1]
 
-            # C. Detect Stateful Void-Method No-Ops (`def rollback/remove/delete/update(...) -> None` leaving `self` unchanged!)
+            # C. Detect Stateful Void-Method No-Ops (deduplicated per call-site)
             if (
                 exc_desc is None
                 and arg is None
@@ -721,13 +1053,15 @@ def run_trace(
                 self_obj = st["bound_args"][0][1]
                 self_dict = getattr(self_obj, "__dict__", None)
                 if isinstance(self_dict, dict) and self_dict:
-                    alert = (
-                        f"{rel}:L{st['lineno']} `{qual}({', '.join(st['arg_previews'])})` returned `None` "
-                        f"with ZERO change to `self`! Current `self` state: {_short_repr(self_obj, 110)}"
-                    )
-                    if alert not in seen_alerts:
-                        seen_alerts.add(alert)
-                        noop_alerts.append(alert)
+                    nkey = (rel, st["lineno"], qual)
+                    if nkey in noop_sites:
+                        noop_sites[nkey][1] += 1
+                    elif len(noop_sites) < 12:
+                        alert = (
+                            f"{rel}:L{st['lineno']} `{qual}({', '.join(st['arg_previews'])})` returned `None` "
+                            f"with ZERO change to `self`! Current `self` state: {_short_repr(self_obj, 110)}"
+                        )
+                        noop_sites[nkey] = [alert, 1]
 
         return tracer
 
@@ -762,16 +1096,31 @@ def run_trace(
     finally:
         sys.settrace(old_trace)
 
+    def _fmt_dedup(d: dict[Any, list[Any]]) -> list[str]:
+        return [f"{msg} (+{cnt - 1} repeats)" if cnt > 1 else msg for msg, cnt in d.values()]
+
+    alias_hazards = _fmt_dedup(alias_sites)
+    mutation_alerts = _fmt_dedup(mutation_sites)
+    noop_alerts = _fmt_dedup(noop_sites)
+    exception_events = _fmt_dedup(exc_sites)
+
+    stdout_full = out_buf.getvalue()
+    if len(stdout_full) > 2000:
+        stdout_bounded = stdout_full[:1000] + f"\n... [{len(stdout_full) - 2000} chars omitted] ...\n" + stdout_full[-1000:]
+    else:
+        stdout_bounded = stdout_full
+
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     payload = {
         "elapsed_ms": elapsed_ms,
+        "total_calls_traced": total_calls[0],
         "exec_error": exec_error,
         "alias_hazards": alias_hazards,
         "mutation_alerts": mutation_alerts,
         "state_noop_alerts": noop_alerts,
         "exceptions_observed": exception_events,
         "call_tree": call_log,
-        "stdout": out_buf.getvalue()[-1200:],
+        "stdout": stdout_bounded,
         "stderr": err_buf.getvalue()[-1200:],
     }
 
@@ -780,7 +1129,7 @@ def run_trace(
         return 0 if exec_error is None else 1
 
     lines = [
-        f"[probe run] Traced {len(call_log)} call(s) in {elapsed_ms} ms | "
+        f"[probe run] Traced {total_calls[0]} call(s) in {elapsed_ms} ms | "
         f"alias_hazards={len(alias_hazards)} | in_place_mutations={len(mutation_alerts)} | state_noops={len(noop_alerts)}"
     ]
     if exec_error:
@@ -802,12 +1151,13 @@ def run_trace(
         for e in exception_events[:10]:
             lines.append(f"- {e}")
     if call_log:
-        lines.append("\n## Causal Call Tree")
+        more_note = f" (first {len(call_log)} of {total_calls[0]})" if total_calls[0] > len(call_log) else ""
+        lines.append(f"\n## Causal Call Tree{more_note}")
         lines.extend(call_log[:max_calls])
-    stdout_txt = out_buf.getvalue().strip()
+    stdout_txt = stdout_bounded.strip()
     if stdout_txt:
         lines.append("\n## Program Output")
-        lines.append(stdout_txt[-800:])
+        lines.append(stdout_txt)
 
     sys.stdout.write("\n".join(lines) + "\n")
     return 0
@@ -1022,9 +1372,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_slice = sub.add_parser("slice", help="Static AST + import reachability slice & cross-file call contracts")
+    p_slice = sub.add_parser("slice", help="Static AST/import reachability slice (Python, TS/JS, Go, Rust) & active bundle")
     p_slice.add_argument("root", nargs="?", default=".", help="Workspace root directory")
     p_slice.add_argument("--entry", action="append", default=[], help="Entrypoint file(s) or module(s) to slice from")
+    p_slice.add_argument("--bundle", action="store_true", help="Include numbered source of active reachable files in 1 shot")
+    p_slice.add_argument("--max-bundle-kb", type=int, default=14, help="Max KB for --bundle source output (default: 14)")
     p_slice.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_run = sub.add_parser("run", help="Trace execution & auto-detect heap aliasing, in-place mutation, and state no-ops")
@@ -1032,10 +1384,11 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--focus", default="", help="Substring filter on traced file paths (e.g. package name)")
     grp = p_run.add_mutually_exclusive_group(required=True)
     grp.add_argument("--code", help="Inline Python snippet to execute under causal microscope")
+    grp.add_argument("--b64", help="Base64-encoded UTF-8 Python snippet (100% shell-quoting immune on all OSes)")
     grp.add_argument("--stdin", action="store_true", help="Read Python snippet from stdin (avoids shell quoting issues)")
     grp.add_argument("--script", help="Python script path to execute")
     grp.add_argument("--unittest", help="Unittest dotted target or 'discover'")
-    p_run.add_argument("--max-calls", type=int, default=80, help="Max call-tree lines to print (default: 80)")
+    p_run.add_argument("--max-calls", type=int, default=30, help="Max call-tree lines to print (default: 30)")
     p_run.add_argument("--include-tests", action="store_true", help="Also trace frames inside tests/ files")
     p_run.add_argument("--json", action="store_true", help="Emit JSON output")
 
@@ -1050,9 +1403,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.cmd == "slice":
-        return run_slice(Path(args.root), args.entry, as_json=args.json)
+        return run_slice(Path(args.root), args.entry, as_json=args.json, bundle=args.bundle, max_bundle_kb=args.max_bundle_kb)
     if args.cmd == "run":
-        snippet = sys.stdin.read() if getattr(args, "stdin", False) else args.code
+        if getattr(args, "stdin", False):
+            snippet = sys.stdin.read()
+        elif getattr(args, "b64", None):
+            snippet = base64.b64decode(args.b64).decode("utf-8")
+        else:
+            snippet = args.code
         return run_trace(
             cwd=Path(args.cwd),
             focus=args.focus,

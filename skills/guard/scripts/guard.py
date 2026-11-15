@@ -168,9 +168,49 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.subcmd == "shield":
-        payload = args.text
-        if not payload and not sys.stdin.isatty():
-            payload = sys.stdin.read()
+        if args.text:
+            findings = inspect_text_safety(args.text)
+            if findings:
+                for f in findings:
+                    sys.stderr.write(f"[GUARD BLOCKED | exit 2] {f}\n")
+                sys.stderr.write("Action halted. Request explicit human confirmation or sanitize secrets first.\n")
+                return EXIT_BLOCK
+            sys.stdout.write("[guard] shield passed.\n")
+            return 0
+
+        payload = sys.stdin.read() if not sys.stdin.isatty() else ""
+        parsed_hook: dict[str, Any] | None = None
+        if payload.lstrip().startswith("{"):
+            try:
+                obj = json.loads(payload)
+                if isinstance(obj, dict):
+                    parsed_hook = obj
+            except Exception:
+                parsed_hook = None
+
+        # Antigravity camelCase protojson hook contract (`hookEventName` / `toolCall`)
+        if parsed_hook is not None and ("hookEventName" in parsed_hook or "toolCall" in parsed_hook):
+            target_text = json.dumps(parsed_hook.get("toolCall") or parsed_hook, ensure_ascii=False)
+            findings = inspect_text_safety(target_text)
+            if findings:
+                sys.stdout.write(
+                    json.dumps({"decision": "deny", "reason": "[GUARD BLOCKED] " + "; ".join(findings)}) + "\n"
+                )
+            else:
+                sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
+            return 0
+
+        # Claude Code / Codex snake_case hook contract (`hook_event_name` / `tool_input`)
+        if parsed_hook is not None and ("hook_event_name" in parsed_hook or "tool_input" in parsed_hook):
+            target_text = json.dumps(parsed_hook.get("tool_input") or parsed_hook, ensure_ascii=False)
+            findings = inspect_text_safety(target_text)
+            if findings:
+                for f in findings:
+                    sys.stderr.write(f"[GUARD BLOCKED | exit 2] {f}\n")
+                sys.stderr.write("Action halted. Request explicit human confirmation or sanitize secrets first.\n")
+                return EXIT_BLOCK
+            return 0
+
         findings = inspect_text_safety(payload)
         if findings:
             for f in findings:
@@ -223,10 +263,33 @@ def main(argv: list[str] | None = None) -> int:
         return proc.returncode
 
     if args.subcmd == "stop-gate":
-        issues = _scan_conflict_markers(Path.cwd())
+        raw_in = sys.stdin.read() if not sys.stdin.isatty() else ""
+        hook_obj: dict[str, Any] | None = None
+        if raw_in.lstrip().startswith("{"):
+            try:
+                cand = json.loads(raw_in)
+                if isinstance(cand, dict):
+                    hook_obj = cand
+            except Exception:
+                hook_obj = None
+
+        is_agy = hook_obj is not None and ("hookEventName" in hook_obj or "terminationReason" in hook_obj)
+        is_claude = hook_obj is not None and ("hook_event_name" in hook_obj or "stop_hook_active" in hook_obj)
+
+        # Prevent infinite stop-hook continuation loops in both Antigravity & Claude Code
+        if is_agy and hook_obj is not None:
+            if hook_obj.get("continuationActive") or hook_obj.get("terminationReason", "NO_TOOL_CALL") != "NO_TOOL_CALL":
+                sys.stdout.write(json.dumps({"decision": "stop"}) + "\n")
+                return 0
+        if is_claude and hook_obj is not None and hook_obj.get("stop_hook_active"):
+            return 0
+
+        scan_root = Path(hook_obj["cwd"]) if (hook_obj and hook_obj.get("cwd")) else Path.cwd()
+        issues = _scan_conflict_markers(scan_root)
         for chk in args.check:
             proc = subprocess.run(
                 chk,
+                cwd=str(scan_root),
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -237,12 +300,23 @@ def main(argv: list[str] | None = None) -> int:
             if proc.returncode != 0:
                 tail = "\n".join((proc.stdout or "").splitlines()[-12:])
                 issues.append(f"Check failed (`{chk}`, exit {proc.returncode}):\n{tail}")
+
+        if is_agy:
+            if issues:
+                sys.stdout.write(
+                    json.dumps({"decision": "continue", "reason": "[GUARD STOP-GATE] Cannot finish yet: " + "; ".join(issues)}) + "\n"
+                )
+            else:
+                sys.stdout.write(json.dumps({"decision": "stop"}) + "\n")
+            return 0
+
         if issues:
             sys.stderr.write("[GUARD STOP-GATE BLOCKED | exit 2] Cannot mark task complete:\n")
             for item in issues:
                 sys.stderr.write(f"- {item}\n")
             return EXIT_BLOCK
-        sys.stdout.write("[guard] stop-gate verified clean.\n")
+        if not is_claude:
+            sys.stdout.write("[guard] stop-gate verified clean.\n")
         return 0
 
     return 0

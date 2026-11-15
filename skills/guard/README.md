@@ -11,7 +11,7 @@ Three expensive runtime failures hit autonomous agents every day:
 2. **Repetition Loops**: An agent runs the exact same broken command 5–8 times in a row, burning dollars with zero progress.
 3. **Secrets & Blast-Radius Accidents**: Leaking `sk-...` / `ghp_...` / `AKIA...` tokens into shell commands or commits, running `git push --force` / `rm -rf`, or firing unbounded outbound emails/webhooks.
 
-`guard` enforces all three deterministically via the native **`exit 2`** protocol.
+`guard` enforces all three deterministically—auto-detecting both **Claude Code / Codex** snake_case hooks (`exit 2` + `stderr`) and **Google Antigravity** camelCase protojson hooks (`{"decision": "deny"|"allow"}` / `{"decision": "continue"|"stop"}`).
 
 ## Copy Just This Folder
 

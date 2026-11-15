@@ -101,13 +101,14 @@ python audit/audit_sessions.py
 
 ## 五、下一阶段高价值迭代路线图（Active Iteration Backlog）
 
-以下方向全部源自我们在真实 CLI 轨迹审计与 10 场实机 A/B 对照中亲眼抓到的具体机会，按投入产出比排序推进：
+以下方向全部源自我们在真实 CLI 轨迹审计与多轮实机 A/B 对照中亲眼抓到的具体机会，按投入产出比排序推进：
 
-- [ ] **P1 · 多语言 AST/结构扩展（`atlas` + `probe slice` + `splice view/apply`）**：在不引入任何第三方包的前提下，基于轻量级词法/括号状态机扩展对 **TypeScript / JavaScript / Go / Rust** 的导入可达性剪枝（`probe slice`）与函数/结构体级精准读写（`splice view` / `replace_symbol`），把非 Python 项目的同文件重读率也砍下来。
-- [ ] **P1 · 零摩擦测试运行器自动探测（`splice check --test` / `probe`）**：在 `Codex + Primitives` 实测中，我们抓到模型盲猜 `python -m pytest` 撞上 `No module named pytest` 白费 1 轮调用。加入零配置测试框架自动探测（自动识别 `pytest` / `unittest` / `npm test` / `cargo test` / `go test`）并联动 `sieve` 降噪输出。
-- [ ] **P2 · `audit_sessions.py` 前后周期提效对比面板（`--since` / `--compare`）**：支持对比安装 `agent-primitives` 前后 N 个会话的「同文件重读率、单会话平均推理峰值、`python -c` 崩溃率、`>8 KB` 刷屏率」变化曲线，让每一次迭代的真实收益在开发者本机一目了然。
-- [ ] **P2 · 多宿主零摩擦接入增强（`install.py` 深度适配）**：针对实测发现的各 CLI 细节（如 `Grok CLI` 未信任目录默认跳过项目级 `.grok/skills`、`Claude Code` / `Codex` / `OpenClaw` Hook 合并幂等性），增加一键无损注入与宿主健康度诊断。
-- [ ] **P3 · 个人助手长文档表格/邮件串/分页 JSON 增强（`sieve` + `splice`）**：强化复杂 HTML 表格、Markdown 大表格行级检索与 JSON Lines 流式聚合摘要，进一步放大个人助手在日常调研、对账与资料整理中的提效倍率。
+- [x] **P1 · 多语言 AST/结构扩展（`probe slice --bundle` + `splice view/apply`）**：已在 `v0.3` 落地——零第三方依赖支持 **Python / TypeScript / JavaScript / Go / Rust** 的导入可达性剪枝、活跃源码一键打包（`--bundle`）与符号级精准读写（精确区分 Rust `'a` 生命周期与字符字面量）。
+- [x] **P1 · 零摩擦测试运行器自动探测（`splice check --test`）**：已在 `v0.3` 落地——自动识别 `pytest` / 标准库 `unittest` / `node --experimental-strip-types --test` / `go test` / `cargo test` 并限长保真输出报错栈。
+- [x] **P2 · `audit_sessions.py` 前后周期提效对比面板（`--compare`）**：已在 `v0.3` 落地——按 Harness 自动对比前后半段会话的病理摩擦变化。
+- [x] **P2 · 全主流 Harness 最简一行零克隆接入（`ap.py init` + 原生插件清单）**：已在 `v0.3` 落地——一行 `curl`/`irm | python - init` 自动探测并接入 **`Codex`、`Pi`、`Antigravity`、`Claude Code`、`Grok`、`OpenClaw`、`Hermes`**，`guard.py` 原生双协议兼容 Claude/Codex `exit 2` 与 Antigravity camelCase `deny`/`continue` Hook，并提供 `pi install`、`codex plugin`、`agy plugin` 与 `Claude` 原生插件清单。
+- [ ] **P3 · 多语言核心枢纽与陈旧 TODO 地图扩展（`atlas`）**：将 `atlas map` 的导入中心度与函数签名摘要扩展至大型 TypeScript / Go / Rust 单体仓。
+- [ ] **P3 · 个人助手长文档表格/邮件串/分页 JSON 增强（`sieve` + `splice`）**：强化复杂 HTML 表格、Markdown 大表格行级检索与 JSON Lines 流式聚合摘要。
 
 ---
 
@@ -118,3 +119,4 @@ python audit/audit_sessions.py
 | **2026-11-15 · `v0.1` 创仓立基** | 首发 `sieve`、`baton`、`recall`、`guard`、`atlas` 五大独立微基础设施 + `install.py` + 确定性基准套件（含负对照） | 上下文刷屏腐烂、压缩失忆、`AGENTS.md` 肥胖、虚报完工、冷启动盲摸与陈旧 TODO 诱饵 | CI 日志压减 **98.8%**、JSON 压减 **99.6%**、200 规则检索 **`4.0ms` (100% 命中)**，全装待机 `360 tok` |
 | **2026-11-15 · `v0.2` 跨 CLI 实证升级** | 审计本机 4 大 CLI `69,963` 次调用；新增 `audit/audit_sessions.py`、`skills/probe/`（可达性切片 + 堆别名/篡改显微镜 + 差分）与 `skills/splice/`（AST/章节精读 + UTF-8/CRLF 原子回滚补丁） | `50.1%` 同文件重读、`5.5万` 推理 Token 文字脑补内存、手写 `python -c` 转义崩溃、Windows `cp936` 编码报错与残留 `.pyc` | `Grok 1.0.77` 耗时 **-49.1%**、推理 Token **-65.4%**；`Antigravity 1.5.8` 总吞吐 **-53.4%（省 50.6 万 tok）**、步数 **-41.5%**；`10/10` 单测与三端六路 CI 全绿 |
 | **2026-11-15 · `v0.2.1` 演进手册立宪** | 建立中英双语《核心理念与持续演进总手册》（`HANDBOOK.zh-CN.md` / `HANDBOOK.md`）与仓内自治守则 `AGENTS.md` | 固化抗淘汰四边界理论、六条工程红线与五步实证迭代闭环，为长期持续演进立规 | 双语文档全链路对齐 + CI 验证通过 |
+| **2026-11-15 · `v0.3` 多语言扩展与一行全生态接入** | 发布零克隆 `ap.py`（`curl`/`irm \| python - init`）、四大原生插件清单（`pi`、`codex`、`agy`、`claude`）、Py/TS/JS/Go/Rust 多语言 `probe slice --bundle` 与 `splice` + `check --test`、`probe run` 循环去重、双协议 `guard.py` Hook 与 `audit --compare` | 消除 15+ 文件串行 `read_file` 往返、循环追踪 82KB 截断溢出、PowerShell 转义翻车、Grok 全局旧技能遮蔽及各 Harness 接入繁琐痛点 | TypeScript `ts-ledger` 实机盲测（Oracle `5/5`）：`Grok 1.0.77` 耗时 **-26.5%**、`read_file` **-66.7%**、总 Token **-38.7%（账单 -34.4%）**；`Antigravity 1.5.8` 步数 **-61.3%**、报错 **-85.7%**（Python `rulelang` 耗时 **-24.0%**、`read_file` **-74.2%**、净 Token **-49.8%**）；`Codex 0.167` 耗时 **-7.3%**；`14/14` 单测全绿 |

@@ -1,0 +1,13 @@
+{
+  "name": "agent-primitives",
+  "plugins": [
+    {
+      "name": "agent-primitives",
+      "description": "Zero-dependency deterministic OS/AST/Heap/SQLite primitives for coding & personal assistant agents",
+      "source": {
+        "source": "local",
+        "path": "./"
+      }
+    }
+  ]
+}

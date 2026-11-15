@@ -20,12 +20,14 @@ SKILLS_DIR = ROOT / "skills"
 ALL_PRIMITIVES = ("sieve", "baton", "recall", "guard", "atlas", "probe", "splice")
 
 AGENT_TARGETS: dict[str, str] = {
-    "agents": "~/.agents/skills",       # Universal Agent Skills (Antigravity, Codex, OpenCode, Cursor)
-    "claude": "~/.claude/skills",       # Anthropic Claude Code
-    "codex": "~/.codex/skills",         # OpenAI Codex CLI
-    "grok": "~/.grok/skills",           # xAI Grok Build CLI
-    "openclaw": "~/.openclaw/skills",   # OpenClaw Personal Assistant
-    "hermes": "~/.hermes/skills",       # Hermes Personal/Research Agent
+    "agents": "~/.agents/skills",              # Universal Agent Skills (Antigravity, Codex, OpenCode, Cursor)
+    "antigravity": "~/.gemini/config/skills",  # Google Antigravity IDE & CLI
+    "claude": "~/.claude/skills",              # Anthropic Claude Code
+    "codex": "~/.codex/skills",                # OpenAI Codex CLI
+    "pi": "~/.pi/agent/skills",                # Pi (pi-coding-agent)
+    "grok": "~/.grok/skills",                  # xAI Grok Build CLI
+    "openclaw": "~/.openclaw/skills",          # OpenClaw Personal Assistant
+    "hermes": "~/.hermes/skills",              # Hermes Personal/Research Agent
 }
 
 

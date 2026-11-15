@@ -1,42 +1,43 @@
-# `probe` — 因果执行追踪、可达性切片与差分显微镜
+# `probe` — 多语言可达性打包切片与因果执行显微镜
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-**独立单文件夹微基建（`skills/probe/`）** · 零第三方依赖（纯 Python 标准库） · 待机仅 `~78 tokens`。
+**单文件夹独立微型基础设施（`skills/probe/`）** · 零第三方依赖 · 空闲加载仅 `~62 tokens`。
 
-## 为什么必须用它（来自真实前沿 CLI Agent 轨迹解剖）
+## 为什么需要它（来自真实前沿 CLI 遥测诊断）
 
-在对前沿 Coding Agent（如本地 `Grok Build CLI` 运行 `grok-4.7`）进行多文件真实排障全链路遥测时，我们捕捉到了拖垮大模型基础编码过程的两大核心病灶：
+在对 **Grok Build CLI (`grok-4.7`)**、**Google Antigravity CLI (`agy`)** 与 **OpenAI Codex CLI (`gpt-6-astra`)** 的真实多文件排障会话做因果剖析时，我们定位到两个最消耗延迟与推理预算的底层黑洞：
 
-1. **静态调用图可达性盲区**：纯文本工具（`list_dir`、`grep`、`read_file`）无法区分真正处于执行链路上的核心模块与仓库里未被引用的旁路模块，导致前几轮盲读大量无关文件并持续污染后续每一轮的上下文缓存。
-2. **「脑内模拟堆内存与别名状态」导致的推理 Token 暴涨**：面对浅拷贝嵌套字典共享引用（Shallow-Copy Aliasing）、原地修改入参（In-Place Mutation）、状态回滚键不一致静默失效（如传入 `event_id` 去删以 `digest` 为键的字典）以及 Python `True == 1` / `hash(True) == hash(1)` / `None` 三值逻辑边界时，模型往往在单轮思考中空转消耗 **2.5 万～5.5 万+ Reasoning Tokens** 反复自我推翻，甚至手写几十行脆弱的临时 Monkeypatch 脚本。
+1. **可达性盲区与串行读文件往返**：纯文本工具（`list_dir`、`grep`、`read_file`）无法区分真正处于调用链上的 8–12 个活跃模块与 15–20+ 个未引用的历史/死模块；即便找到活跃文件，智能体仍需串行发起 10–18 次 `read_file` 逐个读取。
+2. **脑内模拟堆内存状态空转**：缺乏确定性运行时显微镜时，前沿模型会在思维链里空烧 **25,000–55,000 推理 tokens** 猜测浅拷贝嵌套字典别名共享、入参原地污染、空操作回滚（No-Op）以及 `True == 1` / `hash(True) == hash(1)` / `None` 边界语义。
 
-`probe` 用纯标准库在 **`< 0.1 秒`** 内为 Agent 提供三项确定性基础过程能力：
+`probe` 用三个 `< 0.1s` 纯标准库原语升级智能体底层排障能力：
 
-- **`probe slice`（静态可达性切片与跨文件契约对照）**：从入口包或测试出发解析相对/绝对导入与 AST 符号图，直接剪除未引用干扰文件，并将跨文件调用点与目标函数签名并排展示。
-- **`probe run`（因果执行与堆状态显微镜）**：基于受控作用域 `sys.settrace`，一次运行自动告警三类高危根因：**`[ALIAS HAZARD]`**（返回新对象却与入参共享底层可变容器引用）、**`[IN-PLACE MUTATION]` / `[MUTATED ON EXCEPTION]`**（原地篡改调用方入参或异常中断后遗留脏状态）、**`[STATE NO-OP]`**（无返回值状态修改方法执行后 `self` 毫无变化，并直接打印当前真实键样本）。
-- **`probe diff`（差分语义与状态缓存边界探针）**：自动构造 `None`、`True` vs `1`、`False` vs `0`、嵌套列表/字典及连续状态序列，严格校验值与类型标签一致性（`type(a) is type(b)`）、缓存跨调用串味与入参纯度。
+- **`probe slice [--bundle]`**：覆盖 **Python、TypeScript/JavaScript（`.ts/.tsx/.js/.mjs`）、Go（`go.mod`）与 Rust（`mod`/`crate::`）** 的静态可达性切片——裁剪未引用干扰模块，并可通过 `--bundle` **一次调用直接输出全部活跃源码（带行号，默认预算 `28 KB`）**。
+- **`probe run`**：带调用点自动去重（200 次循环亦严格控制在 `< 3.5 KB` 绝不爆上下文）的 `sys.settrace` 因果追踪器，自动标记 **`[ALIAS HAZARD]`**、**`[IN-PLACE MUTATION]` / `[MUTATED ON EXCEPTION]`** 与 **`[STATE NO-OP]`**，支持 `--code`、`--stdin`、`--b64`、`--script`、`--unittest`。
+- **`probe diff`**：边界与状态缓存差分预言机（自动覆盖 `None`、`True` vs `1`、`False` vs `0`、嵌套容器、连续缓存污染与入参纯度检查）。
 
-## 只拷这一个文件夹即可用
+## 1 条命令极简接入（或单独拷走本文件夹）
 
 ```bash
+# 推荐：1 条命令在当前仓库完成接入
+python ap.py init --here
+
+# 或仅单独复制本文件夹：
 cp -r skills/probe ~/.agents/skills/
-# 或安装至 Grok CLI / Claude Code：
-cp -r skills/probe ~/.grok/skills/
-cp -r skills/probe ~/.claude/skills/
 ```
 
-## 常用命令
+## 实战命令（Windows PowerShell 与 Bash 双端安全）
 
 ```bash
-# 1. 静态可达性切片（自动剪除未引用模块并输出跨文件调用契约）
-python scripts/probe.py slice . --entry mypkg
+# 1. 多语言静态调用链切片 + 一次性打包活跃模块带行号源码（Py / TS / JS / Go / Rust）
+python .agents/ap.py probe slice . --bundle
 
-# 2. 运行时因果追踪（自动捕获浅拷贝别名共享、入参原地篡改与状态空操作）
-python scripts/probe.py run --cwd . --focus mypkg --code "from mypkg import Engine; ..."
+# 2. 因果执行显微镜（自动按调用点去重；多行脚本在 PowerShell 用 `@'...'@ |`，在 Bash 用 `<<'EOF'`）
+python .agents/ap.py probe run --cwd . --focus mypkg --code "from mypkg import Engine; ..."
 
-# 3. 优化器/缓存差分边界等价性探针
-python scripts/probe.py diff --cwd . \
+# 3. 优化前后 / 缓存前后差分边界等价性检验
+python .agents/ap.py probe diff --cwd . \
   --setup "from mypkg import Engine; opt=Engine(optimize=True); raw=Engine(optimize=False)" \
   --fn-a "lambda d: opt.eval(d)" \
   --fn-b "lambda d: raw.eval(d)"

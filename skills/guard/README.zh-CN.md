@@ -11,7 +11,7 @@
 2. **原地死循环烧额度**：同一条报错命令一字不改连跑五六遍，纯烧 Token 毫无进展。
 3. **密钥泄露与高危外发事故**：把 `sk-...` / `ghp_...` / `AKIA...` 私钥拼进命令或写入文件，或误执行 `git push --force`、`rm -rf`、批量群发外部邮件/Webhook。
 
-`guard` 将这三道防线统一封装为原生兼容各家 Hook 的 **`exit 2` 确定性门禁**。
+`guard` 将这三道防线统一封装为确定性门禁，并**自动识别双协议**：同时原生兼容 **Claude Code / Codex**（`exit 2` + `stderr`）与 **Google Antigravity**（camelCase JSON `{"decision": "deny"|"allow"}` / `{"decision": "continue"|"stop"}` 及防死循环保护）。
 
 ## 单独拷走这一个文件夹即可使用
 

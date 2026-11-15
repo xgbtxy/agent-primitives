@@ -363,7 +363,7 @@ def bench_splice(tmp: Path) -> dict[str, Any]:
     t0 = time.perf_counter()
     buf_v = io.StringIO()
     with redirect_stdout(buf_v):
-        splice.run_view(svc_file, ["BillingService.commit_invoice"], "", as_json=False)
+        splice.run_view([svc_file], ["BillingService.commit_invoice"], "", as_json=False)
     view_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     view_out = buf_v.getvalue()
     symbol_tokens = (len(view_out.encode("utf-8")) + 3) // 4
@@ -388,13 +388,33 @@ def bench_splice(tmp: Path) -> dict[str, Any]:
     )
     buf_a = io.StringIO()
     with redirect_stdout(buf_a):
-        splice.run_apply(repo, str(spec_file), from_stdin=False, as_json=True)
+        splice.run_apply(repo, str(spec_file), from_stdin=False, unlink_spec=True, as_json=True)
     apply_res = json.loads(buf_a.getvalue())
 
     buf_c = io.StringIO()
     with redirect_stdout(buf_c):
         splice.run_check(repo, as_json=True)
     check_res = json.loads(buf_c.getvalue())
+
+    # Polyglot TypeScript slice + bundle benchmark (24-module TS repo: 9 active, 15 dead)
+    ts_repo = tmp / "ts_corpus"
+    (ts_repo / "src").mkdir(parents=True, exist_ok=True)
+    for k in range(8):
+        imp = f'import {{ step{k+1} }} from "./mod_{k+1}.ts";\n' if k < 7 else ""
+        (ts_repo / "src" / f"mod_{k}.ts").write_text(
+            f"{imp}export function step{k}(v: number): number {{\n  return v + {k};\n}}\n",
+            encoding="utf-8",
+        )
+    (ts_repo / "src" / "index.ts").write_text('export { step0 } from "./mod_0.ts";\n', encoding="utf-8")
+    for d in range(15):
+        (ts_repo / "src" / f"dead_distractor_{d:02d}.ts").write_text(
+            f"export function deadFn{d}(x: number): number {{\n  return x * {d};\n}}\n",
+            encoding="utf-8",
+        )
+    buf_ts = io.StringIO()
+    with redirect_stdout(buf_ts):
+        probe.run_slice(ts_repo, ["src/index.ts"], as_json=True)
+    ts_slice = json.loads(buf_ts.getvalue())
 
     return {
         "full_module_tokens_est": full_tokens,
@@ -404,6 +424,12 @@ def bench_splice(tmp: Path) -> dict[str, Any]:
         "atomic_apply_latency_ms": apply_res["elapsed_ms"],
         "crlf_preserved": b"\r\n" in svc_file.read_bytes(),
         "repo_check_latency_ms": check_res["elapsed_ms"],
+        "polyglot_ts_slice": {
+            "total_ts_files": ts_slice["total_code_files"],
+            "reachable_ts_files": ts_slice["reachable_count"],
+            "pruned_dead_ts_files": ts_slice["pruned_unreferenced_count"],
+            "slice_latency_ms": ts_slice["elapsed_ms"],
+        },
     }
 
 

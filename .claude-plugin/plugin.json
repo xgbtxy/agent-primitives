@@ -1,0 +1,12 @@
+{
+  "name": "agent-primitives",
+  "version": "0.3.0",
+  "description": "Zero-dependency deterministic OS/AST/Heap/SQLite micro-infrastructure primitives for coding & personal assistant agents",
+  "author": {
+    "name": "Yan Chen",
+    "url": "https://github.com/xgbtxy"
+  },
+  "homepage": "https://github.com/xgbtxy/agent-primitives",
+  "repository": "https://github.com/xgbtxy/agent-primitives",
+  "license": "MIT"
+}

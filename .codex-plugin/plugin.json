@@ -1,0 +1,6 @@
+{
+  "name": "agent-primitives",
+  "version": "0.3.0",
+  "description": "Zero-dependency deterministic OS/AST/Heap/SQLite micro-infrastructure primitives for coding & personal assistant agents",
+  "skills": "./skills/"
+}

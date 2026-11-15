@@ -1,15 +1,15 @@
 {
-  "generated_at": "2026-11-15T08:14:14Z",
+  "generated_at": "2026-11-15T10:21:05Z",
   "python_version": "3.12.0",
   "platform": "win32",
   "idle_frontmatter_tokens_per_folder": {
     "atlas": 73,
     "baton": 70,
     "guard": 63,
-    "probe": 64,
+    "probe": 62,
     "recall": 71,
     "sieve": 83,
-    "splice": 68
+    "splice": 64
   },
   "sieve_benchmarks": [
     {
@@ -19,7 +19,7 @@
       "raw_tokens_est": 43019,
       "out_tokens_est": 520,
       "reduction_pct": 98.8,
-      "latency_ms": 24.31,
+      "latency_ms": 31.03,
       "signal_preserved": true
     },
     {
@@ -29,7 +29,7 @@
       "raw_tokens_est": 26972,
       "out_tokens_est": 106,
       "reduction_pct": 99.6,
-      "latency_ms": 2.6,
+      "latency_ms": 5.13,
       "signal_preserved": true
     },
     {
@@ -39,7 +39,7 @@
       "raw_tokens_est": 12040,
       "out_tokens_est": 195,
       "reduction_pct": 98.4,
-      "latency_ms": 8.54,
+      "latency_ms": 11.99,
       "signal_preserved": true
     },
     {
@@ -49,7 +49,7 @@
       "raw_tokens_est": 18,
       "out_tokens_est": 30,
       "reduction_pct": 0.0,
-      "latency_ms": 1.63,
+      "latency_ms": 2.23,
       "signal_preserved": true
     }
   ],
@@ -59,7 +59,7 @@
     "avg_injected_tokens_top2": 39.9,
     "token_reduction_pct": 99.4,
     "top1_recall_accuracy": "20/20 (100%)",
-    "median_query_latency_ms": 3.84
+    "median_query_latency_ms": 4.92
   },
   "atlas_real_scan_benchmark": {
     "scanned_target": "sdk_corpus (64 Python modules)",
@@ -67,15 +67,15 @@
     "raw_corpus_tokens_est": 42710,
     "atlas_map_tokens_est": 446,
     "orientation_reduction_pct": 99.0,
-    "scan_latency_ms": 19.5
+    "scan_latency_ms": 36.7
   },
   "probe_microscope_benchmark": {
     "total_py_files": 25,
     "reachable_files": 3,
     "pruned_dead_files": 20,
     "dead_code_pruned_pct": 80.0,
-    "slice_latency_ms": 17.68,
-    "trace_latency_ms": 10.34,
+    "slice_latency_ms": 24.29,
+    "trace_latency_ms": 14.39,
     "auto_detected_hazards": {
       "alias_hazards": 2,
       "in_place_mutations": 1,
@@ -86,9 +86,15 @@
     "full_module_tokens_est": 1376,
     "symbol_view_tokens_est": 77,
     "symbol_read_reduction_pct": 94.4,
-    "view_latency_ms": 1.22,
-    "atomic_apply_latency_ms": 3.72,
+    "view_latency_ms": 1.74,
+    "atomic_apply_latency_ms": 5.52,
     "crlf_preserved": true,
-    "repo_check_latency_ms": 10.58
+    "repo_check_latency_ms": 18.2,
+    "polyglot_ts_slice": {
+      "total_ts_files": 24,
+      "reachable_ts_files": 9,
+      "pruned_dead_ts_files": 15,
+      "slice_latency_ms": 23.06
+    }
   }
 }

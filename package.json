@@ -1,0 +1,29 @@
+{
+  "name": "agent-primitives",
+  "version": "0.3.0",
+  "description": "Zero-dependency deterministic OS/AST/Heap/SQLite micro-infrastructure primitives for coding agents & personal assistant agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xgbtxy/agent-primitives.git"
+  },
+  "keywords": [
+    "pi-package",
+    "agent-skills",
+    "codex",
+    "antigravity",
+    "claude-code",
+    "grok"
+  ],
+  "pi": {
+    "skills": [
+      "./skills/atlas",
+      "./skills/baton",
+      "./skills/guard",
+      "./skills/probe",
+      "./skills/recall",
+      "./skills/sieve",
+      "./skills/splice"
+    ]
+  }
+}
