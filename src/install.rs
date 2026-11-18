@@ -264,7 +264,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Read, Exec & Undo (General & Coding Shield)**: Read `.docx`/`.xlsx`/`.pptx`/`.pdf`/`.csv`/GBK files or URLs cleanly via `{ap_cmd} read <path_or_url> [--query Q | --lines A-B]`; run commands via `{ap_cmd} exec -c \"<cmd>\"` (UTF-8 lock, PS `&&`/`curl` heal & log diet); restore edits outside Git via `{ap_cmd} undo`; `{ap_cmd} recall`; `{ap_cmd} baton`."
+            "4. **Read, SQL Query, Search, Exec & Undo**: Read `.docx`/`.xlsx`/`.pdf`/GBK/SPA URLs via `{ap_cmd} read <target> [--render|--query Q|--lines A-B]`; exact SQL joins across multi-sheet `.xlsx`/GBK `.csv`/`.json` via `{ap_cmd} query -f a=x.xlsx -f b=y.csv --schema` / `\"SELECT ...\"`; AST+Office search via `{ap_cmd} search <pat> .`; safe UTF-8/PS shell via `{ap_cmd} exec -c \"<cmd>\"`; non-Git undo via `{ap_cmd} undo`."
         ));
     }
     format!(

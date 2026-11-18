@@ -13,9 +13,41 @@ fn mcp_tools_schema() -> Value {
                     "target": { "type": "string", "description": "Local file/folder path or http(s):// URL" },
                     "lines": { "type": "string", "description": "Optional line window, e.g. '1-120'" },
                     "query": { "type": "string", "description": "Optional keyword filter for rows/paragraphs" },
-                    "sheet": { "type": "string", "description": "Optional worksheet filter for .xlsx" }
+                    "sheet": { "type": "string", "description": "Optional worksheet filter for .xlsx" },
+                    "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome (extracts headings, interactive controls & tables)" }
                 },
                 "required": ["target"]
+            }
+        },
+        {
+            "name": "ap_query",
+            "description": "Execute exact SQLite 3.46+ SQL (`JOIN`, `GROUP BY`, `SUM`, `ROUND`, `CTE`, Window Functions) directly across `.xlsx` Excel workbooks, `GBK`/`UTF-8` `.csv`/`.tsv` tables, and `.json`/`.jsonl` files in <20ms with zero Python/DuckDB and zero numerical hallucination.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": "Table bindings like ['orders=sales.xlsx', 'bank=statement.csv']",
+                        "items": { "type": "string" }
+                    },
+                    "sql": { "type": "string", "description": "SQL query to execute (omit or set schema=true to inspect table columns first)" },
+                    "schema": { "type": "boolean", "description": "If true, list loaded table names, row counts & columns" },
+                    "out": { "type": "string", "description": "Optional output CSV file path" }
+                },
+                "required": ["files"]
+            }
+        },
+        {
+            "name": "ap_search",
+            "description": "Fast .gitignore-aware regex search across codebases AND `.docx`/`.xlsx`/`.pdf`/GBK files (zero external ripgrep needed). Automatically tags code matches with their enclosing Tree-sitter AST function/class span.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regex or literal search pattern" },
+                    "path": { "type": "string", "description": "Directory or file to search (default: '.')" },
+                    "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'xlsx,docx'" }
+                },
+                "required": ["pattern"]
             }
         },
         {
@@ -218,6 +250,71 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             {
                 cli.push("--sheet".to_string());
                 cli.push(sh.to_string());
+            }
+            if args.get("render").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--render".to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_query" => {
+            let files: Vec<&str> = args
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if files.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `files` array (e.g. ['t=data.xlsx']) to `ap_query`."
+                        .to_string(),
+                );
+            }
+            let mut cli = vec!["query".to_string()];
+            for f in files {
+                cli.push("-f".to_string());
+                cli.push(f.to_string());
+            }
+            if args.get("schema").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--schema".to_string());
+            }
+            if let Some(out_p) = args
+                .get("out")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--out".to_string());
+                cli.push(out_p.to_string());
+            }
+            if let Some(sql) = args
+                .get("sql")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push(sql.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_search" => {
+            let pat = args
+                .get("pattern")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if pat.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `pattern` to `ap_search`.".to_string(),
+                );
+            }
+            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let mut cli = vec!["search".to_string(), pat.to_string(), path.to_string()];
+            if let Some(ext) = args
+                .get("ext")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--ext".to_string());
+                cli.push(ext.to_string());
             }
             run_self_captured(&cli, None)
         }

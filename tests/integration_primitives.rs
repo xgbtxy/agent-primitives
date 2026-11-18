@@ -1466,3 +1466,142 @@ fn test_general_agent_docx_xlsx_gbk_read_undo_and_claude_desktop() {
         .join("AppData/Roaming/Claude/claude_desktop_config.json")
         .exists());
 }
+
+#[test]
+fn test_sql_query_engine_ast_office_search_and_spa_render() {
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v16_home");
+
+    // 1. Multi-format `ap query` SQL Join across .xlsx + GBK .csv + .jsonl (with ¥ currency strings)
+    let orders_xlsx = root.join("orders.xlsx");
+    {
+        let f = fs::File::create(&orders_xlsx).unwrap();
+        let mut zw = ZipWriter::new(f);
+        zw.start_file("xl/workbook.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<workbook><sheets><sheet name="订单" sheetId="1"/><sheet name="海外" sheetId="2"/></sheets></workbook>"#.as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/sharedStrings.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<sst><si><t>oid</t></si><si><t>cid</t></si><si><t>amount</t></si><si><t>O1</t></si><si><t>C1</t></si><si><t>¥1,200.50</t></si><si><t>O2</t></si><si><t>C2</t></si><si><t>¥2,000.00</t></si><si><t>O3</t></si><si><t>¥800.50</t></si><si><t>O4</t></si><si><t>¥500.00</t></si></sst>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/worksheets/sheet1.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"<worksheet><sheetData>
+              <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>
+              <row r="2"><c r="A2" t="s"><v>3</v></c><c r="B2" t="s"><v>4</v></c><c r="C2" t="s"><v>5</v></c></row>
+              <row r="3"><c r="A3" t="s"><v>6</v></c><c r="B3" t="s"><v>7</v></c><c r="C3" t="s"><v>8</v></c></row>
+              <row r="4"><c r="A4" t="s"><v>9</v></c><c r="B4" t="s"><v>4</v></c><c r="C4" t="s"><v>10</v></c></row>
+            </sheetData></worksheet>"#,
+        )
+        .unwrap();
+        zw.start_file("xl/worksheets/sheet2.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"<worksheet><sheetData>
+              <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>
+              <row r="2"><c r="A2" t="s"><v>11</v></c><c r="B2" t="s"><v>4</v></c><c r="C2" t="s"><v>12</v></c></row>
+            </sheetData></worksheet>"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+    }
+
+    let (gbk_cow, _, _) = encoding_rs::GB18030.encode("oid,paid_flag\r\nO2,1\r\n");
+    fs::write(root.join("bank.csv"), gbk_cow.as_ref()).unwrap();
+    fs::write(
+        root.join("customers.jsonl"),
+        "{\"cid\":\"C1\",\"name\":\"星海集团\"}\n{\"cid\":\"C2\",\"name\":\"远山科技\"}\n",
+    )
+    .unwrap();
+
+    let sql = "SELECT c.name, ROUND(SUM(o.amount), 2) AS unpaid_sum FROM orders o JOIN customers c ON o.cid = c.cid LEFT JOIN bank b ON o.oid = b.oid WHERE b.oid IS NULL GROUP BY c.name";
+    let q_out = run_ap(
+        root,
+        &[
+            "query",
+            "-f",
+            "orders=orders.xlsx",
+            "-f",
+            "bank=bank.csv",
+            "-f",
+            "customers=customers.jsonl",
+            "--out",
+            "unpaid.csv",
+            "--json",
+            sql,
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        q_out.status.success(),
+        "ap query failed: {}",
+        String::from_utf8_lossy(&q_out.stderr)
+    );
+    let qj: Value = serde_json::from_slice(&q_out.stdout).unwrap();
+    assert_eq!(qj["row_count"], 1);
+    assert_eq!(qj["rows"][0][0], "星海集团");
+    assert_eq!(qj["rows"][0][1], "2001.0");
+    assert!(root.join("unpaid.csv").is_file());
+
+    // Multi-sheet `orders__all` auto-union + `--stdin` SQL execution
+    let q_all = run_ap(
+        root,
+        &["query", "--table", "orders=orders.xlsx", "--stdin", "--json"],
+        Some("SELECT COUNT(*), ROUND(SUM(amount), 2) FROM orders__all WHERE _sheet IN ('订单', '海外')"),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(q_all.status.success());
+    let q_all_j: Value = serde_json::from_slice(&q_all.stdout).unwrap();
+    assert_eq!(q_all_j["rows"][0][0], "4");
+    assert_eq!(q_all_j["rows"][0][1], "4501.0");
+
+    // 2. Universal `ap search` with enclosing Tree-sitter AST symbol span + .docx extraction
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/billing.ts"),
+        "export class BillingEngine {\n  settleAccount(code: string): boolean {\n    const token = 'VIP_OMEGA_99';\n    return code === token;\n  }\n}\n",
+    )
+    .unwrap();
+    let docx_p = root.join("spec.docx");
+    {
+        let f = fs::File::create(&docx_p).unwrap();
+        let mut zw = ZipWriter::new(f);
+        zw.start_file("word/document.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(br#"<w:document><w:body><w:p><w:r><w:t>Use promo token VIP_OMEGA_99 for enterprise tier.</w:t></w:r></w:p></w:body></w:document>"#)
+            .unwrap();
+        zw.finish().unwrap();
+    }
+
+    let s_out = run_ap(
+        root,
+        &["search", "VIP_OMEGA_99", ".", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(s_out.status.success());
+    let sj: Value = serde_json::from_slice(&s_out.stdout).unwrap();
+    let hits = sj["matches"].as_array().unwrap();
+    assert!(
+        hits.iter().any(|h| h["file"] == "src/billing.ts"
+            && h["scope"].as_str().unwrap().contains("settleAccount")),
+        "Expected enclosing AST symbol scope on TS search hit, got: {hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .any(|h| h["file"] == "spec.docx" && h["scope"] == "DOCX"),
+        "Expected .docx search hit in same pass, got: {hits:?}"
+    );
+}

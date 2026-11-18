@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -68,6 +68,7 @@ clap.workspace = true
 csv.workspace = true
 encoding_rs.workspace = true
 flate2.workspace = true
+ignore.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

@@ -3,7 +3,9 @@ pub mod bench;
 pub mod exec;
 pub mod install;
 pub mod mcp;
+pub mod query;
 pub mod read;
+pub mod search;
 pub mod stats;
 pub mod undo;
 pub mod win_job;
@@ -56,6 +58,14 @@ enum TopCmd {
     Doctor,
     /// Read any file (.docx, .xlsx, .pptx, .pdf, .csv, GBK/UTF-16) or URL without context overflow
     Read { target: Option<String> },
+    /// Run exact SQL joins & aggregations across .xlsx, GBK/UTF-8 .csv/.tsv & .json files
+    Query {
+        #[arg(short = 'f', long = "file")]
+        files: Vec<String>,
+        sql: Option<String>,
+    },
+    /// Universal .gitignore-aware regex search with enclosing AST symbol spans + .docx/.xlsx/GBK
+    Search { pattern: Option<String> },
     /// Run commands with UTF-8 lock, Bash-in-PowerShell auto-heal, port unlock & log compression
     Exec {
         #[arg(short = 'c', long = "cmd")]
@@ -99,6 +109,8 @@ fn dispatch_primitive(name: &str, tail_args: &[String]) -> Option<i32> {
     let from_mcp = std::env::var("AP_MCP_CHILD").ok().as_deref() == Some("1");
     let code = match name {
         "read" => return Some(read::run_cli(&sub_argv)),
+        "query" => return Some(query::run_cli(&sub_argv)),
+        "search" => return Some(search::run_cli(&sub_argv)),
         "exec" => return Some(exec::run_cli(&sub_argv)),
         "undo" => return Some(undo::run_cli(&sub_argv)),
         "stats" | "gain" => return Some(stats::run_cli(&sub_argv)),
@@ -209,6 +221,8 @@ fn main() {
         TopCmd::Stats { .. } => stats::run_cli(&args[1..]),
         TopCmd::Doctor => install::cmd_doctor(),
         TopCmd::Read { .. } => read::run_cli(&args[1..]),
+        TopCmd::Query { .. } => query::run_cli(&args[1..]),
+        TopCmd::Search { .. } => search::run_cli(&args[1..]),
         TopCmd::Exec { .. } => exec::run_cli(&args[1..]),
         TopCmd::Undo { .. } => undo::run_cli(&args[1..]),
         TopCmd::Status { dir, home } => install::cmd_status(dir.as_deref(), home.as_deref()),

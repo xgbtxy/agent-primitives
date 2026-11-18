@@ -128,6 +128,8 @@ impl CdpSession {
                 "--headless=new",
                 "--disable-gpu",
                 "--disable-extensions",
+                "--no-sandbox",
+                "--proxy-bypass-list=<-loopback>",
                 "--log-level=3",
                 "--no-first-run",
                 "--no-default-browser-check",

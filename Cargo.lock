@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-primitives"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "ap-atlas",
  "ap-baton",
@@ -24,6 +24,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "flate2",
+ "ignore",
  "regex",
  "rusqlite",
  "serde",
@@ -93,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "ap-atlas"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "clap",
  "ignore",
@@ -111,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "ap-baton"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "clap",
  "serde",
@@ -120,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "ap-guard"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -132,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "ap-probe"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -151,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "ap-recall"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "clap",
  "rusqlite",
@@ -162,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "ap-sieve"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "clap",
  "csv",
@@ -175,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "ap-splice"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "base64",
  "clap",

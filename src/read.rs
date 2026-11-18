@@ -27,6 +27,9 @@ struct ReadCli {
     /// Optional worksheet name filter for .xlsx files
     #[arg(long)]
     sheet: Option<String>,
+    /// Render URL in real Headless Edge/Chrome (extracts JS-hydrated text, tables & interactive controls)
+    #[arg(long)]
+    render: bool,
     /// Maximum characters before smart outline + pagination kicks in
     #[arg(long, default_value_t = 8000)]
     max_chars: usize,
@@ -37,6 +40,7 @@ struct ReadCli {
 
 struct XmlRegexes {
     xml_tag: Regex,
+    html_invisible: Regex,
     docx_block: Regex,
     docx_style: Regex,
     docx_tr: Regex,
@@ -56,6 +60,8 @@ fn xre() -> &'static XmlRegexes {
     static R: OnceLock<XmlRegexes> = OnceLock::new();
     R.get_or_init(|| XmlRegexes {
         xml_tag: Regex::new(r"<[^>]+>").unwrap(),
+        html_invisible: Regex::new(r"(?is)<(?:script|style|head)\b.*?</(?:script|style|head)>")
+            .unwrap(),
         docx_block: Regex::new(r"(?s)<w:tbl\b.*?</w:tbl>|<w:p\b.*?</w:p>").unwrap(),
         docx_style: Regex::new(r#"<w:pStyle\s+w:val="([^"]+)""#).unwrap(),
         docx_tr: Regex::new(r"(?s)<w:tr\b.*?</w:tr>").unwrap(),
@@ -200,11 +206,9 @@ fn col_ref_to_index(attrs: &str) -> Option<usize> {
     Some(idx.saturating_sub(1))
 }
 
-fn extract_xlsx_md(
-    bytes: &[u8],
-    sheet_filter: Option<&str>,
-    query: Option<&str>,
-) -> Result<String, String> {
+pub type XlsxSheetRows = (String, Vec<Vec<String>>);
+
+pub fn extract_xlsx_sheets_raw(bytes: &[u8]) -> Result<Vec<XlsxSheetRows>, String> {
     let mut zip =
         ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("xlsx zip error: {e}"))?;
     let re = xre();
@@ -228,21 +232,13 @@ fn extract_xlsx_md(
         }
     }
 
-    let q_low = query.map(|q| q.to_ascii_lowercase());
-    let sf_low = sheet_filter.map(|s| s.to_ascii_lowercase());
-    let mut sections = Vec::new();
+    let mut out_sheets = Vec::new();
     let max_sheets = sheet_names.len().max(1);
-
     for idx in 0..max_sheets {
         let sname = sheet_names
             .get(idx)
             .cloned()
             .unwrap_or_else(|| format!("Sheet{}", idx + 1));
-        if let Some(ref f) = sf_low {
-            if !sname.to_ascii_lowercase().contains(f) {
-                continue;
-            }
-        }
         let xml_path = format!("xl/worksheets/sheet{}.xml", idx + 1);
         let Ok(mut shf) = zip.by_name(&xml_path) else {
             continue;
@@ -278,18 +274,34 @@ fn extract_xlsx_md(
                 } else {
                     raw_val
                 };
-                row_cells[col_idx] = resolved
-                    .replace('|', "\\|")
-                    .replace('\n', " ")
-                    .trim()
-                    .to_string();
+                row_cells[col_idx] = resolved.replace('\n', " ").trim().to_string();
                 cur_col = col_idx + 1;
             }
             if row_cells.iter().any(|c| !c.is_empty()) {
                 rows.push(row_cells);
             }
         }
+        out_sheets.push((sname, rows));
+    }
+    Ok(out_sheets)
+}
 
+fn extract_xlsx_md(
+    bytes: &[u8],
+    sheet_filter: Option<&str>,
+    query: Option<&str>,
+) -> Result<String, String> {
+    let raw_sheets = extract_xlsx_sheets_raw(bytes)?;
+    let q_low = query.map(|q| q.to_ascii_lowercase());
+    let sf_low = sheet_filter.map(|s| s.to_ascii_lowercase());
+    let mut sections = Vec::new();
+
+    for (sname, rows) in raw_sheets {
+        if let Some(ref f) = sf_low {
+            if !sname.to_ascii_lowercase().contains(f) {
+                continue;
+            }
+        }
         let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut out_lines = vec![format!(
             "## Sheet: `{sname}` ({} non-empty rows x {width} cols)",
@@ -311,7 +323,7 @@ fn extract_xlsx_md(
                     }
                 }
             }
-            let mut padded = r.clone();
+            let mut padded: Vec<String> = r.iter().map(|c| c.replace('|', "\\|")).collect();
             padded.resize(width, String::new());
             out_lines.push(format!("| {} |", padded.join(" | ")));
             if ri == 0 {
@@ -320,7 +332,7 @@ fn extract_xlsx_md(
             shown += 1;
             if shown >= 40 {
                 out_lines.push(format!(
-                    "... ({} total rows in `{sname}` — pass `--query <term>` or `--sheet \"{sname}\"` to filter)",
+                    "... ({} total rows in `{sname}` — pass `--query <term>`, `--sheet \"{sname}\"`, or run `ap query -f t=<file.xlsx> \"SELECT ...\"`)",
                     rows.len()
                 ));
                 break;
@@ -443,6 +455,75 @@ fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
+pub fn extract_office_or_pdf_plain(bytes: &[u8], ext: &str) -> Result<String, String> {
+    match ext {
+        "docx" => extract_docx_md(bytes),
+        "xlsx" => extract_xlsx_md(bytes, None, None),
+        "pptx" => extract_pptx_or_zip(bytes, "pptx"),
+        "pdf" => extract_pdf_text(bytes),
+        _ => Err("unsupported office/pdf ext".to_string()),
+    }
+}
+
+fn find_browser_bin() -> Option<PathBuf> {
+    for cand in [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ] {
+        let p = Path::new(cand);
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+fn render_url_via_headless_cdp(url: &str) -> Result<String, String> {
+    let browser =
+        find_browser_bin().ok_or_else(|| "No local Edge/Chrome found for --render".to_string())?;
+    let mut sess = ap_probe::cdp::CdpSession::launch(&browser)?;
+    let _ = sess.navigate(url)?;
+    let extract_js = r#"(() => {
+        const title = document.title || '(untitled)';
+        const headings = Array.from(document.querySelectorAll('h1,h2,h3')).slice(0, 20)
+            .map(h => `${'#'.repeat(Number(h.tagName[1]))} ${(h.innerText||'').trim()}`).filter(Boolean);
+        const ctrls = Array.from(document.querySelectorAll('button, input, select, textarea, a[href]')).slice(0, 30)
+            .map(el => {
+                const tag = el.tagName.toLowerCase();
+                const id = el.id ? `#${el.id}` : '';
+                const label = (el.innerText || el.placeholder || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 50);
+                return `[${tag}${id}${label ? ' "' + label.replace(/\s+/g,' ') + '"' : ''}]`;
+            });
+        const tables = Array.from(document.querySelectorAll('table')).slice(0, 3).map((tbl, ti) => {
+            const rows = Array.from(tbl.querySelectorAll('tr')).slice(0, 15).map(tr =>
+                Array.from(tr.querySelectorAll('th,td')).map(c => (c.innerText||'').replace(/\s+/g,' ').trim())
+            ).filter(r => r.length > 0);
+            if (!rows.length) return '';
+            const w = Math.max(...rows.map(r => r.length));
+            return `### Table ${ti+1}\n` + rows.map((r, ri) => {
+                while (r.length < w) r.push('');
+                const ln = '| ' + r.join(' | ') + ' |';
+                return ri === 0 ? ln + '\n| ' + Array(w).fill('---').join(' | ') + ' |' : ln;
+            }).join('\n');
+        }).filter(Boolean);
+        const body = (document.body ? document.body.innerText : '').trim().slice(0, 6000);
+        return [
+            `Title: ${title}`,
+            headings.length ? `## Headings\n${headings.join('\n')}` : '',
+            ctrls.length ? `## Interactive Elements (${ctrls.length})\n${ctrls.join(' ')}` : '',
+            tables.join('\n\n'),
+            `## Visible Content\n${body}`
+        ].filter(Boolean).join('\n\n');
+    })()"#;
+    sess.eval_js(extract_js)
+}
+
 fn parse_line_window(spec: &str, total: usize) -> Option<(usize, usize)> {
     let norm = spec.trim().replace(':', "-");
     let (a, b) = norm.split_once('-')?;
@@ -457,6 +538,8 @@ fn fetch_url_bytes(url: &str) -> Result<Vec<u8>, String> {
         .args([
             "-fsSL",
             "-L",
+            "--noproxy",
+            "127.0.0.1,localhost,::1",
             "--max-time",
             "20",
             "-A",
@@ -489,11 +572,45 @@ pub fn run_cli(args: &[String]) -> i32 {
     let is_url = target.starts_with("http://") || target.starts_with("https://");
 
     let (raw_bytes, ext, label) = if is_url {
-        match fetch_url_bytes(target) {
-            Ok(b) => (b, "html".to_string(), target.to_string()),
-            Err(e) => {
-                eprintln!("[ap read] {e}");
-                return 1;
+        if cli.render {
+            match render_url_via_headless_cdp(target) {
+                Ok(snap) => (
+                    snap.into_bytes(),
+                    "rendered-dom".to_string(),
+                    target.to_string(),
+                ),
+                Err(e) => {
+                    eprintln!("[ap read --render] {e}");
+                    return 1;
+                }
+            }
+        } else {
+            match fetch_url_bytes(target) {
+                Ok(b) => {
+                    let preview = String::from_utf8_lossy(&b);
+                    let body_only = xre().html_invisible.replace_all(&preview, "");
+                    let looks_empty_spa = (preview.contains("id=\"root\"")
+                        || preview.contains("id=\"app\"")
+                        || preview.contains("id=\"__next\""))
+                        && xre().xml_tag.replace_all(&body_only, "").trim().len() < 180;
+                    if looks_empty_spa {
+                        if let Ok(snap) = render_url_via_headless_cdp(target) {
+                            (
+                                snap.into_bytes(),
+                                "rendered-dom".to_string(),
+                                target.to_string(),
+                            )
+                        } else {
+                            (b, "html".to_string(), target.to_string())
+                        }
+                    } else {
+                        (b, "html".to_string(), target.to_string())
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ap read] {e}");
+                    return 1;
+                }
             }
         }
     } else {
@@ -554,6 +671,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 1;
             }
         },
+        "rendered-dom" => String::from_utf8_lossy(&raw_bytes).to_string(),
         _ => {
             let (decoded, enc_name, healed) = decode_any_bytes(&raw_bytes);
             win_heals += healed;

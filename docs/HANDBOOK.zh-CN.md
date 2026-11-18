@@ -1,4 +1,4 @@
-# `agent-primitives` (`ap` v1.2) — 核心研发理念与持续演进手册
+# `agent-primitives` (`ap` v1.6) — 核心研发理念与持续演进手册
 
 [English](./HANDBOOK.md) | [简体中文](./HANDBOOK.zh-CN.md) · [首页](../README.zh-CN.md) · [架构深潜](./DESIGN.zh-CN.md) · [实战手册](./PLAYBOOK.zh-CN.md)
 
@@ -58,3 +58,4 @@
 | **`v1.3.0` (2026-11-18)** | 扫描 160 个真实 Windows 会话抓出 **`528 次` OS/Shell 翻车**（235 次 GBK/BOM、138 次 PS `&&`/`curl`/heredoc/PATH、82 次端口锁、73 次管道假死）；打造 **Windows 透明命令护盾 (`ap exec` + Base64 `PreToolUse` Hook)**、**UTF-8 BOM/UTF-16LE 自动净化** 与 **`ap stats` 离线提效账单**，并将外部 UX 极简化为 3 个命令（`init`/`doctor`/`stats`） | **Windows 5 大真实陷阱对拍**：原生 PS 5.1 全军覆没（GBK 崩溃/`&&` 与 heredoc `ParserError`/端口占用），`ap exec` **100% 一次自愈通过**，2000 行构建日志自动脱水 **`-99.1%`（`110.3KB → 0.9KB`）**，`ap stats` 实时量化省流收益 |
 | **`v1.4.0` (2026-11-18)** | 攻坚跨文件重构 **「改 2 漏 5」影响面盲区** 与系统级孤儿进程：打造 **`<15ms` 语法树引用与影响面引擎 (`atlas impact` / `ap_impact`)**、**改码自动提醒漏改调用方 `[BLAST RADIUS]`**、**Windows NT 内核 `Job Object` 进程树防死锁守卫**，并新增 **`Cursor` / `Windsurf` / `VS Code` 自动接入** | **14 文件跨模块函数签名重构 (`PayLedger`)**：`Codex` **`151.6s → 96.6s`（快 `1.57 倍`）、Token `-57.4%`（`296k → 126k`）、`7/7` 满分**；`Pi (deepseek-flash)` **`102.6s → 90.5s`、Token `-24.0%`（`256k → 195k`）、`7/7` 零 Slop** |
 | **`v1.5.0` (2026-11-18)** | 从编程延伸至**所有通用智能体的四大底层原子操作**：打造**免 Python 原生万能读取器 `ap read` / `ap_read`**（直读 `.docx`/`.xlsx`/`.pptx`/`.pdf`/`GBK` 账单与网页防撑爆）、**无 Git 桌面文件夹自动快照与一键撤回 `ap undo`**（含 `>75%` 异常截断预警）及 **`Claude Desktop` 自动接入** | **无 Python 普通人 Windows 电脑非编程办公实测（`.docx` 合同 + `.xlsx` 台账 + `GBK` 银行流水）**：原生先读出乱码又调 Python 失败（`70.5s`、`126.8k` tok）→ **`+ ap v1.5.0`**：**`46.5s`（快 `1.52 倍`）、`58.0k` tok（`-54.3%`）、`5/5` 一次全对** |
+| **`v1.6.0` (2026-11-18)** | 攻克大模型多表算数幻觉、无 `rg` 搜不到文档与动态 SPA 空壳网页三大上限：打造**免 Python 跨文件 SQLite 引擎 `ap query` / `ap_query`**（支持多工作表 `.xlsx` 自动合成 `{alias}__all`、与 `GBK .csv`/`.json` 直接联表 SQL）、**语法树符号 + Office/PDF 统一检索 `ap search` / `ap_search`**，以及**无头 Edge 动态 SPA 自动渲染快照 `ap read --render`** | **2,500 行双工作表 `.xlsx` + `GBK` 流水 + `.docx` + 动态 JS 政策页联合稽核**：原生连写 5 遍 XML/Decimal 脚本（`118.4s`、`212.1k` tok）→ **`+ ap v1.6.0`**：**`94.3s`（快 `1.26 倍`）、`137.6k` tok（`-35.1%`）、`5/5` 精确到分（`84,224.82`）** |
