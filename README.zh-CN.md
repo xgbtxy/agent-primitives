@@ -23,7 +23,7 @@
 
 **Windows（打开 PowerShell 粘贴回车）：**
 ```powershell
-irm https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
+curl.exe -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
 ```
 
 **macOS / Linux：**

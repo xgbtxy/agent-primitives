@@ -23,7 +23,7 @@ No `Python`, no `Node`, no `Playwright`, no `Docker`, and **zero new commands to
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
+curl.exe -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
 ```
 
 **macOS / Linux:**
