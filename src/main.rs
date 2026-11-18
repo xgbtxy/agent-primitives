@@ -4,6 +4,7 @@ pub mod exec;
 pub mod install;
 pub mod mcp;
 pub mod stats;
+pub mod win_job;
 
 use clap::{Parser, Subcommand};
 
@@ -85,9 +86,11 @@ fn dispatch_primitive(name: &str, tail_args: &[String]) -> Option<i32> {
     let mut sub_argv = Vec::with_capacity(tail_args.len() + 1);
     sub_argv.push(name.to_string());
     sub_argv.extend_from_slice(tail_args);
-    match name {
-        "exec" => Some(exec::run_cli(&sub_argv)),
-        "stats" | "gain" => Some(stats::run_cli(&sub_argv)),
+    let is_help = tail_args.iter().any(|a| a == "--help" || a == "-h");
+    let from_mcp = std::env::var("AP_MCP_CHILD").ok().as_deref() == Some("1");
+    let code = match name {
+        "exec" => return Some(exec::run_cli(&sub_argv)),
+        "stats" | "gain" => return Some(stats::run_cli(&sub_argv)),
         "sieve" => Some(ap_sieve::run_cli(&sub_argv)),
         "baton" => Some(ap_baton::run_cli(&sub_argv)),
         "recall" => Some(ap_recall::run_cli(&sub_argv)),
@@ -95,9 +98,30 @@ fn dispatch_primitive(name: &str, tail_args: &[String]) -> Option<i32> {
         "atlas" => Some(ap_atlas::run_cli(&sub_argv)),
         "probe" => Some(ap_probe::run_cli(&sub_argv)),
         "splice" => Some(ap_splice::run_cli(&sub_argv)),
-        "audit" => Some(audit::run_cli(&sub_argv)),
+        "audit" => return Some(audit::run_cli(&sub_argv)),
         _ => None,
+    };
+    if code.is_some() && !is_help && !from_mcp {
+        let sub_action = tail_args.first().map(String::as_str).unwrap_or("");
+        let guards = if matches!(
+            (name, sub_action),
+            ("splice", "apply" | "check")
+                | ("probe", "smoke")
+                | ("guard", "verify" | "stop-gate")
+                | ("atlas", "impact" | "product")
+        ) {
+            1
+        } else {
+            0
+        };
+        let win_heals = if name == "probe" && sub_action == "smoke" && cfg!(windows) {
+            1
+        } else {
+            0
+        };
+        stats::record_event(name, 0, 0, win_heals, guards, sub_action);
     }
+    code
 }
 
 fn main() {

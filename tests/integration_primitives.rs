@@ -1169,3 +1169,138 @@ fn test_windows_exec_shield_bom_utf16_splice_and_stats_ledger() {
     let rst_out = run_ap(root, &["stats", "--reset"], None, &[("AP_HOME", &ap_home)]);
     assert!(rst_out.status.success());
 }
+
+#[test]
+fn test_ast_impact_proactive_blast_radius_win_job_and_ide_mcp() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("multi_mod");
+    let fake_home = tmp.path().join("ide_home");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::create_dir_all(fake_home.join(".cursor")).unwrap();
+    fs::create_dir_all(fake_home.join(".codeium/windsurf")).unwrap();
+
+    fs::write(
+        root.join("src/pricing.ts"),
+        "export function computeTotal(items: number[]): number {\n  return items.reduce((a, b) => a + b, 0);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/checkout.ts"),
+        "import { computeTotal } from './pricing';\nexport function checkoutCart(xs: number[]) {\n  return computeTotal(xs);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/invoice.ts"),
+        "import { computeTotal } from './pricing';\nexport function renderInvoice(xs: number[]) {\n  const sum = computeTotal(xs);\n  return `Sum=${sum}`;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/noise.ts"),
+        "// computeTotal should not match inside comments\nexport const MSG = 'computeTotal string literal should be ignored';\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tests/pricing.test.ts"),
+        "import { computeTotal } from '../src/pricing';\nif (computeTotal([10, 20]) !== 30) throw new Error('bad');\n",
+    )
+    .unwrap();
+
+    // 1. Tree-sitter AST `atlas impact` ignores comments/strings & separates definitions, callers, and tests
+    let imp_out = run_ap(
+        &root,
+        &["atlas", "impact", "computeTotal", ".", "--json"],
+        None,
+        &[],
+    );
+    assert!(imp_out.status.success());
+    let ij: Value = serde_json::from_slice(&imp_out.stdout).unwrap();
+    assert_eq!(ij["definitions"].as_array().unwrap().len(), 1);
+    let callers = ij["callers_and_refs"].as_array().unwrap();
+    assert!(
+        callers
+            .iter()
+            .any(|c| c["file"] == "src/checkout.ts" && c["kind"] == "call"),
+        "Expected call site in src/checkout.ts: {callers:?}"
+    );
+    assert!(
+        callers
+            .iter()
+            .any(|c| c["file"] == "src/invoice.ts" && c["kind"] == "call"),
+        "Expected call site in src/invoice.ts: {callers:?}"
+    );
+    assert!(
+        !callers.iter().any(|c| c["file"] == "src/noise.ts"),
+        "Comments and string literals in src/noise.ts must NOT produce false-positive AST refs"
+    );
+    assert!(ij["test_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["file"] == "tests/pricing.test.ts"));
+
+    // 2. Proactive `[BLAST RADIUS]` warning when editing only `src/pricing.ts` signature (2-of-7 partial refactor guard)
+    let partial_patch = "@@ FILE: src/pricing.ts\n<<<\nexport function computeTotal(items: number[]): number {\n  return items.reduce((a, b) => a + b, 0);\n}\n===\nexport function computeTotal(items: number[], taxRate: number): number {\n  return items.reduce((a, b) => a + b, 0) * (1 + taxRate);\n}\n>>>\n";
+    let sp_out = run_ap(
+        &root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(partial_patch),
+        &[],
+    );
+    assert!(sp_out.status.success());
+    let sp_txt = String::from_utf8_lossy(&sp_out.stdout);
+    assert!(
+        sp_txt.contains("[BLAST RADIUS]")
+            && sp_txt.contains("src/checkout.ts")
+            && sp_txt.contains("src/invoice.ts")
+            && sp_txt.contains("tests/pricing.test.ts"),
+        "Expected proactive BLAST RADIUS warning listing untouched callers, got:\n{sp_txt}"
+    );
+
+    // 3. Win32 Kernel Job Object + timeout process-tree reaping (`exit 124`)
+    let sleep_cmd = if cfg!(windows) {
+        "ping -n 10 127.0.0.1 > $null"
+    } else {
+        "sleep 10"
+    };
+    let to_out = run_ap(
+        &root,
+        &["exec", "--timeout", "1", "-c", sleep_cmd],
+        None,
+        &[("AP_HOME", &fake_home)],
+    );
+    assert_eq!(to_out.status.code(), Some(124));
+
+    // 4. Cursor, Windsurf, and VS Code Copilot MCP auto-wiring & clean uninstall
+    let ide_global = run_ap(
+        &root,
+        &["init", "--home", fake_home.to_str().unwrap()],
+        None,
+        &[],
+    );
+    assert!(ide_global.status.success());
+    assert!(fake_home.join(".cursor/mcp.json").is_file());
+    assert!(fake_home
+        .join(".codeium/windsurf/mcp_config.json")
+        .is_file());
+
+    let vs_here = run_ap(&root, &["init", "--here", "-a", "vscode"], None, &[]);
+    assert!(vs_here.status.success());
+    let vs_json: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".vscode/mcp.json")).unwrap()).unwrap();
+    assert_eq!(vs_json["servers"]["agent-primitives"]["type"], "stdio");
+
+    assert!(run_ap(&root, &["uninstall", "--here"], None, &[])
+        .status
+        .success());
+    assert!(!root.join(".vscode/mcp.json").exists());
+    assert!(run_ap(
+        &root,
+        &["uninstall", "--home", fake_home.to_str().unwrap()],
+        None,
+        &[]
+    )
+    .status
+    .success());
+    assert!(!fake_home.join(".cursor/mcp.json").exists());
+}

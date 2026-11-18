@@ -99,6 +99,27 @@ const HARNESS_SPECS: &[HarnessSpec] = &[
         rule_file: ".config/goose/AGENTS.md",
     },
     HarnessSpec {
+        id: "cursor",
+        cli_bin: "cursor",
+        probe_dirs: &[".cursor"],
+        skill_dirs: &[".agents/skills"],
+        rule_file: ".cursor/AGENTS.md",
+    },
+    HarnessSpec {
+        id: "windsurf",
+        cli_bin: "windsurf",
+        probe_dirs: &[".codeium/windsurf"],
+        skill_dirs: &[".agents/skills"],
+        rule_file: ".codeium/windsurf/AGENTS.md",
+    },
+    HarnessSpec {
+        id: "vscode",
+        cli_bin: "code",
+        probe_dirs: &[".vscode"],
+        skill_dirs: &[".agents/skills"],
+        rule_file: ".agents/AGENTS.md",
+    },
+    HarnessSpec {
         id: "openclaw",
         cli_bin: "openclaw",
         probe_dirs: &[".openclaw"],
@@ -160,6 +181,9 @@ fn normalize_harness_alias(raw: &str) -> Option<&'static str> {
         "pi" | "pi-coding-agent" => Some("pi"),
         "claude" | "claude-code" => Some("claude"),
         "grok" => Some("grok"),
+        "cursor" => Some("cursor"),
+        "windsurf" | "codeium" => Some("windsurf"),
+        "vscode" | "vs-code" | "copilot" => Some("vscode"),
         "openclaw" => Some("openclaw"),
         "hermes" => Some("hermes"),
         "agents" => Some("agents"),
@@ -210,7 +234,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     let mut bullets = Vec::new();
     if sel.contains("probe") || sel.contains("atlas") {
         bullets.push(format!(
-            "1. **Orient (`atlas` / `probe`)**: Empty/new dir -> `{ap_cmd} atlas map .` (host runtimes). Existing repo -> `{ap_cmd} probe slice . --bundle` + `{ap_cmd} atlas product .` (UI/API/DOM `#id` contracts & `[SLOP RADAR]`). Skip unreferenced files."
+            "1. **Orient & Impact (`atlas` / `probe`)**: Empty/new dir -> `{ap_cmd} atlas map .` (host runtimes). Existing repo -> `{ap_cmd} probe slice . --bundle` + `{ap_cmd} atlas product .` (UI/API/DOM `#id` contracts & `[SLOP RADAR]`). Before editing shared symbols across files -> `{ap_cmd} atlas impact <Sym> .` (exact AST callers & tests)."
         ));
     }
     if sel.contains("splice") {
@@ -714,6 +738,76 @@ fn remove_mcp_servers_json(cfg_path: &Path) {
     }
 }
 
+fn merge_vscode_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
+    let mut data: Value = if cfg_path.exists() {
+        fs::read_to_string(cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    if !data.is_object() {
+        data = json!({});
+    }
+    let servers = data
+        .as_object_mut()
+        .unwrap()
+        .entry("servers")
+        .or_insert_with(|| json!({}));
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+    servers.as_object_mut().unwrap().insert(
+        "agent-primitives".to_string(),
+        json!({
+            "type": "stdio",
+            "command": ap_bin_posix,
+            "args": ["mcp"]
+        }),
+    );
+    if let Some(p) = cfg_path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let _ = fs::write(
+        cfg_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        ),
+    );
+    posix(cfg_path)
+}
+
+fn remove_vscode_mcp(cfg_path: &Path) {
+    let Ok(txt) = fs::read_to_string(cfg_path) else {
+        return;
+    };
+    let Ok(mut data) = serde_json::from_str::<Value>(&txt) else {
+        return;
+    };
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+    if let Some(srvs) = obj.get_mut("servers").and_then(Value::as_object_mut) {
+        srvs.remove("agent-primitives");
+        if srvs.is_empty() {
+            obj.remove("servers");
+        }
+    }
+    if obj.is_empty() {
+        let _ = fs::remove_file(cfg_path);
+    } else {
+        let _ = fs::write(
+            cfg_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&data).unwrap_or_default()
+            ),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_init(
     agent_arg: &str,
@@ -869,6 +963,25 @@ pub fn cmd_init(
                 &repo_dir.join(".gemini").join("settings.json"),
                 &ap_abs_here,
                 true,
+            ));
+        }
+        if with_mcp
+            || (explicit_agents && harnesses.contains(&"cursor"))
+            || repo_dir.join(".cursor").is_dir()
+        {
+            mcp_paths.push(merge_mcp_servers_json(
+                &repo_dir.join(".cursor").join("mcp.json"),
+                &ap_abs_here,
+                false,
+            ));
+        }
+        if with_mcp
+            || (explicit_agents && harnesses.contains(&"vscode"))
+            || repo_dir.join(".vscode").is_dir()
+        {
+            mcp_paths.push(merge_vscode_mcp(
+                &repo_dir.join(".vscode").join("mcp.json"),
+                &ap_abs_here,
             ));
         }
         if with_mcp {
@@ -1033,6 +1146,23 @@ pub fn cmd_init(
             true,
         ));
     }
+    if harnesses.contains(&"cursor") {
+        mcp_paths.push(merge_mcp_servers_json(
+            &home.join(".cursor").join("mcp.json"),
+            &global_bin_posix,
+            false,
+        ));
+    }
+    if harnesses.contains(&"windsurf") {
+        mcp_paths.push(merge_mcp_servers_json(
+            &home
+                .join(".codeium")
+                .join("windsurf")
+                .join("mcp_config.json"),
+            &global_bin_posix,
+            false,
+        ));
+    }
 
     println!("[ap init] Global native Rust onboarding complete!");
     println!(
@@ -1110,11 +1240,14 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
         remove_claude_or_codex_hooks(&repo_dir.join(".codex").join("hooks.json"));
         remove_opencode_mcp(&repo_dir.join("opencode.json"));
         remove_mcp_servers_json(&repo_dir.join(".mcp.json"));
+        remove_mcp_servers_json(&repo_dir.join(".cursor").join("mcp.json"));
+        remove_vscode_mcp(&repo_dir.join(".vscode").join("mcp.json"));
         remove_mcp_servers_json(&repo_dir.join(".qwen").join("settings.json"));
         remove_mcp_servers_json(&repo_dir.join(".gemini").join("settings.json"));
 
         for dot in [
-            ".agents", ".pi", ".claude", ".codex", ".grok", ".qwen", ".gemini",
+            ".agents", ".pi", ".claude", ".codex", ".grok", ".qwen", ".gemini", ".cursor",
+            ".vscode",
         ] {
             let dp = repo_dir.join(dot);
             if dp.is_dir()
@@ -1176,6 +1309,13 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
     remove_opencode_mcp(&home.join(".config").join("opencode").join("opencode.json"));
     remove_mcp_servers_json(&home.join(".qwen").join("settings.json"));
     remove_mcp_servers_json(&home.join(".gemini").join("settings.json"));
+    remove_mcp_servers_json(&home.join(".cursor").join("mcp.json"));
+    remove_mcp_servers_json(
+        &home
+            .join(".codeium")
+            .join("windsurf")
+            .join("mcp_config.json"),
+    );
 
     let cur_exe = std::env::current_exe()
         .ok()

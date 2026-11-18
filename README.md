@@ -19,7 +19,7 @@
 
 ## Install in 10 Seconds, Then Forget About It
 
-No `Python`, no `Node`, no `Playwright`, no `Docker`, and **zero new commands to memorize**. One line installs the native `ap` binary and automatically wires your coding agents (`Claude Code`, `Codex`, `OpenCode`, `Gemini CLI`, `Qwen Code`, `Pi`, `Goose`, `Antigravity`, `Grok`):
+No `Python`, no `Node`, no `Playwright`, no `Docker`, and **zero new commands to memorize**. One line installs the native `ap` binary and automatically wires your AI IDEs &amp; CLIs (`Cursor`, `Windsurf`, `VS Code`, `Claude Code`, `Codex`, `OpenCode`, `Gemini CLI`, `Qwen Code`, `Pi`, `Goose`, `Antigravity`, `Grok`):
 
 **Windows (PowerShell):**
 ```powershell
@@ -43,9 +43,9 @@ When we audited **101,108 real tool calls** and raw `<thinking>` traces across c
 
 | Where AI `<thinking>` Gets Stuck | What Happens Without `ap` | How `ap` Solves It Automatically (Under the Hood) |
 | :--- | :--- | :--- |
-| **1. Starting Blind**<br>*(Orientation)* | Reads 15+ full files (copying bad patterns from dead legacy files) and misguesses your OS/shell. | **<30 ms** PageRank code map + HTML `#id` ↔ API route radar + Windows shell/runtime fingerprint on Turn 1. |
-| **2. Edit Friction**<br>*(Applying Code)* | Patch fails on Windows `CRLF`, PowerShell `UTF-8 BOM` / `UTF-16LE` files, or 2-space indentation shifts—breaking the model's train of thought. | Auto-cleans **UTF-8 BOM & UTF-16LE**, matches 3-tier indentation shifts, and validates **6-language AST syntax** *before* touching disk. |
-| **3. Environment Derailment**<br>*(Windows & Mac Shell)* | Trained on Linux Bash, the model hits **`528` Windows OS/shell crashes** (`'gbk' codec` errors, PS 5.1 `&&`/`curl`/`<<EOF` errors) & drowns in 50KB build logs. | Transparent **Base64 Hook + `ap exec`** locks BOM-free `UTF-8`, heals PS `&&`/`curl.exe`/URL-`&`/POSIX pipes, prevents pipe hangs, and filters 90%+ log noise. |
+| **1. Starting Blind &amp; Partial Refactors**<br>*(Orientation &amp; Blast Radius)* | Reads 15+ wrong/dead files or updates 2 of 7 callers during a multi-file refactor. | **<15 ms** PageRank map + **Tree-sitter AST `ap_impact` caller graph** + UI `#id` ↔ API radar (zero 2GB LSP daemon). |
+| **2. Edit Friction**<br>*(Applying Code)* | Patch fails on Windows `CRLF`, PowerShell `UTF-8 BOM` / `UTF-16LE` files, or 2-space indentation shifts—breaking the model's train of thought. | Auto-cleans **UTF-8 BOM &amp; UTF-16LE**, matches 3-tier indentation shifts, checks **6-language AST syntax**, and emits proactive **`[BLAST RADIUS]`** alerts on untouched callers. |
+| **3. Environment Derailment**<br>*(Windows &amp; Mac Shell)* | Trained on Linux Bash, the model hits **`528` Windows OS/shell crashes** (`'gbk'` codec errors, PS 5.1 `&&`/`curl`/`<<EOF`) &amp; leaves zombie processes. | Transparent **Base64 Hook + `ap exec`** locks BOM-free `UTF-8`, heals PS `&&`/`curl.exe`/POSIX pipes, reaps orphans via **Win32 Kernel Job Objects**, and filters 90%+ log noise. |
 | **4. Blind Delivery & Slop**<br>*(Self-Verification)* | Background dev servers deadlock terminals or hit `EADDRINUSE`; the agent skips UI testing and leaves `: any` or silent `catch {}` slop. | Frees stuck ports, clicks real UI in **built-in Windows Edge / Chrome** (`0` MB Playwright), and enforces a **<2 ms `exit 2` anti-slop gate** so the AI fixes its own mistakes before finishing. |
 
 ---
@@ -75,6 +75,7 @@ Measured head-to-head on Windows 11 across `$0` free coding agents and commercia
 | Coding Agent & Real Task | Without `ap` → **With `ap`** (Speed & Steps) | Code Quality & Self-Correction | Wasted Tokens Avoided |
 | :--- | :--- | :---: | :--- |
 | **`OpenCode` Free (`$0` `big-pickle`)** · *1-Sentence Prompt* | `430.2s` (`60` calls) → **`182.4s` (`23` calls, 2.36x faster)** | `7/8` *(left `empty-catch`)* → **`8/8` (`0` slop)** | **`-75.1%`** (`1.61M → 402k`) |
+| **`Codex CLI` (`gpt-6-astra`)** · *14-File Multi-Module Refactor* | `151.6s` → **`96.6s` (1.57x faster)** | **`7/7` → `7/7`** *(all 5 AST callers + Edge UI synced)* | **`-57.4%`** (`296k → 126k`) |
 | **`Codex CLI` (`gpt-6-astra`)** · *From-Scratch Random App* | `345.3s` (`23` calls) → **`244.6s` (`9` calls, -61% steps)** | **`6/6` → `6/6`** *(1-shot Edge CDP check)* | **`-83.3%`** (`1.12M → 186k`) |
 | **`Codex CLI` (`gpt-6-astra`)** · *Full-Stack Upgrade* | `333.6s` (`24` calls) → **`294.3s` (`11` calls, -54% steps)** | **`8/8` → `8/8`** | **`-65.4%`** (`1.05M → 365k`) |
 | **`Pi CLI` (`deepseek-flash`)** · *Full-Stack Upgrade* | `483.0s` (`81` calls) → **`271.5s` (`70` calls, 1.78x faster)** | **`8/8` → `8/8`** *(`-42.7%` `<thinking>` churn)* | **`-36.7%`** (`3.63M → 2.30M`) |

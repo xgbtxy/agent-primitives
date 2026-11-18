@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod blast;
 pub mod check;
 pub mod patch;
 
@@ -588,12 +589,15 @@ fn apply_spec_inner(
     if !emit_stdout {
         return if overall_ok { 0 } else { 1 };
     }
+    let blast_hits =
+        blast::detect_untouched_blast_radius(&cwd_canon, &touched_paths, &backups, &working_text);
     if as_json {
         let mut obj = json!({
             "ok": overall_ok,
             "rolled_back": false,
             "files_updated": touched_paths.len(),
             "ops_applied": applied_summary,
+            "blast_radius": blast_hits,
             "elapsed_ms": elapsed_ms,
         });
         if let Some(cp) = check_opt {
@@ -606,6 +610,18 @@ fn apply_spec_inner(
             touched_paths.len(),
             applied_summary.len()
         );
+        if !blast_hits.is_empty() {
+            println!(
+                "[BLAST RADIUS] Modified symbol signature(s) still referenced in {} untouched site(s) — verify callers:",
+                blast_hits.len()
+            );
+            for bh in &blast_hits {
+                println!(
+                    "  - {}:{} ({}) — {}",
+                    bh.file, bh.line, bh.symbol, bh.snippet
+                );
+            }
+        }
         if let Some(cp) = &check_opt {
             emit_check_human(cp);
         }

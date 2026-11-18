@@ -514,6 +514,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             return 127;
         }
     };
+    let mut job_guard = crate::win_job::WinJobGuard::attach(&child);
 
     let deadline = Duration::from_secs(cli.timeout.max(1));
     let mut timed_out = false;
@@ -523,6 +524,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             Ok(None) => {
                 if t0.elapsed() >= deadline {
                     timed_out = true;
+                    drop(job_guard.take());
                     kill_tree(&mut child);
                     win_heals += 1;
                     break 124;
@@ -530,11 +532,13 @@ pub fn run_cli(args: &[String]) -> i32 {
                 thread::sleep(Duration::from_millis(15));
             }
             Err(_) => {
+                drop(job_guard.take());
                 kill_tree(&mut child);
                 break 1;
             }
         }
     };
+    drop(job_guard);
     let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
 
     let out_bytes_raw = fs::read(&out_file_p).unwrap_or_default();

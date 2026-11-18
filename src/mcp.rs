@@ -15,8 +15,20 @@ fn mcp_tools_schema() -> Value {
             }
         },
         {
+            "name": "ap_impact",
+            "description": "Call BEFORE changing any shared function, class, struct, interface, or route across multiple files. Maps exact Tree-sitter AST definitions, downstream callers/references (ignoring comments & strings), and related test files in <15ms so you never ship a partial refactor.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Workspace root directory (default: '.')" },
+                    "symbol": { "type": "string", "description": "Symbol name or comma-separated symbols (e.g. 'computeTotal,OrderItem')" }
+                },
+                "required": ["symbol"]
+            }
+        },
+        {
             "name": "ap_edit",
-            "description": "Atomically create or edit multiple files in 1 call with zero shell-quoting issues. Validates Tree-sitter AST syntax (Py/TS/JS/Go/Rust/C) BEFORE writing to disk (auto-rolls back on syntax error) and optionally runs tests.",
+            "description": "Atomically create or edit multiple files in 1 call with zero shell-quoting issues. Cleans UTF-8 BOM/UTF-16LE, validates Tree-sitter AST syntax BEFORE writing to disk, and proactively warns if a modified function/type signature has untouched downstream callers (`[BLAST RADIUS]`).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -111,7 +123,7 @@ fn run_self_captured(args: &[String], stdin_data: Option<&str>) -> (bool, String
         return (false, "Failed to locate ap binary".to_string());
     };
     let mut cmd = Command::new(exe);
-    cmd.args(args);
+    cmd.args(args).env("AP_MCP_CHILD", "1");
     cmd.stdin(if stdin_data.is_some() {
         std::process::Stdio::piped()
     } else {
@@ -221,6 +233,23 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if ok {
                 crate::stats::record_event("edit", 0, 0, 0, n_ops, "mcp-edit");
             }
+            (ok, out)
+        }
+        "ap_impact" => {
+            let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let sym = args
+                .get("symbol")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if sym.is_empty() {
+                return (false, "Pass non-empty `symbol` to `ap_impact`.".to_string());
+            }
+            let (ok, out) = run_self_captured(
+                &["atlas".into(), "impact".into(), sym.into(), root.into()],
+                None,
+            );
+            crate::stats::record_event("impact", 0, out.len() as u64, 0, 1, "mcp-impact");
             (ok, out)
         }
         "ap_exec" => {

@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
+pub mod impact;
 pub mod product;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,15 @@ enum SubCmd {
         root: String,
         #[arg(long, default_value = "")]
         write: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Map exact Tree-sitter AST definitions, downstream callers & tests for symbol(s) in <15ms
+    Impact {
+        /// Symbol name (or comma-separated symbols, e.g. `computeTotal,OrderItem`)
+        symbol: String,
+        #[arg(default_value = ".")]
+        root: String,
         #[arg(long)]
         json: bool,
     },
@@ -1251,6 +1261,20 @@ pub fn run_cli(args: &[String]) -> i32 {
                 println!("{}", serde_json::to_string_pretty(&pm).unwrap_or_default());
             } else {
                 print!("{md}");
+            }
+            return 0;
+        }
+        Some(SubCmd::Impact { symbol, root, json }) => {
+            let root_p = PathBuf::from(&root);
+            if !root_p.exists() {
+                eprintln!("[atlas] path not found: {root}");
+                return 1;
+            }
+            let rep = impact::analyze_symbol_impact(&root_p, &[symbol], SKIP_DIRS);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+            } else {
+                println!("{}", impact::render_impact_md(&rep));
             }
             return 0;
         }
