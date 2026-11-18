@@ -149,12 +149,40 @@ fn mcp_tools_schema() -> Value {
             }
         },
         {
+            "name": "ap_fuzz",
+            "description": "Torture-test any created web/API server or CLI against malformed JSON, negative/zero/NaN boundary inputs, CJK/XSS/SQLi payloads, 404 paths, and simultaneous multi-threaded concurrency bursts in <1s.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "start": { "type": "string", "description": "Optional server start command (auto-detected if omitted)" },
+                    "cli": { "type": "string", "description": "Optional CLI command to fuzz instead of an HTTP server" },
+                    "concurrency": { "type": "integer", "description": "Parallel race-condition threads (default: 8)" }
+                }
+            }
+        },
+        {
+            "name": "ap_mutate",
+            "description": "Test the quality of your unit tests in <2s via Tree-sitter AST fault-seeding (`>=`->`>`, `===`->`!==`, `+`->`-`, `&&`->`||`). Reports exact surviving mutants where your tests missed boundary or logic cases.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "target": { "type": "string", "description": "Source file to mutate (e.g. 'src/wallet.ts')" },
+                    "test_cmd": { "type": "string", "description": "Optional test command (auto-detected if omitted)" },
+                    "max_mutants": { "type": "integer", "description": "Max mutants to evaluate (default: 8)" }
+                },
+                "required": ["target"]
+            }
+        },
+        {
             "name": "ap_verify",
             "description": "Run final quality gate before finishing: checks 0 broken HTML #id <-> JS selector or fetch() <-> route contracts, 0 anti-slop violations (:any, @ts-ignore, empty catch {}), and runs project tests.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" }
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "deep": { "type": "boolean", "description": "Also run cross-file export/arity linker, API chaos/concurrency fuzzer, and AST mutation audit in 1 pass" }
                 }
             }
         },
@@ -471,6 +499,71 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             crate::stats::record_event("impact", 0, out.len() as u64, 0, 1, "mcp-impact");
             (ok, out)
         }
+        "ap_fuzz" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            let mut cli = vec![
+                "probe".to_string(),
+                "fuzz".to_string(),
+                "--cwd".to_string(),
+                cwd.to_string(),
+            ];
+            if let Some(st) = args
+                .get("start")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--start".to_string());
+                cli.push(st.to_string());
+            }
+            if let Some(cc) = args
+                .get("cli")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--cli".to_string());
+                cli.push(cc.to_string());
+            }
+            if let Some(conc) = args.get("concurrency").and_then(Value::as_u64) {
+                cli.push("--concurrency".to_string());
+                cli.push(conc.to_string());
+            }
+            let (ok, out) = run_self_captured(&cli, None);
+            crate::stats::record_event("fuzz", 0, out.len() as u64, 0, 1, "mcp-fuzz");
+            (ok, out)
+        }
+        "ap_mutate" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            let target = args
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if target.is_empty() {
+                return (false, "Pass `target` file path to `ap_mutate`.".to_string());
+            }
+            let mut cli = vec![
+                "probe".to_string(),
+                "mutate".to_string(),
+                target.to_string(),
+                "--cwd".to_string(),
+                cwd.to_string(),
+            ];
+            if let Some(tc) = args
+                .get("test_cmd")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--test-cmd".to_string());
+                cli.push(tc.to_string());
+            }
+            if let Some(mm) = args.get("max_mutants").and_then(Value::as_u64) {
+                cli.push("--max-mutants".to_string());
+                cli.push(mm.to_string());
+            }
+            let (ok, out) = run_self_captured(&cli, None);
+            crate::stats::record_event("mutate", 0, out.len() as u64, 0, 1, "mcp-mutate");
+            (ok, out)
+        }
         "ap_exec" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
             let cmd = args
@@ -546,10 +639,11 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                     }
                 }
             }
-            let (g_ok, g_txt) = run_self_captured(
-                &["guard".into(), "verify".into(), "--cwd".into(), cwd.into()],
-                None,
-            );
+            let mut v_args = vec!["guard".into(), "verify".into(), "--cwd".into(), cwd.into()];
+            if args.get("deep").and_then(Value::as_bool).unwrap_or(false) {
+                v_args.push("--deep".into());
+            }
+            let (g_ok, g_txt) = run_self_captured(&v_args, None);
             let ok = g_ok && mismatch_lines.is_empty();
             crate::stats::record_event("verify", 0, 0, 0, 1, "mcp-verify");
             let combined = if mismatch_lines.is_empty() {

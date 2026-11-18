@@ -625,6 +625,11 @@ fn apply_spec_inner(
     }
     let blast_hits =
         blast::detect_untouched_blast_radius(&cwd_canon, &touched_paths, &backups, &working_text);
+    let contract_warnings = if check_opt.is_none() {
+        collect_check_payload(&cwd_canon, false, "").issues
+    } else {
+        Vec::new()
+    };
     if as_json {
         let mut obj = json!({
             "ok": overall_ok,
@@ -632,6 +637,7 @@ fn apply_spec_inner(
             "files_updated": touched_paths.len(),
             "ops_applied": applied_summary,
             "blast_radius": blast_hits,
+            "contract_warnings": contract_warnings,
             "elapsed_ms": elapsed_ms,
         });
         if let Some(cp) = check_opt {
@@ -654,6 +660,15 @@ fn apply_spec_inner(
                     "  - {}:{} ({}) — {}",
                     bh.file, bh.line, bh.symbol, bh.snippet
                 );
+            }
+        }
+        if !contract_warnings.is_empty() {
+            println!(
+                "[CONTRACT WARNING] {} cross-file import/export/arity mismatch(es) detected — fix before running:",
+                contract_warnings.len()
+            );
+            for cw in contract_warnings.iter().take(8) {
+                println!("  - {cw}");
             }
         }
         if let Some(cp) = &check_opt {

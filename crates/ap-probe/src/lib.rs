@@ -1,10 +1,14 @@
 pub mod cdp;
+pub mod fuzz;
+pub mod mutate;
 pub mod runtime;
 pub mod slice;
 pub mod smoke;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use fuzz::run_fuzz;
+use mutate::run_mutate;
 use runtime::{detect_lang, run_diff_dispatch, run_trace_dispatch};
 use slice::run_slice;
 use smoke::run_smoke;
@@ -101,6 +105,33 @@ enum SubCmd {
         spec: Option<PathBuf>,
         #[arg(long)]
         stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Adversarial HTTP/API & CLI chaos fuzzer (malformed JSON, negative/zero/NaN, CJK/SQLi & Barrier concurrency burst)
+    Fuzz {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        cli: Option<String>,
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sub-2s polyglot Tree-sitter AST mutation tester (seeds boundary/operator faults to expose weak unit tests)
+    Mutate {
+        target: PathBuf,
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        test_cmd: Option<String>,
+        #[arg(long, default_value_t = 8)]
+        max_mutants: usize,
         #[arg(long)]
         json: bool,
     },
@@ -233,5 +264,27 @@ pub fn run_cli(args: &[String]) -> i32 {
                 json,
             )
         }
+        SubCmd::Fuzz {
+            cwd,
+            start,
+            url,
+            cli,
+            concurrency,
+            json,
+        } => run_fuzz(
+            &cwd,
+            start.as_deref(),
+            url.as_deref(),
+            cli.as_deref(),
+            concurrency,
+            json,
+        ),
+        SubCmd::Mutate {
+            target,
+            cwd,
+            test_cmd,
+            max_mutants,
+            json,
+        } => run_mutate(&cwd, &target, test_cmd.as_deref(), max_mutants, json),
     }
 }

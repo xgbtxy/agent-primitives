@@ -246,17 +246,17 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     let mut bullets = Vec::new();
     if sel.contains("probe") || sel.contains("atlas") {
         bullets.push(format!(
-            "1. **Orient & Impact (`atlas` / `probe`)**: Start with `{ap_cmd} atlas map .` (<15ms Code + Docs + `.xlsx`/`.csv`/`.sqlite`/`.gz` X-Ray & host env). For web/UI apps -> `{ap_cmd} atlas product .` (DOM `#id` ↔ API contracts & `[SLOP RADAR]`). Before changing shared symbols across files -> `{ap_cmd} atlas impact <Sym> .`."
+            "1. **Orient & Impact (`atlas`)**: Non-empty dir -> `{ap_cmd} atlas map .` (<15ms Code + `.xlsx`/`.csv`/`.sqlite`/`.gz` X-Ray). Existing web UI -> `{ap_cmd} atlas product .`. Before changing shared symbols -> `{ap_cmd} atlas impact <Sym> .`."
         ));
     }
     if sel.contains("splice") {
         bullets.push(format!(
-            "2. **Edit (`splice`)**: `{ap_cmd} splice view <file> --symbol <Sym>`. Batch writes/appends/edits/diffs + unit tests in 1 call via `{ap_cmd} splice apply --cwd . --stdin --test` (`@@ WRITE: p` / `@@ APPEND: p` `<<<`...`>>>`, `@@ FILE: p` `<<<` old `===` new `>>>`, `@@ SYMBOL: p :: S`, or Git unified diff)."
+            "2. **Create & Edit (`splice`)**: Use native edit tools or batch via `{ap_cmd} splice apply --cwd . --stdin` (`@@ WRITE: p` / `@@ APPEND: p` `<<<`...`>>>`, `@@ FILE: p` `<<<` old `===` new `>>>`, `@@ SYMBOL: p :: S`, or Git unified diff) — auto-checks AST & cross-file exports."
         ));
     }
     if sel.contains("probe") || sel.contains("guard") {
         bullets.push(format!(
-            "3. **Verify (`probe smoke` + `guard verify`)**: Test web/API apps in 1 call via `{ap_cmd} probe smoke --cwd . --stdin` (`OPEN /`, `FILL #id v`, `SELECT #id v`, `CLICK #id`|`text=Btn`, `EVAL <js>`, `GET/POST /api/...`, `BODY {{...}}`, `EXPECT STATUS/CONTAINS/JSON` — auto-starts `PORT`, checks 0 JS/stderr errors & kills process tree). Finish with `{ap_cmd} guard verify`."
+            "3. **1-Call Deep Test & Verify (`guard verify --deep`)**: Run `{ap_cmd} guard verify --cwd . --deep` to execute anti-slop (`.only`/empty-catch/`:any`), cross-file export/arity check, unit tests, API chaos/concurrency fuzzing, and AST mutation audit in ONE pass! (UI DOM clicks: `{ap_cmd} probe smoke --cwd . --stdin` with `OPEN /`, `FILL #id v`, `CLICK #id`, `EXPECT CONTAINS txt`)."
         ));
     }
     if ["probe", "sieve", "recall", "guard", "baton"]
@@ -264,11 +264,11 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Read, SQL Query, Search, Exec & Undo**: Read `.docx`/`.xlsx`/`.pdf`/`.sqlite`/`.gz`/GBK/SPA URLs via `{ap_cmd} read <target> [--render|--query Q|--lines A-B]`; exact SQL joins across `.sqlite` + multi-sheet `.xlsx` (`a__all`) + GBK `.csv`/`.json` via `{ap_cmd} query -f a=x.xlsx -f b=y.sqlite --schema` then `--stdin`; AST+Office search via `{ap_cmd} search <pat> .`; UTF-8/PS shell via `{ap_cmd} exec -c \"<cmd>\"`; undo via `{ap_cmd} undo`."
+            "4. **Read, SQL, Search, Exec & Undo**: `{ap_cmd} read <target> [--render|--query Q|--lines A-B]` (`.docx`/`.xlsx`/`.pdf`/`.sqlite`/`.gz`/GBK/SPA); `{ap_cmd} query -f a=x.xlsx -f b=y.sqlite --schema` then `--stdin`; `{ap_cmd} search <pat> .`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
         ));
     }
     format!(
-        "{FENCE_START}\n## Agent Primitives (`{ap_cmd} <tool>` — self-contained, skip reading SKILL.md)\n{}\n{FENCE_END}\n",
+        "{FENCE_START}\n## Agent Primitives (`{ap_cmd} <tool>` — self-contained, skip reading SKILL.md or running --help)\n{}\n{FENCE_END}\n",
         bullets.join("\n")
     )
 }

@@ -116,6 +116,12 @@ pub fn default_guard_config(root: &Path) -> GuardConfig {
                 forbid: r"catch\s*(?:\([^)]*\))?\s*\{\s*(?://[^\n]*\s*)?\}".to_string(),
                 message: "Never swallow exceptions with an empty `catch {}`; surface or handle the error.".to_string(),
             },
+            CodeRule {
+                id: "no-focused-test-only".to_string(),
+                glob: "*.test.*,*.spec.*".to_string(),
+                forbid: r"\b(?:describe|it|test)\.only\s*\(".to_string(),
+                message: "Remove `.only(` so the full test suite executes without skipping cases.".to_string(),
+            },
         ],
         checks: auto_detect_checks(root),
     }
@@ -128,7 +134,12 @@ fn matches_glob_list(rel_path: &str, glob_csv: &str) -> bool {
         if pat.is_empty() || pat == "*" {
             return true;
         }
-        if let Some(ext) = pat.strip_prefix("*.") {
+        if pat.starts_with('*') && pat.ends_with('*') && pat.len() > 2 {
+            let mid = &pat[1..pat.len() - 1];
+            if fname.contains(mid) || rel_path.contains(mid) {
+                return true;
+            }
+        } else if let Some(ext) = pat.strip_prefix("*.") {
             if fname.ends_with(&format!(".{ext}")) {
                 return true;
             }
@@ -225,13 +236,18 @@ pub fn evaluate_code_rules(root: &Path, cfg: &GuardConfig, scan_all: bool) -> Ve
             .unwrap_or(&fp)
             .to_string_lossy()
             .replace('\\', "/");
-        if rel.starts_with("tests/") || rel.contains(".test.") || rel.contains("_test.") {
-            continue;
-        }
+        let is_test_file = rel.starts_with("tests/")
+            || rel.starts_with("test/")
+            || rel.contains(".test.")
+            || rel.contains(".spec.")
+            || rel.contains("_test.");
         let Ok(txt) = fs::read_to_string(&fp) else {
             continue;
         };
         for (rule, re) in &compiled {
+            if is_test_file && !rule.glob.contains("test") && !rule.glob.contains("spec") {
+                continue;
+            }
             if !matches_glob_list(&rel, &rule.glob) {
                 continue;
             }

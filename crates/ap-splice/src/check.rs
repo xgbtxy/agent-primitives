@@ -2,7 +2,7 @@ use crate::ast::verify_syntax;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,7 +106,11 @@ fn find_python_bin(root: &Path) -> Option<String> {
     None
 }
 
-fn resolve_ts_rel(from_file: &Path, spec: &str, all_code_set: &HashSet<PathBuf>) -> bool {
+fn resolve_ts_rel_target(
+    from_file: &Path,
+    spec: &str,
+    all_code_set: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
     let parent = from_file.parent().unwrap_or_else(|| Path::new("."));
     let base = parent.join(spec);
     let mut cands = vec![base.clone()];
@@ -124,12 +128,162 @@ fn resolve_ts_rel(from_file: &Path, spec: &str, all_code_set: &HashSet<PathBuf>)
             cands.push(base.join(format!("index.{ext}")));
         }
     }
-    cands.iter().any(|c| {
-        c.exists()
-            || fs::canonicalize(c)
-                .map(|cc| all_code_set.contains(&cc))
-                .unwrap_or(false)
+    for c in cands {
+        if let Ok(cc) = fs::canonicalize(&c) {
+            if all_code_set.contains(&cc) || cc.is_file() {
+                return Some(cc);
+            }
+        }
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+struct TsModuleInterface {
+    exports: HashSet<String>,
+    has_wildcard_export: bool,
+    fn_arities: HashMap<String, (usize, usize)>,
+}
+
+fn ts_export_regexes() -> &'static (Regex, Regex, Regex, Regex, Regex) {
+    static RE: OnceLock<(Regex, Regex, Regex, Regex, Regex)> = OnceLock::new();
+    RE.get_or_init(|| {
+        let fn_re = Regex::new(
+            r"(?m)^\s*export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)",
+        )
+        .unwrap();
+        let decl_re = Regex::new(
+            r"(?m)^\s*export\s+(?:declare\s+)?(?:const|let|var|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)",
+        )
+        .unwrap();
+        let list_re = Regex::new(r"(?m)^\s*export\s+(?:type\s+)?\{([^}]+)\}").unwrap();
+        let star_re = Regex::new(r"(?m)^\s*export\s+\*\s+from\s+").unwrap();
+        let named_imp_re = Regex::new(
+            r#"(?m)^\s*import\s+\{([^}]+)\}\s+from\s+['"](\.[^'"]+)['"]"#,
+        )
+        .unwrap();
+        (fn_re, decl_re, list_re, star_re, named_imp_re)
     })
+}
+
+fn parse_param_arity(params_raw: &str) -> (usize, usize) {
+    let p = params_raw.trim();
+    if p.is_empty() {
+        return (0, 0);
+    }
+    let mut min_a = 0usize;
+    let mut max_a = 0usize;
+    let mut depth = 0i32;
+    let mut seg = String::new();
+    let mut parts = Vec::new();
+    for ch in p.chars() {
+        match ch {
+            '(' | '[' | '{' | '<' => {
+                depth += 1;
+                seg.push(ch);
+            }
+            ')' | ']' | '}' | '>' => {
+                depth -= 1;
+                seg.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(seg.trim().to_string());
+                seg.clear();
+            }
+            _ => seg.push(ch),
+        }
+    }
+    if !seg.trim().is_empty() {
+        parts.push(seg.trim().to_string());
+    }
+    for item in parts {
+        if item.starts_with("this:") || item.starts_with("this ") {
+            continue;
+        }
+        if item.starts_with("...") {
+            return (min_a, usize::MAX);
+        }
+        max_a += 1;
+        let head = item.split(':').next().unwrap_or(&item).trim();
+        if !item.contains('=') && !head.ends_with('?') {
+            min_a += 1;
+        }
+    }
+    (min_a, max_a)
+}
+
+fn extract_ts_interface(txt: &str) -> TsModuleInterface {
+    let (fn_re, decl_re, list_re, star_re, _) = ts_export_regexes();
+    let mut exports = HashSet::new();
+    let mut fn_arities = HashMap::new();
+    let has_wildcard_export =
+        star_re.is_match(txt) || txt.contains("module.exports") || txt.contains("exports.");
+    if txt.contains("export default ") {
+        exports.insert("default".to_string());
+    }
+    for cap in fn_re.captures_iter(txt) {
+        let name = cap[1].to_string();
+        let arity = parse_param_arity(&cap[2]);
+        exports.insert(name.clone());
+        fn_arities.insert(name, arity);
+    }
+    for cap in decl_re.captures_iter(txt) {
+        exports.insert(cap[1].to_string());
+    }
+    for cap in list_re.captures_iter(txt) {
+        for raw_item in cap[1].split(',') {
+            let clean = raw_item.trim().trim_start_matches("type ").trim();
+            if clean.is_empty() {
+                continue;
+            }
+            let exported = clean
+                .rsplit_once(" as ")
+                .map(|(_, alias)| alias.trim())
+                .unwrap_or(clean);
+            exports.insert(exported.to_string());
+        }
+    }
+    TsModuleInterface {
+        exports,
+        has_wildcard_export,
+        fn_arities,
+    }
+}
+
+fn count_top_level_args(inside: &str) -> Option<usize> {
+    let t = inside.trim();
+    if t.is_empty() {
+        return Some(0);
+    }
+    if t.contains("...") {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_str: Option<char> = None;
+    let mut prev = '\0';
+    let mut commas = 0usize;
+    for ch in t.chars() {
+        if let Some(q) = in_str {
+            if ch == q && prev != '\\' {
+                in_str = None;
+            }
+        } else {
+            match ch {
+                '\'' | '"' | '`' => in_str = Some(ch),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => commas += 1,
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(commas + 1)
 }
 
 fn detect_test_command(
@@ -457,6 +611,15 @@ pub fn collect_check_payload(
         }
     }
 
+    let mut ts_interfaces: HashMap<PathBuf, TsModuleInterface> = HashMap::new();
+    for tf in &ts_js_files {
+        if let Ok(txt) = fs::read_to_string(tf) {
+            let key = fs::canonicalize(tf).unwrap_or_else(|_| tf.clone());
+            ts_interfaces.insert(key, extract_ts_interface(&txt));
+        }
+    }
+    let (_, _, _, _, named_imp_re) = ts_export_regexes();
+
     for tf in &ts_js_files {
         let rel_s = tf
             .strip_prefix(&root_canon)
@@ -472,7 +635,7 @@ pub fn collect_check_payload(
                 .or_else(|| cap.get(2))
                 .map(|m| m.as_str())
                 .unwrap_or("");
-            if !spec.is_empty() && !resolve_ts_rel(tf, spec, &all_code_files) {
+            if !spec.is_empty() && resolve_ts_rel_target(tf, spec, &all_code_files).is_none() {
                 let lineno = txt[..cap.get(0).unwrap().start()]
                     .bytes()
                     .filter(|&b| b == b'\n')
@@ -481,6 +644,95 @@ pub fn collect_check_payload(
                 issues.push(format!(
                     "{rel_s}:L{lineno}: Broken relative import `{spec}`"
                 ));
+            }
+        }
+        for cap in named_imp_re.captures_iter(&txt) {
+            let raw_names = &cap[1];
+            let spec = &cap[2];
+            let Some(target_p) = resolve_ts_rel_target(tf, spec, &all_code_files) else {
+                continue;
+            };
+            let ext_t = target_p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext_t == "json" {
+                continue;
+            }
+            let Some(iface) = ts_interfaces.get(&target_p) else {
+                continue;
+            };
+            if iface.has_wildcard_export || iface.exports.is_empty() {
+                continue;
+            }
+            let lineno = txt[..cap.get(0).unwrap().start()]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count()
+                + 1;
+            for item in raw_names.split(',') {
+                let clean = item.trim().trim_start_matches("type ").trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                let (orig, local_alias) = clean
+                    .split_once(" as ")
+                    .map(|(o, a)| (o.trim(), a.trim()))
+                    .unwrap_or((clean, clean));
+                if !iface.exports.contains(orig) {
+                    let mut avail: Vec<&str> = iface.exports.iter().map(String::as_str).collect();
+                    avail.sort();
+                    issues.push(format!(
+                        "{rel_s}:L{lineno}: Phantom named import `{orig}` from `{spec}` (exported: {})",
+                        avail.into_iter().take(8).collect::<Vec<_>>().join(", ")
+                    ));
+                } else if let Some(&(min_a, max_a)) = iface.fn_arities.get(orig) {
+                    let call_pat = format!("{local_alias}(");
+                    for (l_idx, ln) in txt.lines().enumerate() {
+                        if ln.trim_start().starts_with("import ")
+                            || ln.trim_start().starts_with("//")
+                        {
+                            continue;
+                        }
+                        if let Some(pos) = ln.find(&call_pat) {
+                            let prev_ok = pos == 0
+                                || !ln.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                                    && ln.as_bytes()[pos - 1] != b'.'
+                                    && ln.as_bytes()[pos - 1] != b'_';
+                            if !prev_ok {
+                                continue;
+                            }
+                            let after = &ln[pos + call_pat.len()..];
+                            let mut depth = 1i32;
+                            let mut end_off = None;
+                            for (ci, ch) in after.char_indices() {
+                                if ch == '(' {
+                                    depth += 1;
+                                } else if ch == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        end_off = Some(ci);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(eo) = end_off {
+                                if let Some(argc) = count_top_level_args(&after[..eo]) {
+                                    if argc < min_a || argc > max_a {
+                                        let exp = if min_a == max_a {
+                                            format!("{min_a}")
+                                        } else if max_a == usize::MAX {
+                                            format!(">={min_a}")
+                                        } else {
+                                            format!("{min_a}..={max_a}")
+                                        };
+                                        issues.push(format!(
+                                            "{rel_s}:L{}: Call arity mismatch `{local_alias}(...{argc} args)` — `{spec}::{orig}` expects {exp} arg(s)",
+                                            l_idx + 1
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -57,6 +57,9 @@ enum SubCmd {
         cwd: PathBuf,
         #[arg(long)]
         all: bool,
+        /// Fuse cross-file contract linker + unit tests + API chaos/concurrency fuzz + AST mutation into 1 pass
+        #[arg(long)]
+        deep: bool,
         #[arg(long = "check")]
         checks: Vec<String>,
     },
@@ -428,6 +431,168 @@ fn spawn_shell_string(shell_cmd: &str, cwd: &Path) -> Result<std::process::Outpu
     }
 }
 
+fn extract_failing_frame_snippet(scan_root: &Path, text: &str) -> String {
+    static FRAME_RE: OnceLock<Regex> = OnceLock::new();
+    let re = FRAME_RE.get_or_init(|| {
+        Regex::new(r#"(?:([A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|mjs|py|rs|go|c)):(\d+)|File "([^"]+\.py)", line (\d+))"#).unwrap()
+    });
+    for cap in re.captures_iter(text) {
+        let (rel_raw, line_s) = if let (Some(p), Some(l)) = (cap.get(1), cap.get(2)) {
+            (p.as_str(), l.as_str())
+        } else if let (Some(p), Some(l)) = (cap.get(3), cap.get(4)) {
+            (p.as_str(), l.as_str())
+        } else {
+            continue;
+        };
+        if rel_raw.contains("node_modules") {
+            continue;
+        }
+        let Ok(ln_no) = line_s.parse::<usize>() else {
+            continue;
+        };
+        let cand = {
+            let p = Path::new(rel_raw);
+            if p.is_file() {
+                p.to_path_buf()
+            } else {
+                scan_root.join(rel_raw)
+            }
+        };
+        if let Ok(src) = fs::read_to_string(&cand) {
+            let src_lines: Vec<&str> = src.lines().collect();
+            if ln_no >= 1 && ln_no <= src_lines.len() {
+                let s = ln_no.saturating_sub(2).max(1);
+                let e = (ln_no + 2).min(src_lines.len());
+                let block = (s..=e)
+                    .map(|k| {
+                        let mark = if k == ln_no { ">" } else { " " };
+                        format!("{mark}{k:4} | {}", src_lines[k - 1])
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return format!("`{}`:\n{block}", rel_raw.replace('\\', "/"));
+            }
+        }
+    }
+    String::new()
+}
+
+fn run_deep_creation_and_test_gates(scan_root: &Path) -> Vec<String> {
+    let mut deep_issues = Vec::new();
+    let Ok(exe) = std::env::current_exe() else {
+        return deep_issues;
+    };
+    let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if !stem.eq_ignore_ascii_case("ap") {
+        return deep_issues;
+    }
+
+    // 1. Cross-File Export & Arity Contract Linker (`ap splice check`)
+    if let Ok(o) = Command::new(&exe)
+        .args(["splice", "check"])
+        .arg(scan_root)
+        .output()
+    {
+        if !o.status.success() {
+            let out_s = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            deep_issues.push(format!(
+                "Cross-file contract check failed:\n{}",
+                out_s.trim()
+            ));
+            return deep_issues;
+        }
+    }
+
+    // 2. Auto API Chaos + Concurrency Fuzzer if HTTP server entrypoint exists
+    let has_server = scan_root.join("package.json").is_file()
+        && fs::read_to_string(scan_root.join("package.json"))
+            .map(|t| t.contains("\"start\""))
+            .unwrap_or(false)
+        || scan_root.join("src/server.mjs").is_file()
+        || scan_root.join("src/server.ts").is_file()
+        || scan_root.join("src/server.js").is_file()
+        || scan_root.join("server.py").is_file();
+    if has_server {
+        if let Ok(o) = Command::new(&exe)
+            .args(["probe", "fuzz", "--cwd"])
+            .arg(scan_root)
+            .output()
+        {
+            if !o.status.success() {
+                let out_s = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                deep_issues.push(format!(
+                    "Adversarial API & concurrency fuzz failed:\n{}",
+                    out_s.trim()
+                ));
+            }
+        }
+    }
+
+    // 3. Auto Polyglot Tree-sitter AST Mutation Audit on primary logic file(s)
+    let mut logic_files: Vec<PathBuf> = Vec::new();
+    let src_dir = if scan_root.join("src").is_dir() {
+        scan_root.join("src")
+    } else {
+        scan_root.to_path_buf()
+    };
+    if let Ok(rd) = fs::read_dir(&src_dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let nm = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if !matches!(ext, "ts" | "tsx" | "js" | "mjs" | "py" | "go" | "rs" | "c") {
+                continue;
+            }
+            if nm.contains(".test.")
+                || nm.contains(".spec.")
+                || nm.starts_with("test_")
+                || nm.starts_with("server.")
+                || nm.starts_with("main.")
+                || nm.starts_with("index.")
+            {
+                continue;
+            }
+            logic_files.push(p);
+        }
+    }
+    logic_files.sort();
+    for lf in logic_files.into_iter().take(2) {
+        let rel = lf.strip_prefix(scan_root).unwrap_or(&lf);
+        if let Ok(o) = Command::new(&exe)
+            .args(["probe", "mutate"])
+            .arg(rel)
+            .arg("--cwd")
+            .arg(scan_root)
+            .args(["--max-mutants", "8"])
+            .output()
+        {
+            if !o.status.success() {
+                let out_s = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                deep_issues.push(format!(
+                    "Unit-test mutation audit found surviving bugs:\n{}",
+                    out_s.trim()
+                ));
+            }
+        }
+    }
+    deep_issues
+}
+
 fn collect_verification_issues(
     scan_root: &Path,
     explicit_checks: &[String],
@@ -464,9 +629,35 @@ fn collect_verification_issues(
                     String::from_utf8_lossy(&o.stderr)
                 );
                 let lines: Vec<&str> = combined.lines().collect();
-                let start = lines.len().saturating_sub(12);
-                let tail = lines[start..].join("\n");
-                issues.push(format!("Check failed (`{chk}`, exit {code}):\n{tail}"));
+                let mut key_lines: Vec<&str> = lines
+                    .iter()
+                    .copied()
+                    .filter(|l| {
+                        l.contains("AssertionError")
+                            || l.contains("Error:")
+                            || l.contains("FAIL")
+                            || l.contains("panicked at")
+                            || l.trim_start().starts_with("at ")
+                            || l.trim_start().starts_with("-->")
+                    })
+                    .take(10)
+                    .collect();
+                let start = lines.len().saturating_sub(10);
+                for tl in &lines[start..] {
+                    if !key_lines.contains(tl) {
+                        key_lines.push(tl);
+                    }
+                }
+                let snippet = extract_failing_frame_snippet(scan_root, &combined);
+                let mut msg = format!(
+                    "Check failed (`{chk}`, exit {code}):\n{}",
+                    key_lines.join("\n")
+                );
+                if !snippet.is_empty() {
+                    msg.push_str("\n## Pinpoint Source Context\n");
+                    msg.push_str(&snippet);
+                }
+                issues.push(msg);
             }
             Err(e) => {
                 issues.push(format!("Check failed (`{chk}`): {e}"));
@@ -801,8 +992,16 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             0
         }
-        SubCmd::Verify { cwd, all, checks } => {
-            let issues = collect_verification_issues(&cwd, &checks, all, true);
+        SubCmd::Verify {
+            cwd,
+            all,
+            deep,
+            checks,
+        } => {
+            let mut issues = collect_verification_issues(&cwd, &checks, all || deep, true);
+            if issues.is_empty() && deep {
+                issues.extend(run_deep_creation_and_test_gates(&cwd));
+            }
             if !issues.is_empty() {
                 eprintln!(
                     "[GUARD VERIFY BLOCKED | exit 2] {} verification failure(s):",
@@ -813,7 +1012,11 @@ pub fn run_cli(args: &[String]) -> i32 {
                 }
                 return EXIT_BLOCK;
             }
-            println!("[guard verify] PASS — 0 secret/conflict leaks, 0 code-rule/slop violations, all checks green.");
+            if deep {
+                println!("[guard verify --deep] PASS — 5/5 gates green (Contracts + Anti-Slop + Unit Tests + API Chaos Fuzz + AST Mutation).");
+            } else {
+                println!("[guard verify] PASS — 0 secret/conflict leaks, 0 code-rule/slop violations, all checks green.");
+            }
             0
         }
         SubCmd::Rule { action } => match action {

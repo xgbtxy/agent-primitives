@@ -28,7 +28,7 @@ pub struct SmokeReport {
     pub stderr_tail: String,
 }
 
-fn pick_free_port() -> Result<u16, String> {
+pub(crate) fn pick_free_port() -> Result<u16, String> {
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind ephemeral port: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -78,7 +78,7 @@ fn decode_chunked(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-fn http_request(
+pub(crate) fn http_request(
     host_port: &str,
     method: &str,
     raw_path: &str,
@@ -228,7 +228,7 @@ fn dump_browser_dom(url: &str, budget_ms: u64) -> Result<(u16, String), String> 
     }
 }
 
-fn spawn_detached_logged_server(
+pub(crate) fn spawn_detached_logged_server(
     start_cmd: &str,
     cwd: &Path,
     port: u16,
@@ -259,7 +259,7 @@ fn spawn_detached_logged_server(
     cmd.spawn().map_err(|e| format!("spawn `{start_cmd}`: {e}"))
 }
 
-fn kill_process_tree(child: &mut Child) {
+pub(crate) fn kill_process_tree(child: &mut Child) {
     let pid_s = child.id().to_string();
     #[cfg(windows)]
     {

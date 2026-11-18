@@ -1759,3 +1759,165 @@ fn test_omni_atlas_sqlite_attach_unified_diff_and_append() {
         .unwrap()
         .contains("v * 4"));
 }
+
+#[test]
+fn test_creation_contract_linker_api_fuzzer_and_ast_mutator() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v18_home");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("test")).unwrap();
+
+    // 1. Creation Shield: Cross-File Phantom Named Export & Call-Arity Linker (<5ms)
+    fs::write(
+        root.join("src/pricing.mjs"),
+        "export function calcSubtotal(price, qty) {\n  return price * qty;\n}\n",
+    )
+    .unwrap();
+    let bad_checkout = "@@ WRITE: src/checkout.mjs\n<<<\nimport { calcTotal, calcSubtotal } from './pricing.mjs';\nexport const demo = () => calcSubtotal(100) + calcTotal(1, 2);\n>>>\n";
+    let ap_warn = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(bad_checkout),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ap_warn.status.success());
+    let warn_s = String::from_utf8_lossy(&ap_warn.stdout);
+    assert!(
+        warn_s.contains("CONTRACT WARNING")
+            && warn_s.contains("Phantom named import `calcTotal`")
+            && warn_s.contains("Call arity mismatch `calcSubtotal(...1 args)`"),
+        "Expected cross-file phantom import & arity warnings, got: {warn_s}"
+    );
+    fs::remove_file(root.join("src/checkout.mjs")).unwrap();
+
+    // 2. Polyglot Tree-sitter AST Mutation Tester (`ap probe mutate`)
+    let coupon_src = "export function eligibleForVip(spend) {\n  if (spend >= 1000) {\n    return true;\n  }\n  return false;\n}\n";
+    let coupon_p = root.join("src/coupon.mjs");
+    fs::write(&coupon_p, coupon_src).unwrap();
+    // Weak test: checks 2000 and 100, completely missing boundary 1000 (`>=` -> `>` survives!)
+    fs::write(
+        root.join("test/coupon.test.mjs"),
+        "import assert from 'node:assert/strict';\nimport { eligibleForVip } from '../src/coupon.mjs';\nassert.equal(eligibleForVip(2000), true);\nassert.equal(eligibleForVip(100), false);\n",
+    )
+    .unwrap();
+    let mut_weak = run_ap(
+        root,
+        &[
+            "probe",
+            "mutate",
+            "src/coupon.mjs",
+            "--cwd",
+            ".",
+            "--test-cmd",
+            "node test/coupon.test.mjs",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        !mut_weak.status.success(),
+        "Weak test should let boundary mutant survive"
+    );
+    assert_eq!(
+        fs::read_to_string(&coupon_p).unwrap(),
+        coupon_src,
+        "RAII guard must restore exact source"
+    );
+    let mw_j: Value = serde_json::from_slice(&mut_weak.stdout).unwrap();
+    assert!(!mw_j["survivors"].as_array().unwrap().is_empty());
+
+    // Add exact boundary assertion `eligibleForVip(1000) === true` -> 100% mutants killed!
+    fs::write(
+        root.join("test/coupon.test.mjs"),
+        "import assert from 'node:assert/strict';\nimport { eligibleForVip } from '../src/coupon.mjs';\nassert.equal(eligibleForVip(1000), true);\nassert.equal(eligibleForVip(999), false);\n",
+    )
+    .unwrap();
+    let mut_strong = run_ap(
+        root,
+        &[
+            "probe",
+            "mutate",
+            "src/coupon.mjs",
+            "--cwd",
+            ".",
+            "--test-cmd",
+            "node test/coupon.test.mjs",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(mut_strong.status.success());
+
+    // 3. Adversarial API & Concurrency Chaos Fuzzer (`ap probe fuzz`)
+    fs::write(
+        root.join("fragile_srv.mjs"),
+        "import http from 'node:http';\nconst s = http.createServer((req, res) => {\n  if (req.method === 'POST' && req.url === '/api/order') {\n    let b = ''; req.on('data', c => b += c);\n    req.on('end', () => {\n      try { const j = JSON.parse(b); res.writeHead(200); res.end(JSON.stringify({ total: j.amount * 2 })); }\n      catch (e) { res.writeHead(500); res.end(String(e)); }\n    });\n    return;\n  }\n  res.writeHead(200); res.end('ok');\n});\ns.listen(Number(process.env.PORT || 0), '127.0.0.1');\n",
+    )
+    .unwrap();
+    let fz_fail = run_ap(
+        root,
+        &[
+            "probe",
+            "fuzz",
+            "--cwd",
+            ".",
+            "--start",
+            "node fragile_srv.mjs",
+            "--concurrency",
+            "4",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        !fz_fail.status.success(),
+        "Fuzzer must catch 500 on truncated JSON"
+    );
+    let fz_j: Value = serde_json::from_slice(&fz_fail.stdout).unwrap();
+    assert!(!fz_j["failures"].as_array().unwrap().is_empty());
+
+    // 4. `ap guard verify` blocks `.only(` test cheating
+    fs::write(
+        root.join("test/cheat.test.mjs"),
+        "test.only('skip everything else', () => {});\n",
+    )
+    .unwrap();
+    let gv = run_ap(
+        root,
+        &["guard", "verify", "--cwd", ".", "--all"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(!gv.status.success());
+    let gv_err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&gv.stdout),
+        String::from_utf8_lossy(&gv.stderr)
+    );
+    assert!(gv_err.contains("no-focused-test-only"));
+    fs::remove_file(root.join("test/cheat.test.mjs")).unwrap();
+    fs::remove_file(root.join("fragile_srv.mjs")).unwrap();
+    fs::remove_file(root.join("src/pricing.mjs")).unwrap();
+    fs::write(
+        root.join("package.json"),
+        "{\"type\":\"module\",\"scripts\":{\"test\":\"node test/coupon.test.mjs\"}}\n",
+    )
+    .unwrap();
+
+    // 5. Fused `ap guard verify --deep` passes when contracts + anti-slop + tests + AST mutation are all green
+    let gv_deep = run_ap(
+        root,
+        &["guard", "verify", "--cwd", ".", "--deep"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        gv_deep.status.success(),
+        "Expected guard verify --deep to pass on strong suite: {}",
+        String::from_utf8_lossy(&gv_deep.stderr)
+    );
+}
