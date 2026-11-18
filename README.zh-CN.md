@@ -1,99 +1,99 @@
-# agent-primitives (`ap` v1.2)
-
-**观察真实 Coding Agent 运行过程 · 深度融合顶尖开源工程经验 · 纯 Rust 单二进制提升底层 Coding 基础能力。**
-
-[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[Core R&D Philosophy (EN)](./HANDBOOK.md)** | **[核心研发理念与演进手册 (中文)](./HANDBOOK.zh-CN.md)** · [架构深潜](./DESIGN.zh-CN.md) · [实战手册](./PLAYBOOK.zh-CN.md)
-
-> **我们的核心理念**：不堆砌冗长易被忽略的提示词套路（AI Slop），也不闭门从 0 到 1 重复造低质轮子。我们坚持：**（1）持续观察各类免费与商业 Coding Agent 在真实任务中的实际运行轨迹与 `<thinking>` 推理卡点；（2）深度调研并吸收成熟开源项目（`Aider`、`RTK`、`SWE-agent`、`MCP` 标准等）千锤百炼的实战经验；（3）用零依赖单文件纯 Rust 打磨底层 Coding 基础工具**——让哪怕是零基础小白用 `$0` 免费智能体，一行命令接入后也能获得显著的速度、Token 与代码洁净度提升。
+<div align="center">
+  <img src="./assets/logo.svg" width="60" height="60" alt="ap logo" />
+  <h1>ap · Coding Agent 执行提效引擎</h1>
+  <p><strong>别再让你的 AI 编程助手把 50%～80% 的 Token 白白烧在 Windows / Mac 终端报错、乱码、端口卡死和刷屏日志上了。</strong></p>
+  <p>
+    <a href="https://github.com/xgbtxy/agent-primitives/actions/workflows/ci.yml"><img src="https://github.com/xgbtxy/agent-primitives/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://github.com/xgbtxy/agent-primitives/releases/latest"><img src="https://img.shields.io/github/v/release/xgbtxy/agent-primitives?color=22c55e&label=%E7%9B%B4%E6%8E%A5%E4%B8%8B%E8%BD%BD" alt="Latest Release" /></a>
+    <img src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20macOS%20%7C%20Linux-0ea5e9" alt="Platform" />
+    <img src="https://img.shields.io/badge/%E8%BF%90%E8%A1%8C%E6%97%B6%E4%BE%9D%E8%B5%96-0%20(Rust%20%E5%8D%95%E6%96%87%E4%BB%B6)-f59e0b" alt="Zero Dependencies" />
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="MIT License" /></a>
+  </p>
+  <p>
+    <a href="./README.md"><strong>English</strong></a> · <strong>简体中文</strong> · <a href="./docs/HANDBOOK.zh-CN.md">核心研发理念</a> · <a href="https://github.com/xgbtxy/agent-primitives/releases/latest">安装包下载</a>
+  </p>
+  <img src="./assets/hero-comparison.zh-CN.svg" width="100%" alt="未安装 ap 与安装 ap 后的真实体验对比" />
+</div>
 
 ---
 
-## 一行命令零配置接入（支持免费 `$0` 与主流编程智能体 · Windows / macOS / Linux）
+## 10 秒一行安装，装完即忘
 
-**无需安装 `Python`、无需 `Node`、无需 `Docker`、无需 `git clone`、无需记忆任何参数。** 一行命令下载经 SHA-256 校验的原生二进制 `ap`（静态内嵌 **6 语言 Tree-sitter C 语法器**、**内置 SQLite FTS5**、**纯 Rust 交互式无头 Edge/Chrome CDP 引擎**与**标准 `ap mcp` JSON-RPC 服务**），自动完成本机全部智能体接线——**哪怕是零基础小白在 Windows 上使用 `$0` 免费智能体，也能立刻获得 `2–6 倍` 真实提效与零 Slop 代码质量**：
+不需要装 `Python`、不需要装 `Node`、不需要装 400MB `Playwright`，**更不需要你学任何新命令**。复制一行执行，自动识别并接好你电脑上的所有 Coding Agent（`Claude Code`、`Codex`、`OpenCode`、`Gemini CLI`、`Qwen Code`、`Pi`、`Goose`、`Antigravity`、`Grok`）：
 
-```bash
-# macOS / Linux（自动探测并接线 OpenCode、Qwen、Gemini CLI、Goose、Pi、Codex、Antigravity、Claude、Grok）：
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
-```
-
+**Windows（打开 PowerShell 粘贴回车）：**
 ```powershell
-# Windows PowerShell：
 irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
 ```
 
+**macOS / Linux：**
 ```bash
-# 使用 Cargo 从源码构建，或仅接入当前代码目录：
-cargo install --git https://github.com/xgbtxy/agent-primitives --locked && ap init
-ap init --here -a opencode                 # 自动生成 opencode.json 启用 `ap mcp` 与防屎山硬规则
-ap init --here --with-hooks --with-mcp     # 完整注入项目级 Hook 与 MCP (.mcp.json / .qwen / .gemini)
-ap uninstall                               # 一行干净卸载（100% 恢复原有配置）
+curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
 ```
 
-### 原生支持的免费（`$0`）与商业编程智能体矩阵
-
-| 智能体宿主 | 免费 / 付费 | `ap init` 全自动接线路径 | 通信协议与安全门禁 |
-| :--- | :---: | :--- | :--- |
-| **OpenCode** (`opencode`) | **`$0` 零 Key 免费模型** + 自带 Key | `~/.config/opencode/opencode.json` + `AGENTS.md` | 原生 **`ap mcp`**（`ap_orient`、`ap_edit`、`ap_smoke`、`ap_verify`、`ap_probe`） |
-| **Qwen Code** (`qwen`) | **每日免费额度** + 开源 | `~/.qwen/settings.json`（`"trust": true`）+ `QWEN.md` | 原生 **`ap mcp`**（免弹窗确认、零转义） |
-| **Google Gemini CLI** (`gemini`) | **免费额度** + 云端 | `~/.gemini/settings.json`（`"trust": true`）+ `GEMINI.md` | 原生 **`ap mcp`** + `<140-tok` 极简路由 |
-| **Pi** (`pi`) & **Goose** (`goose`) | 开源 + 低成本 API | `~/.pi/agent/skills/`、`~/.config/goose/` + `AGENTS.md` | `package.json` 插件清单 + CLI / MCP |
-| **OpenAI Codex CLI** (`codex`) | 订阅 / API | `~/.codex/skills/` + `~/.codex/AGENTS.md` + `hooks.json` | `<2ms` `exit 2` 门禁 + 零转义 CLI |
-| **Claude Code** (`claude`) | 订阅 / API | `~/.claude/skills/` + `CLAUDE.md` + `settings.json` | `<2ms` `exit 2` 完成门禁 + **`rtk` 式 `PreToolUse` 自动脱水** + `.mcp.json` |
-| **Antigravity** (`agy`) & **Grok** | 内置 / API | `~/.gemini/config/`、`~/.grok/` | CamelCase JSON `deny`/`continue` Hook + CLI |
+> **喜欢直接下载单文件？** 点击直接下载（**[Windows 64位 `ap.exe` (.zip)](https://github.com/xgbtxy/agent-primitives/releases/latest/download/ap-x86_64-pc-windows-msvc.zip)** · **[macOS M芯片](https://github.com/xgbtxy/agent-primitives/releases/latest/download/ap-aarch64-apple-darwin.tar.gz)** · **[macOS Intel](https://github.com/xgbtxy/agent-primitives/releases/latest/download/ap-x86_64-apple-darwin.tar.gz)** · **[Linux x64](https://github.com/xgbtxy/agent-primitives/releases/latest/download/ap-x86_64-unknown-linux-musl.tar.gz)**），解压运行 `ap init` 即可。想卸载随时敲 `ap uninstall` 一键还原。
 
 ---
 
-## 为什么 `ap` v1.2 能做到极致提效：解剖大模型 `<thinking>` 推理流 + 融合顶尖开源算法
+## 装完之后怎么用？（完全不改变你的使用习惯）
 
-通过对本机 **`101,108` 次工具调用**与原始 `<thinking>` 推理流的逐帧拆解，我们拒绝重复造低质轮子，将开源界最锋利的算法凝练进单文件纯 Rust 引擎，精准击穿四大卡点：
-
-1. **冷启动盲猜与旧屎山污染（第 1–5 轮）** → **`ap-atlas` + `ap-probe slice`**
-   - 吸收 **Aider Personalized PageRank**（8 轮幂迭代导入图中心度）、空仓 **宿主运行时指纹**（`node:sqlite`、`--experimental-strip-types` 禁用 `enum` 预警、无头 CDP 状态）与 `6.35 ms` 死代码剥离，杜绝模型误读废文件照抄 `: any` 与空 `catch {}`。
-2. **跨文件工作记忆漂移与补丁缩进报错（第 6–15 轮）** → **`ap-atlas product` + `ap-splice` + `ap mcp`**
-   - `<17 ms` 静态交叉核验 **HTML `id="..."` ↔ JS `getElementById`/`querySelector`** 及 **前端 `fetch()` ↔ 后端路由**；融合 **Aider 三级容错匹配（精确 → 行尾去空 → 相对缩进自动平移）**（`2.33 ms`），**落盘前强制校验 6 语言 Tree-sitter 具体语法树**（MCP 模式下 `0` 引号转义）。
-3. **Windows 高达 70%+ 的手工验证 Token 税（第 16–60 轮）** → **`ap-probe smoke`（`ap_smoke`）**
-   - 对照组在 Windows 上有 **`71%–75%` 的步骤**（`16–35` 轮、`85 万+` Token）耗在后台服务挂死终端、查杀端口及手写 150 行 Chrome DevTools 脚本。`ap probe smoke` 自动绑空闲 `PORT`、文件落盘日志防死锁、通过**纯 Rust `TcpStream` 驱动无头 Edge/Chrome 真实点击输入**（`OPEN`/`FILL`/`SELECT`/`CLICK`/`EVAL`）、校验 `0` 页面/服务端报错并 `taskkill /T /F` 杀净进程树，**1 次 `<4.5s` 调用替代 20+ 轮手工验证**。
-4. **`AGENTS.md` 文字叮嘱失灵与 AI Slop** → **`ap-guard`（`ap_verify`）+ `ap-sieve`**
-   - `<2 ms` 强制执行 `.agents/guard.json` **`exit 2` 防屎山硬规则**（拦截 `: any`、`@ts-ignore`、吞错空 `catch {}`），自动复用已装的 `tsc`/`biome`/`cargo check`/测试，并实现 **`rtk` 式 `PreToolUse` `updatedInput` 测试洪流自动脱水**（日志压缩 `-98.8%`）。
-
----
-
-## Windows 真实受控实跑矩阵（涵盖小白一句话提示词、存量全栈与空目录随机新项目）
-
-| 智能体宿主与实测场景 | 模式 | 耗时与工具调用数 | 思考链与验证开销变化 | 总 Token 与费用 | 独立真机验收与防 Slop |
-| :--- | :--- | ---: | ---: | ---: | :---: |
-| **`OpenCode 1.19` 免费版（`$0` `big-pickle`）**<br>*小白一句话提示词（`WorkPulse`）* | 原生 → **`+ ap v1.2 (MCP)`** | `430.2s`（`60` 次）→ **`182.4s`（`23` 次，快 2.36 倍 / -57.6%）** | 推理 Token **-18.2%**；仅 **`1` 次 `bash`**（告别查端口死循环） | `1,613,689` → **`401,930 tok`（-75.1%，`$0.00`）** | `7/8` *(残留 `empty-catch`)* → **`8/8`（`0` Slop！）** |
-| **`Codex CLI 0.167` (`gpt-6-astra`)**<br>*空目录从零做随机项目（`SplitMate`）* | 原生 → **`+ ap v1.2`** | `345.3s`（`23` 次）→ **`244.6s`（`9` 次，耗时 -29.1%）** | `16` 轮 `cua_repl` → **`0` 轮**（`1` 次 CDP `probe smoke` 搞定！） | `1,116,369` → **`186,379 tok`（-83.3% / 省下 6.0 倍！）** | **`6/6` → `6/6`** |
-| **`Pi CLI 1.5.2` (`deepseek-flash`)**<br>*空目录从零做随机项目（`SplitMate`）* | 原生 → **`+ ap v1.2`** | `1,821.1s` → **`1,499.3s`（耗时 -17.7% / 快 `322s`）** | 物理拦截并根除前端与存储层吞异常坏代码 | `15.55M` → `19.94M` *(模型自写子集和暴力对拍，诚实披露)* | `5/6` *(2 处 `empty-catch` 屎山)* → **`6/6`（9 文件 `0` Slop！）** |
-| **`Codex CLI 0.167` (`gpt-6-astra`)**<br>*普通用户需求升级（`WorkPulse`）* | 原生 → **`+ ap v1.2`** | `333.6s`（`24` 次）→ **`294.3s`（`11` 次，调用 -54.2%）** | `75%` 手工验证轮次 → **单次 `probe smoke` + `guard verify`** | `1,053,580` → **`364,682 tok`（-65.4% / 省 `68.9 万`）** | **`8/8` → `8/8`** |
-| **`Pi CLI 1.5.2` (`deepseek-flash`)**<br>*普通用户需求升级（`WorkPulse`）* | 原生 → **`+ ap v1.2`** | `483.0s`（`81` 次）→ **`271.5s`（`70` 次，耗时 -43.8%）** | `<thinking>` 字符数 **`165,048` → `94,584`（-42.7%！）** | `3,628,149`（`$0.117`）→ **`2,295,801 tok`（-36.7%，`$0.075`）** | **`8/8` → `8/8`** |
-| **`Grok 1.0.77` & `Antigravity 1.5.8`**<br>*24 文件 TS `ts-ledger` & 25 文件 Py `rulelang`* | 原生 → **`+ ap init`** | *Grok*: **耗时 -26.5%～-49.1%**；*Agy*: **步数 -42.9%～-61.3%** | *Grok*: **推理 -65.4%**；*Agy*: **`read_file` -74.2%**、**报错 -85.7%** | *Grok*: **Token -38.7%**；*Agy*: **净 Token -49.8%** | **`5/5` → `5/5`** |
-
----
-
-## 确定性微基准测试（[`bench/results.json`](./bench/results.json) · 全量静默仅 `390 Tokens`）
-
-| 独立 Crate 与原语 | 原始基线 | 启用 `ap`（Rust `v1.2`） | 压缩 / 削减率 | 原生延迟 | 保真与安全承诺 |
-| :--- | ---: | ---: | ---: | ---: | :--- |
-| **`ap-splice`**（`view` / 三级容错 `apply`） | `1,048 tok` 全文件 | `48 tok` 精确函数体 | **-95.4% 读取 Token** | **`0.71 ms`**（`apply`: **`2.33 ms`**） | Aider 三级缩进容错 + **落盘前校验 Tree-sitter 语法树** |
-| **`ap-recall`**（200 条中英混合规则库） | `6,880 tok` 单体文件 | `47.0 tok` *(Top-2)* | **-99.3%** | **`3.36 ms`** | **20/20（100%）** Top-1 准确率（内置 SQLite FTS5） |
-| **`ap-probe`**（24 文件 TS `slice` + CDP `smoke`） | `24` 个 `.ts` 文件 | `9` 个活跃（剪除 `15` 个） | **-62.5% 死文件剪除** | **`6.35 ms`** | 原生交互式无头 Edge/Chrome CDP + Py/V8/`rustc` 探针 |
-| **`ap-atlas`**（64 模块 Rust SDK PPR `map`） | `42,338 tok` 全量读取 | `438 tok` PPR 地图 | **-99.0%** | **`17.2 ms`** | Personalized PageRank + DOM `#id`/API 断链与防屎山雷达 |
-| **`ap-sieve`**（2,500 行日志 / JSON / HTML） | `43.0k` / `27.0k` / `12.0k tok` | `518` / `105` / `198 tok` | **-98.8% / -99.6% / -98.4%** | `28.7` / `12.4` / `11.4 ms` | **`5.25 ms`** FTS5 搜索 + `<1.2 KB` 原样直通（负向对照 `0.0%`） |
-
----
-
-## Cargo 工作区结构（`0` 兄弟 Crate 依赖 · `14/14` 端到端测试套件）
+1. **平时怎么跟 AI 说话，现在还怎么说。** `ap` 在底层通过原生 MCP 与毫秒级 Hook 自动帮模型避坑、省流、验页面。
+2. **任何时候想看看它帮你省了多少 Token**，在终端敲一下 **`ap stats`**（或敲 `ap doctor` 体检环境）：
 
 ```text
-agent-primitives/
-├── Cargo.toml / src/{main,mcp,install,audit,bench}.rs  # 单文件原生二进制 `ap` + 标准 `ap mcp` 服务
-├── crates/ap-{atlas,recall,probe,splice,sieve,guard,baton}/  # 7 个物理隔离独立 Crate（0 兄弟依赖）
-├── install.sh / install.ps1                            # 一行 SHA-256 预编译二进制安装脚本
-├── .github/workflows/{ci.yml,release.yml}              # 三大系统 clippy+测试门禁 & 5 架构自动发版
-└── tests/integration_primitives.rs                     # 14 项物理隔离、MCP、CDP、缩进容错与 Hook 测试
+$ ap stats
+[ap stats] Local Token & Windows Execution Ledger (100% offline)
+----------------------------------------------------------------
+  Accelerated Agent Actions : 28 calls
+  Context & Log Diet        : 612.4 KB -> 19.2 KB (-96.9%)
+  Windows Pitfalls Healed   : 11 auto-fixes (UTF-8/GBK, PS `&&`/`curl`, PATH, locks)
+  AST Edits & Smoke Gates   : 14 verified checks (Tree-sitter + Edge CDP + 0-slop)
+  Total Value Delivered     : ~186,800 tokens saved
 ```
+
+---
+
+## 为什么能实打实省下 50%～83% 的 Token？
+
+主流大模型 90% 以上的训练语料都是 Linux Bash，但大多数开发者都在 **Windows 和 macOS** 上用 Coding Agent。扫描本机 160 个真实 Windows 会话（`101,108` 次工具调用），模型共撞上 **528 次本可避免的环境报错**——每报错一次，几万字的上下文就要重新发一遍去盲猜重试。
+
+`ap` 顺着模型干活的 **5 个真实阶段**，把白烧 Token 的坑在底层一次性填平：
+
+| 模型干活阶段 | 没装 `ap`（你的 Token 死在哪里） | 装上 `ap` 后（后台自动完成，无需人工干预） |
+| :--- | :--- | :--- |
+| **① 看懂项目** | 上来连读十几个完整文件（连废弃旧代码一起塞进上下文），瞎猜本机环境。 | **<30 ms** 生成核心代码地图 + 前后端 `#id`/路由断链雷达 + Windows 环境底牌（省 `99%` 盲读 Token）。 |
+| **② 修改代码** | 被 Windows `CRLF` 换行、PowerShell 生成的 `UTF-8 BOM` / `UTF-16LE` 编码或缩进偏差卡住报错。 | 自动剥离 **UTF-8 BOM 与转换 UTF-16LE**，3 级缩进容错匹配，写盘前用 **6 语言语法树秒级验错**。 |
+| **③ 跑终端命令** | **Windows 头号黑洞**：Python/Node 中文报 `'gbk' codec`，PS 5.1 敲 `&&` / `curl` / `<<EOF` 报语法错，几万行日志刷屏。 | 强制锁死无 BOM `UTF-8`，自动自愈 PS `&&`/`curl.exe`/URL `&`/POSIX 管道与 PATH，超长日志自动脱水 **-90%+**。 |
+| **④ 起服务点页面** | **70%+ 轮次耗在验证**：后台起服务锁死管道卡住终端、`EADDRINUSE` 端口冲突、或去装 400MB Playwright。 | 自动清端口分新端口，纯 Rust 直连**系统自带无头 Edge / Chrome** 真机点按钮抓报错，跑完清干净进程树（**<4.5s**）。 |
+| **⑤ 交卷检查** | 偷懒留下 `: any`、`@ts-ignore`、空 `catch {}` 吞错等 AI Slop，或没跑通就停下。 | **<2 ms `exit 2` 硬门禁**：交卷前自动拦住反 Slop 违规与前后端接口断链，逼模型修干净再交差。 |
+
+---
+
+## Windows 11 真机实测对比（零水分）
+
+在 Windows 11 真机上用 `$0` 免费智能体与主流商业 CLI 实测（覆盖小白一句话需求、全栈升级 `WorkPulse`、空目录从零开发随机项目 `SplitMate`）：
+
+| 测试 Agent 与场景 | 未装 `ap` → **安装 `ap` 后**（耗时） | Token 总消耗对比 | 功能与零 Slop 验收 |
+| :--- | :--- | :--- | :---: |
+| **`OpenCode` 免费版 (`$0` `big-pickle`)** · *小白一句话需求* | `430.2s` → **`182.4s`（快 2.36 倍）** | `1,613,689` → **`401,930`（省 75.1%）** | `7/8` *(留 Slop)* → **`8/8`（0 Slop）** |
+| **`Codex CLI` (`gpt-6-astra`)** · *空目录随机新项目* | `345.3s` → **`244.6s`（快 29.1%）** | `1,116,369` → **`186,379`（省 83.3% / 少花 6 倍）** | **`6/6` → `6/6`** |
+| **`Codex CLI` (`gpt-6-astra`)** · *全栈功能升级* | `333.6s` → **`294.3s`（少调 54% 工具）** | `1,053,580` → **`364,682`（省 65.4%）** | **`8/8` → `8/8`** |
+| **`Pi CLI` (`deepseek-flash`)** · *全栈功能升级* | `483.0s` → **`271.5s`（快 43.8%）** | `3,628,149` → **`2,295,801`（省 36.7%）** | **`8/8` → `8/8`** |
+| **`Pi CLI` (`deepseek-flash`)** · *空目录随机新项目* | `1,821.1s` → **`1,499.3s`（快 322 秒）** | `15.55M` → `19.94M` *(模型额外跑了子集和暴力对拍)* | `5/6` *(2 处 Slop)* → **`6/6`（0 Slop）** |
+
+<details>
+<summary><strong>底层架构与硬核工程细节（给想看源码的开发者）</strong></summary>
+
+<br/>
+
+- **纯 Rust 零耦合单文件架构**：1 个原生 `ap` 二进制内聚 7 个物理隔离 crate（`crates/ap-{atlas,splice,probe,sieve,guard,recall,baton}`），子 crate 之间 `0` 相互依赖，内置 SQLite FTS5 全文检索引擎与 6 语言编译态 Tree-sitter C 语法树，常驻提示词开销仅 `390` Tokens。
+- **一键复现基准测试**：运行 `ap bench`（详见 [`bench/results.json`](./bench/results.json)）。
+- **深度文档**：
+  - [核心研发理念与演进手册 (`docs/HANDBOOK.zh-CN.md`)](./docs/HANDBOOK.zh-CN.md) | [R&D Philosophy (`docs/HANDBOOK.md`)](./docs/HANDBOOK.md)
+  - [系统架构设计 (`docs/DESIGN.zh-CN.md`)](./docs/DESIGN.zh-CN.md) | [Architecture (`docs/DESIGN.md`)](./docs/DESIGN.md)
+  - [高阶实战手册 (`docs/PLAYBOOK.zh-CN.md`)](./docs/PLAYBOOK.zh-CN.md) | [Playbook (`docs/PLAYBOOK.md`)](./docs/PLAYBOOK.md)
+
+</details>
 
 ## 开源协议
 

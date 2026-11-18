@@ -1,6 +1,6 @@
 # `agent-primitives` (`ap` v1.2) — 核心研发理念与持续演进手册
 
-[English](./HANDBOOK.md) | [简体中文](./HANDBOOK.zh-CN.md) · [首页](./README.zh-CN.md) · [架构深潜](./DESIGN.zh-CN.md) · [实战手册](./PLAYBOOK.zh-CN.md)
+[English](./HANDBOOK.md) | [简体中文](./HANDBOOK.zh-CN.md) · [首页](../README.zh-CN.md) · [架构深潜](./DESIGN.zh-CN.md) · [实战手册](./PLAYBOOK.zh-CN.md)
 
 > **项目定位**：本仓库不做花哨的多智能体外壳，也不写冗长易被忽略的提示词套路（AI Slop）。我们坚持一条朴素而硬核的工程路线——**持续观察真实 Coding Agent 的运行过程与思考链，深度调研并吸收各个成熟开源项目的实战经验，用高性能单文件纯 Rust 夯实大模型的底层 Coding 基础能力**，让哪怕是零基础小白使用免费 Coding Agent 也能获得实打实的效率与代码质量提升。
 
@@ -55,3 +55,4 @@
 | **`v0.1`–`v0.3` (2026-11-15)** | 审计 `6.9 万` 次调用定位重读与日志刷屏；建立 7 原语与多宿主一行接入 | `Grok 1.0.77` **耗时 -26.5%～-49.1%**；`Antigravity 1.5.8` **净 Token -49.8%**、`read_file` **-74.2%** |
 | **`v1.0.0` (2026-11-18)** | 消除 Python 启动延迟与环境依赖；重写为**纯 Rust 单二进制 + 7 隔离 Crate**（内嵌 6 语言 Tree-sitter + SQLite FTS5） | `splice view` **`0.71ms`**、`apply` **`2.33ms`**、`recall` **`3.36ms`**；`Codex` 仅用 **`4` 条命令**满分修复 24 文件 `ts-ledger` |
 | **`v1.2.0` (2026-11-18)** | 拆解 `<thinking>` 发现 70%+ 验证税与跨文件记忆漂移；融合 **Aider PPR & 三级缩进容错**、**RTK 自动脱水**、**交互式 CDP** 与 **`ap mcp`** | **免费智能体 `OpenCode Free ($0)` 小白需求**：**快 `2.36 倍`（`430s→182s`）、Token `-75.1%`、`7/8→8/8` 零 Slop**；**空目录随机项目 `SplitMate`**：`Codex` **Token `-83.3%`（省 `6.0 倍`）**，`Pi` **`5/6→6/6` 根除吞错 Slop（快 `322s`）** |
+| **`v1.3.0` (2026-11-18)** | 扫描 160 个真实 Windows 会话抓出 **`528 次` OS/Shell 翻车**（235 次 GBK/BOM、138 次 PS `&&`/`curl`/heredoc/PATH、82 次端口锁、73 次管道假死）；打造 **Windows 透明命令护盾 (`ap exec` + Base64 `PreToolUse` Hook)**、**UTF-8 BOM/UTF-16LE 自动净化** 与 **`ap stats` 离线提效账单**，并将外部 UX 极简化为 3 个命令（`init`/`doctor`/`stats`） | **Windows 5 大真实陷阱对拍**：原生 PS 5.1 全军覆没（GBK 崩溃/`&&` 与 heredoc `ParserError`/端口占用），`ap exec` **100% 一次自愈通过**，2000 行构建日志自动脱水 **`-99.1%`（`110.3KB → 0.9KB`）**，`ap stats` 实时量化省流收益 |

@@ -1072,12 +1072,52 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
     }
 }
 
-fn probe_host_capabilities() -> String {
-    let mut caps = vec![format!(
+fn fast_shell_and_browser_summary() -> String {
+    let mut parts = vec![format!(
         "OS={}/{}",
         std::env::consts::OS,
         std::env::consts::ARCH
     )];
+    #[cfg(windows)]
+    {
+        let has_pwsh = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe").is_file()
+            || std::env::var_os("PATH")
+                .map(|v| std::env::split_paths(&v).any(|d| d.join("pwsh.exe").is_file()))
+                .unwrap_or(false);
+        let has_git_bash = Path::new(r"C:\Program Files\Git\bin\bash.exe").is_file()
+            || Path::new(r"C:\Program Files (x86)\Git\bin\bash.exe").is_file();
+        let mut sh = Vec::new();
+        if has_pwsh {
+            sh.push("pwsh7");
+        } else {
+            sh.push("ps5.1[no-raw-&&]");
+        }
+        if has_git_bash {
+            sh.push("git-bash");
+        }
+        parts.push(format!(
+            "win-shells={} (run commands via `ap exec -c` / `ap_exec` for UTF-8 & && heal)",
+            sh.join("+")
+        ));
+    }
+    let has_browser = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .any(|p| Path::new(p).is_file());
+    if has_browser {
+        parts.push("headless-CDP=READY (`ap probe smoke` / `ap_smoke`)".to_string());
+    }
+    parts.join(" | ")
+}
+
+fn probe_host_capabilities() -> String {
+    let mut caps = vec![fast_shell_and_browser_summary()];
     if let Ok(o) = Command::new("node").arg("--version").output() {
         if o.status.success() {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -1096,21 +1136,6 @@ fn probe_host_capabilities() -> String {
             caps.push(short);
         }
     }
-    let has_browser = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium",
-    ]
-    .iter()
-    .any(|p| Path::new(p).is_file());
-    if has_browser {
-        caps.push(
-            "headless-CDP-browser=READY (`ap probe smoke` OPEN/FILL/SELECT/CLICK/EVAL)".to_string(),
-        );
-    }
     caps.join(" | ")
 }
 
@@ -1121,6 +1146,11 @@ pub fn render_atlas_md(data: &AtlasData) -> String {
     )];
     if data.scanned_files <= 3 {
         lines.push(format!("**Host Runtime**: {}", probe_host_capabilities()));
+    } else {
+        lines.push(format!(
+            "**Host Env**: {}",
+            fast_shell_and_browser_summary()
+        ));
     }
     if !data.top_dirs.is_empty() {
         let ds = data

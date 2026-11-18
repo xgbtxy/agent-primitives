@@ -1,0 +1,652 @@
+use crate::audit::default_home_dir;
+use crate::stats::record_event;
+use base64::Engine;
+use clap::Parser;
+use regex::Regex;
+use serde_json::json;
+use std::fs::{self, File};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    GitBash,
+    Pwsh7,
+    PowerShell5,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "exec",
+    about = "UTF-8 locked, Bash-in-PowerShell auto-healed, deadlock-proof command runner"
+)]
+struct ExecCli {
+    /// Shell command string to execute safely
+    #[arg(short = 'c', long = "cmd")]
+    cmd: Option<String>,
+    /// Base64-encoded UTF-8 shell command (zero-quoting hook transport)
+    #[arg(long)]
+    base64: Option<String>,
+    /// Working directory
+    #[arg(long, default_value = ".")]
+    cwd: PathBuf,
+    /// Wall-clock timeout in seconds (kills full process tree on timeout)
+    #[arg(long, default_value_t = 120)]
+    timeout: u64,
+    /// Cleanly free an orphaned local TCP port before running (or standalone)
+    #[arg(long)]
+    free_port: Option<u16>,
+    /// Disable automatic sieve compression on large outputs
+    #[arg(long)]
+    raw: bool,
+    /// Emit structured JSON output
+    #[arg(long)]
+    json: bool,
+    /// Direct argv command when `-c` / `--base64` is not used
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    argv: Vec<String>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+struct HealRegexes {
+    posix_only: Regex,
+    curl_cmd: Regex,
+    dev_null: Regex,
+    bare_amp_url: Regex,
+    port_in_use: Regex,
+}
+
+fn heal_re() -> &'static HealRegexes {
+    static R: OnceLock<HealRegexes> = OnceLock::new();
+    R.get_or_init(|| HealRegexes {
+        posix_only: Regex::new(
+            r"(<<-?\s*['\x22]?[A-Za-z_]\w*|(?:^|[;&|]\s*)export\s+[A-Za-z_]\w*=|(?:^|[;&|]\s*)(?:if\s+\[|for\s+\w+\s+in\b)|\|\s*(?:head|tail|grep|egrep|awk|sed|wc|cut|tr|xargs)\b)",
+        )
+        .unwrap(),
+        curl_cmd: Regex::new(r"(^|[;|&(\s])curl(\s+(?:-[A-Za-z-]|https?://))").unwrap(),
+        dev_null: Regex::new(r"([12]?>+\s*)/dev/null\b").unwrap(),
+        bare_amp_url: Regex::new(r#"(^|[\s=])(https?://[^\s'"`;&|]+&[^\s'"`;&|]+)"#).unwrap(),
+        port_in_use: Regex::new(r"(?i)(?:EADDRINUSE|address already in use|10048).*?(?::(\d{2,5})\b|\bport\s+(\d{2,5})\b)").unwrap(),
+    })
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn split_top_level_and_and(s: &str) -> Vec<String> {
+    let bytes = s.as_bytes();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = s[i..].chars().next().unwrap();
+        let clen = ch.len_utf8();
+        if ch == '`' && !in_sq && i + clen < bytes.len() {
+            let nxt = s[i + clen..].chars().next().unwrap();
+            cur.push(ch);
+            cur.push(nxt);
+            i += clen + nxt.len_utf8();
+            continue;
+        }
+        if ch == '\'' && !in_dq {
+            in_sq = !in_sq;
+        } else if ch == '"' && !in_sq {
+            in_dq = !in_dq;
+        } else if !in_sq && !in_dq {
+            if ch == '(' || ch == '{' {
+                depth += 1;
+            } else if ch == ')' || ch == '}' {
+                depth = (depth - 1).max(0);
+            } else if depth == 0
+                && ch == '&'
+                && bytes.get(i + 1) == Some(&b'&')
+                && bytes.get(i + 2) != Some(&b'&')
+            {
+                parts.push(cur.trim().to_string());
+                cur.clear();
+                i += 2;
+                continue;
+            }
+        }
+        cur.push(ch);
+        i += clen;
+    }
+    if !cur.trim().is_empty() || !parts.is_empty() {
+        parts.push(cur.trim().to_string());
+    }
+    parts
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn heal_windows_command(
+    raw: &str,
+    has_pwsh7: bool,
+    has_git_bash: bool,
+) -> (ShellKind, String, Vec<&'static str>) {
+    let re = heal_re();
+    let mut heals: Vec<&'static str> = Vec::new();
+    if has_git_bash && re.posix_only.is_match(raw) {
+        heals.push("posix->git-bash");
+        return (ShellKind::GitBash, raw.to_string(), heals);
+    }
+
+    let mut out = raw.to_string();
+    if re.curl_cmd.is_match(&out) {
+        out = re
+            .curl_cmd
+            .replace_all(&out, "${1}curl.exe${2}")
+            .to_string();
+        heals.push("curl->curl.exe");
+    }
+    if re.dev_null.is_match(&out) {
+        out = re.dev_null.replace_all(&out, "${1}$$null").to_string();
+        heals.push("/dev/null->$null");
+    }
+    if re.bare_amp_url.is_match(&out) {
+        out = re.bare_amp_url.replace_all(&out, "${1}'${2}'").to_string();
+        heals.push("quote-url-&");
+    }
+
+    if has_pwsh7 {
+        return (ShellKind::Pwsh7, out, heals);
+    }
+
+    let segs = split_top_level_and_and(&out);
+    if segs.len() >= 2 && segs.iter().all(|s| !s.is_empty()) {
+        let mut chain = Vec::with_capacity(segs.len());
+        for (idx, seg) in segs.iter().enumerate() {
+            if idx + 1 < segs.len() {
+                chain.push(format!(
+                    "$global:LASTEXITCODE = 0; {seg}; if (-not $? -or ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)) {{ exit $(if ($LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 1 }}) }}"
+                ));
+            } else {
+                chain.push(format!("$global:LASTEXITCODE = 0; {seg}"));
+            }
+        }
+        out = chain.join("; ");
+        heals.push("ps51-&&-chain");
+    }
+    (ShellKind::PowerShell5, out, heals)
+}
+
+#[cfg(windows)]
+pub fn probe_git_bash() -> Option<PathBuf> {
+    for cand in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ] {
+        let p = Path::new(cand);
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn probe_pwsh7() -> bool {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        if dir.join("pwsh.exe").is_file() {
+            return true;
+        }
+    }
+    Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe").is_file()
+}
+
+fn build_augmented_path() -> (std::ffi::OsString, bool) {
+    let home = default_home_dir();
+    let cur_os = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&cur_os).collect();
+    let mut changed = false;
+
+    let mut front_cands = vec![
+        home.join(".cargo").join("bin"),
+        home.join(".local").join("bin"),
+    ];
+    #[cfg(windows)]
+    {
+        if let Ok(app) = std::env::var("APPDATA") {
+            front_cands.push(PathBuf::from(app).join("npm"));
+        }
+        if let Ok(lapp) = std::env::var("LOCALAPPDATA") {
+            front_cands.push(PathBuf::from(lapp).join("pnpm"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        front_cands.push(PathBuf::from("/opt/homebrew/bin"));
+        front_cands.push(PathBuf::from("/usr/local/bin"));
+    }
+
+    for cand in front_cands.into_iter().rev() {
+        if cand.is_dir() && !dirs.iter().any(|d| d == &cand) {
+            dirs.insert(0, cand);
+            changed = true;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let git_usr = PathBuf::from(r"C:\Program Files\Git\usr\bin");
+        if git_usr.is_dir() && !dirs.iter().any(|d| d == &git_usr) {
+            dirs.push(git_usr);
+            changed = true;
+        }
+    }
+
+    let joined = std::env::join_paths(dirs).unwrap_or(cur_os);
+    (joined, changed)
+}
+
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("pkill")
+            .args(["-KILL", "-P", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub fn find_port_pids(port: u16) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let self_pid = std::process::id();
+    #[cfg(windows)]
+    {
+        if let Ok(out) = Command::new("netstat").args(["-ano", "-p", "tcp"]).output() {
+            let needle = format!(":{port}");
+            for ln in String::from_utf8_lossy(&out.stdout).lines() {
+                let cols: Vec<&str> = ln.split_whitespace().collect();
+                if cols.len() >= 5 && cols[1].ends_with(&needle) && cols[3] == "LISTENING" {
+                    if let Ok(pid) = cols[4].parse::<u32>() {
+                        if pid > 4 && pid != self_pid && !pids.contains(&pid) {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(out) = Command::new("lsof")
+            .args(["-ti", &format!("tcp:{port}")])
+            .output()
+        {
+            for ln in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Ok(pid) = ln.trim().parse::<u32>() {
+                    if pid > 1 && pid != self_pid && !pids.contains(&pid) {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    pids
+}
+
+pub fn free_local_port(port: u16) -> Vec<u32> {
+    let pids = find_port_pids(port);
+    for &pid in &pids {
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    pids
+}
+
+fn build_shell_command(raw_cmd: &str) -> (Command, Vec<&'static str>) {
+    #[cfg(windows)]
+    {
+        let git_bash = probe_git_bash();
+        let has_pwsh7 = probe_pwsh7();
+        let (kind, healed, mut heals) =
+            heal_windows_command(raw_cmd, has_pwsh7, git_bash.is_some());
+        heals.push("utf8-env");
+        match kind {
+            ShellKind::GitBash => {
+                let mut c = Command::new(git_bash.unwrap());
+                c.args(["--noprofile", "--norc", "-c", &healed]);
+                (c, heals)
+            }
+            ShellKind::Pwsh7 => {
+                let prologue = "[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false); $PSDefaultParameterValues['*:Encoding'] = 'utf8'; ";
+                let mut c = Command::new("pwsh.exe");
+                c.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("{prologue}{healed}"),
+                ]);
+                (c, heals)
+            }
+            ShellKind::PowerShell5 => {
+                let prologue = "[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false); $PSDefaultParameterValues['*:Encoding'] = 'utf8'; ";
+                let mut c = Command::new("powershell.exe");
+                c.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("{prologue}{healed}"),
+                ]);
+                (c, heals)
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("sh");
+        c.args(["-c", raw_cmd]);
+        (c, Vec::new())
+    }
+}
+
+pub fn run_cli(args: &[String]) -> i32 {
+    let cli = match ExecCli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if e.use_stderr() { 2 } else { 0 };
+            let _ = e.print();
+            return code;
+        }
+    };
+
+    let mut win_heals = 0u32;
+    let mut freed_pids = Vec::new();
+    if let Some(port) = cli.free_port {
+        freed_pids = free_local_port(port);
+        if !freed_pids.is_empty() {
+            win_heals += 1;
+        }
+    }
+
+    let shell_str: Option<String> = if let Some(b64) = &cli.base64 {
+        match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("[ap exec] invalid UTF-8 in --base64 payload: {e}");
+                    return 2;
+                }
+            },
+            Err(e) => {
+                eprintln!("[ap exec] invalid --base64 payload: {e}");
+                return 2;
+            }
+        }
+    } else {
+        cli.cmd.clone()
+    };
+
+    let clean_argv: Vec<String> = if cli.argv.first().map(|s| s.as_str()) == Some("--") {
+        cli.argv[1..].to_vec()
+    } else {
+        cli.argv.clone()
+    };
+
+    if shell_str.is_none() && clean_argv.is_empty() {
+        if let Some(port) = cli.free_port {
+            record_event("exec", 0, 0, win_heals, 0, "free-port");
+            if cli.json {
+                println!(
+                    "{}",
+                    json!({"ok": true, "port": port, "freed_pids": freed_pids})
+                );
+            } else if freed_pids.is_empty() {
+                println!("[ap exec] Port {port} is already free.");
+            } else {
+                println!(
+                    "[ap exec] Freed port {port} (terminated PIDs: {:?}).",
+                    freed_pids
+                );
+            }
+            return 0;
+        }
+        eprintln!("[ap exec] provide `-c \"<cmd>\"`, `--base64 <b64>`, `--free-port <p>`, or `-- <prog> <args...>`");
+        return 2;
+    }
+
+    let label = shell_str.clone().unwrap_or_else(|| clean_argv.join(" "));
+    let safety_issues = ap_guard::inspect_text_safety(&label);
+    if !safety_issues.is_empty() {
+        for item in safety_issues {
+            eprintln!("[GUARD BLOCKED | exit 2] {item}");
+        }
+        return 2;
+    }
+
+    let (mut child_cmd, heals) = if let Some(ref s) = shell_str {
+        build_shell_command(s)
+    } else {
+        let mut c = Command::new(&clean_argv[0]);
+        if clean_argv.len() > 1 {
+            c.args(&clean_argv[1..]);
+        }
+        #[cfg(windows)]
+        let hv = vec!["utf8-env"];
+        #[cfg(not(windows))]
+        let hv: Vec<&'static str> = Vec::new();
+        (c, hv)
+    };
+    win_heals += heals.iter().filter(|&&h| h != "utf8-env").count() as u32;
+
+    let (aug_path, path_healed) = build_augmented_path();
+    if path_healed && cfg!(windows) {
+        win_heals = win_heals.max(1);
+    }
+
+    child_cmd
+        .current_dir(&cli.cwd)
+        .env("PATH", aug_path)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("LC_ALL", "C.UTF-8")
+        .env("LANG", "C.UTF-8")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("NPM_CONFIG_YES", "true")
+        .env("PIP_NO_INPUT", "1")
+        .env("NEXT_TELEMETRY_DISABLED", "1")
+        .stdin(Stdio::null());
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid_self = std::process::id();
+    let out_file_p = std::env::temp_dir().join(format!("ap_exec_out_{pid_self}_{stamp}.log"));
+    let err_file_p = std::env::temp_dir().join(format!("ap_exec_err_{pid_self}_{stamp}.log"));
+
+    let Ok(out_f) = File::create(&out_file_p) else {
+        eprintln!("[ap exec] failed to allocate temp output file");
+        return 1;
+    };
+    let Ok(err_f) = File::create(&err_file_p) else {
+        let _ = fs::remove_file(&out_file_p);
+        eprintln!("[ap exec] failed to allocate temp error file");
+        return 1;
+    };
+    child_cmd
+        .stdout(Stdio::from(out_f))
+        .stderr(Stdio::from(err_f));
+
+    let t0 = Instant::now();
+    let mut child = match child_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = fs::remove_file(&out_file_p);
+            let _ = fs::remove_file(&err_file_p);
+            eprintln!("[ap exec] failed to spawn `{label}`: {e}");
+            return 127;
+        }
+    };
+
+    let deadline = Duration::from_secs(cli.timeout.max(1));
+    let mut timed_out = false;
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.code().unwrap_or(1),
+            Ok(None) => {
+                if t0.elapsed() >= deadline {
+                    timed_out = true;
+                    kill_tree(&mut child);
+                    win_heals += 1;
+                    break 124;
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
+            Err(_) => {
+                kill_tree(&mut child);
+                break 1;
+            }
+        }
+    };
+    let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
+
+    let out_bytes_raw = fs::read(&out_file_p).unwrap_or_default();
+    let err_bytes_raw = fs::read(&err_file_p).unwrap_or_default();
+    let _ = fs::remove_file(&out_file_p);
+    let _ = fs::remove_file(&err_file_p);
+
+    fn strip_bom(b: &[u8]) -> &[u8] {
+        b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b)
+    }
+    let mut combined = String::from_utf8_lossy(strip_bom(&out_bytes_raw)).to_string();
+    let err_str = String::from_utf8_lossy(strip_bom(&err_bytes_raw));
+    if !err_str.is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&err_str);
+    }
+    if timed_out {
+        combined.push_str(&format!(
+            "\n[ap exec] TIMEOUT after {}s — killed orphaned process tree cleanly.\n",
+            cli.timeout
+        ));
+    }
+
+    if exit_code != 0 {
+        if let Some(cap) = heal_re().port_in_use.captures(&combined) {
+            if let Some(p_str) = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()) {
+                if let Ok(port_num) = p_str.parse::<u16>() {
+                    let owners = find_port_pids(port_num);
+                    combined.push_str(&format!(
+                        "\n[ap exec port-lock] Port {port_num} is held by PID(s) {owners:?}. Free it cleanly via: ap exec --free-port {port_num}\n"
+                    ));
+                }
+            }
+        }
+    }
+
+    let raw_len = combined.len() as u64;
+    let final_text = if !cli.raw && combined.len() > 1800 {
+        let sieve_store = std::env::var("SIEVE_HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cli.cwd.join(".sieve"));
+        let sr =
+            ap_sieve::compress_stream_in(&sieve_store, &combined, &label, exit_code, elapsed_ms);
+        sr.rendered
+    } else {
+        combined
+    };
+
+    let out_len = final_text.len() as u64;
+    let note = if heals.is_empty() {
+        "exec".to_string()
+    } else {
+        heals.join("+")
+    };
+    record_event("exec", raw_len, out_len, win_heals, 0, &note);
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": exit_code == 0,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "elapsed_ms": elapsed_ms,
+                "heals": heals,
+                "raw_bytes": raw_len,
+                "emitted_bytes": out_len,
+                "output": final_text,
+            }))
+            .unwrap_or_default()
+        );
+    } else if !final_text.is_empty() {
+        print!("{final_text}");
+        if !final_text.ends_with('\n') {
+            println!();
+        }
+    }
+    exit_code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_windows_command_heals_ps51_curl_url_and_posix_routing() {
+        let (k1, h1, tags1) = heal_windows_command(
+            "curl -s https://api.example.com/items?page=1&per_page=50 > /dev/null && echo ok",
+            false,
+            true,
+        );
+        assert_eq!(k1, ShellKind::PowerShell5);
+        assert!(
+            h1.contains("curl.exe -s 'https://api.example.com/items?page=1&per_page=50' > $null")
+        );
+        assert!(h1.contains("LASTEXITCODE"));
+        assert!(tags1.contains(&"curl->curl.exe"));
+        assert!(tags1.contains(&"/dev/null->$null"));
+        assert!(tags1.contains(&"quote-url-&"));
+        assert!(tags1.contains(&"ps51-&&-chain"));
+
+        // Quoted `&&` must NOT be split
+        let parts = split_top_level_and_and(r#"node -e "if (a && b) console.log(1)" && echo done"#);
+        assert_eq!(parts.len(), 2);
+
+        // POSIX heredoc / Unix pipe routes to Git Bash when available
+        let (k2, _, tags2) = heal_windows_command("cat << 'EOF'\nhello\nEOF", true, true);
+        assert_eq!(k2, ShellKind::GitBash);
+        assert!(tags2.contains(&"posix->git-bash"));
+    }
+}

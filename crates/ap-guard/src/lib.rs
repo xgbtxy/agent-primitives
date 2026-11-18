@@ -1,3 +1,4 @@
+use base64::Engine;
 use clap::{Parser, Subcommand};
 pub mod rules;
 use regex::Regex;
@@ -198,6 +199,30 @@ fn should_auto_sieve(cmd: &str) -> bool {
     PREFIXES
         .iter()
         .any(|p| t == *p || t.starts_with(&format!("{p} ")))
+}
+
+fn should_auto_win_exec(cmd: &str) -> bool {
+    let force_win = std::env::var("AP_FORCE_WIN_SHIELD").ok().as_deref() == Some("1");
+    if !cfg!(windows) && !force_win {
+        return false;
+    }
+    let t = cmd.trim();
+    if t.is_empty()
+        || t.contains("ap exec")
+        || t.contains("ap.exe\" exec")
+        || t.contains("ap\" exec")
+        || t.contains("sieve run")
+    {
+        return false;
+    }
+    static WIN_TRAP_RE: OnceLock<Regex> = OnceLock::new();
+    let re = WIN_TRAP_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?:&&|<<-?\s*['"]?[A-Za-z_]|/dev/null\b|(?:^|[;|&(\s])curl\s+(?:-[A-Za-z-]|https?://)|\bpython3?\s+-c\b|\bnode\s+-e\b|\|\s*(?:head|tail|grep|egrep|awk|sed|wc)\b|https?://[^\s'"`;&|]+&[^\s'"`;&|]+)"#,
+        )
+        .unwrap()
+    });
+    re.is_match(t)
 }
 
 pub fn inspect_text_safety(text: &str) -> Vec<String> {
@@ -540,9 +565,12 @@ pub fn run_cli(args: &[String]) -> i32 {
                     }
                     // Claude Code / Codex snake_case hook contract (`hook_event_name` / `tool_input`)
                     if map.contains_key("hook_event_name") || map.contains_key("tool_input") {
-                        let is_claude_bash = map.get("hook_event_name").and_then(Value::as_str)
+                        let is_pre_shell = map.get("hook_event_name").and_then(Value::as_str)
                             == Some("PreToolUse")
-                            && map.get("tool_name").and_then(Value::as_str) == Some("Bash");
+                            && matches!(
+                                map.get("tool_name").and_then(Value::as_str),
+                                Some("Bash" | "shell" | "exec_command")
+                            );
                         let raw_cmd = map
                             .get("tool_input")
                             .and_then(|ti| ti.get("command"))
@@ -560,8 +588,9 @@ pub fn run_cli(args: &[String]) -> i32 {
                             eprintln!("Action halted. Request explicit human confirmation or sanitize secrets first.");
                             return EXIT_BLOCK;
                         }
-                        // RTK-style transparent command rewrite for noisy standalone test/lint commands in Claude Code
-                        if is_claude_bash && should_auto_sieve(&raw_cmd) {
+                        if is_pre_shell
+                            && (should_auto_sieve(&raw_cmd) || should_auto_win_exec(&raw_cmd))
+                        {
                             if let Ok(exe) = std::env::current_exe() {
                                 if exe
                                     .file_stem()
@@ -570,6 +599,13 @@ pub fn run_cli(args: &[String]) -> i32 {
                                     .eq_ignore_ascii_case("ap")
                                 {
                                     let ap_p = exe.to_string_lossy().replace('\\', "/");
+                                    let rewritten_cmd = if should_auto_sieve(&raw_cmd) {
+                                        format!("\"{ap_p}\" sieve run -- {}", raw_cmd.trim())
+                                    } else {
+                                        let b64 = base64::engine::general_purpose::STANDARD
+                                            .encode(raw_cmd.trim().as_bytes());
+                                        format!("\"{ap_p}\" exec --base64 {b64}")
+                                    };
                                     println!(
                                         "{}",
                                         json!({
@@ -577,7 +613,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                                                 "hookEventName": "PreToolUse",
                                                 "permissionDecision": "allow",
                                                 "updatedInput": {
-                                                    "command": format!("\"{ap_p}\" sieve run -- {}", raw_cmd.trim())
+                                                    "command": rewritten_cmd
                                                 }
                                             }
                                         })

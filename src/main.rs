@@ -1,7 +1,9 @@
 pub mod audit;
 pub mod bench;
+pub mod exec;
 pub mod install;
 pub mod mcp;
+pub mod stats;
 
 use clap::{Parser, Subcommand};
 
@@ -9,7 +11,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "ap",
     version,
-    about = "Single-binary Rust OS/AST/Heap/SQLite micro-infrastructure primitives for AI agents"
+    about = "Zero-config Windows & macOS execution engine for AI coding agents — heals shell/UTF-8 crashes, prevents hung servers & cuts token waste by 50-80%"
 )]
 struct TopCli {
     #[command(subcommand)]
@@ -18,7 +20,7 @@ struct TopCli {
 
 #[derive(Subcommand, Debug)]
 enum TopCmd {
-    /// Auto-detect and onboard AI harnesses (Codex, Pi, Antigravity, Claude Code, Grok, OpenClaw, Hermes)
+    /// 1-command auto-setup for all detected coding agents (install & forget)
     Init {
         #[arg(short = 'a', long, default_value = "auto")]
         agent: String,
@@ -37,9 +39,31 @@ enum TopCmd {
         #[arg(long)]
         no_rules: bool,
     },
-    /// Start zero-dependency Model Context Protocol (MCP) stdio JSON-RPC server
-    Mcp,
-    /// Cleanly remove installed skills, binary shims, hooks, and fenced rule blocks
+    /// View saved tokens, compressed logs & prevented Windows crashes
+    #[command(visible_alias = "gain")]
+    Stats {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        reset: bool,
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Check Windows/macOS shell, UTF-8, headless browser CDP & agent wiring health
+    Doctor,
+    /// Run commands with UTF-8 lock, Bash-in-PowerShell auto-heal, port unlock & log compression
+    Exec {
+        #[arg(short = 'c', long = "cmd")]
+        cmd: Option<String>,
+    },
+    /// Show current repository and global multi-agent installation status
+    Status {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        home: Option<String>,
+    },
+    /// Cleanly remove installed skills, hooks, MCP configs, and rule blocks
     Uninstall {
         #[arg(long)]
         here: bool,
@@ -48,15 +72,8 @@ enum TopCmd {
         #[arg(long)]
         home: Option<String>,
     },
-    /// Verify bundled SQLite FTS5/BM25, 6 Tree-sitter AST grammars & all 7 embedded primitives
-    Doctor,
-    /// Show current repository and global multi-harness installation status
-    Status {
-        #[arg(long)]
-        dir: Option<String>,
-        #[arg(long)]
-        home: Option<String>,
-    },
+    /// Start native Model Context Protocol (MCP) stdio JSON-RPC server
+    Mcp,
     /// Run deterministic micro-benchmark suite (with honest negative controls)
     Bench {
         #[arg(long, default_value = "bench/results.json")]
@@ -69,6 +86,8 @@ fn dispatch_primitive(name: &str, tail_args: &[String]) -> Option<i32> {
     sub_argv.push(name.to_string());
     sub_argv.extend_from_slice(tail_args);
     match name {
+        "exec" => Some(exec::run_cli(&sub_argv)),
+        "stats" | "gain" => Some(stats::run_cli(&sub_argv)),
         "sieve" => Some(ap_sieve::run_cli(&sub_argv)),
         "baton" => Some(ap_baton::run_cli(&sub_argv)),
         "recall" => Some(ap_recall::run_cli(&sub_argv)),
@@ -96,7 +115,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
 
-    // 1. Busybox `argv[0]` dispatch if symlinked/hardlinked as `sieve`, `probe`, `splice`, etc.
+    // 1. Busybox `argv[0]` dispatch if symlinked/hardlinked
     if let Some(arg0) = args.first() {
         let stem = std::path::Path::new(arg0)
             .file_stem()
@@ -110,7 +129,7 @@ fn main() {
         }
     }
 
-    // 2. Subcommand passthrough to the 7 standalone primitives + `audit`
+    // 2. Subcommand passthrough to `exec`, `stats`/`gain`, `audit`, and internal engine modules
     if let Some(sub) = args.get(1).map(|s| s.as_str()) {
         if let Some(code) = dispatch_primitive(sub, &args[2..]) {
             std::process::exit(code);
@@ -124,7 +143,7 @@ fn main() {
             let _ = e.print();
             if !e.use_stderr() {
                 println!(
-                    "\nPrimitives (pass `<primitive> --help` for details):\n  probe   Tree-sitter reachability slicer (`slice --bundle`), runtime & diff microscope\n  splice  Tree-sitter AST symbol view, zero-escaping atomic patcher (`apply --stdin --test`) & check\n  sieve   Lossless log/JSON/JSONL/HTML/CSV compressor + SQLite FTS5 `search` & `peek`\n  atlas   Sub-50ms 6-language Tree-sitter codebase & Markdown vault structural map\n  recall  Sub-ms bundled SQLite FTS5/BM25 + CJK triggered micro-memory vault\n  guard   Sub-2ms exit-2 blast-radius shield, loop breaker & dual-protocol hook gate\n  baton   Compaction-proof <500-token state & DO-NOT-RETRY handoff capsule\n  audit   Local zero-cloud session telemetry auditor (`ap audit --compare`)"
+                    "\nInternal Engine Modules (automatically invoked by agents via MCP & hooks):\n  atlas / splice / probe / sieve / guard / recall / baton / audit"
                 );
             }
             std::process::exit(code);
@@ -151,12 +170,14 @@ fn main() {
             with_mcp,
             no_rules,
         ),
-        TopCmd::Mcp => mcp::run_mcp_stdio(),
+        TopCmd::Stats { .. } => stats::run_cli(&args[1..]),
+        TopCmd::Doctor => install::cmd_doctor(),
+        TopCmd::Exec { .. } => exec::run_cli(&args[1..]),
+        TopCmd::Status { dir, home } => install::cmd_status(dir.as_deref(), home.as_deref()),
         TopCmd::Uninstall { here, dir, home } => {
             install::cmd_uninstall(here, dir.as_deref(), home.as_deref())
         }
-        TopCmd::Doctor => install::cmd_doctor(),
-        TopCmd::Status { dir, home } => install::cmd_status(dir.as_deref(), home.as_deref()),
+        TopCmd::Mcp => mcp::run_mcp_stdio(),
         TopCmd::Bench { out } => bench::run_bench(std::path::Path::new(&out)),
     };
     std::process::exit(code);

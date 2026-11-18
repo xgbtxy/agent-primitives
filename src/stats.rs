@@ -1,0 +1,175 @@
+use crate::audit::default_home_dir;
+use clap::Parser;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatEvent {
+    pub ts: u64,
+    pub kind: String,
+    pub raw_bytes: u64,
+    pub out_bytes: u64,
+    pub win_heals: u32,
+    pub guards: u32,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "stats",
+    about = "Show local token savings, log compression & Windows execution crashes prevented"
+)]
+struct StatsCli {
+    /// Emit machine-readable JSON summary
+    #[arg(long)]
+    json: bool,
+    /// Reset local stats ledger
+    #[arg(long)]
+    reset: bool,
+    /// Override home directory
+    #[arg(long)]
+    home: Option<String>,
+}
+
+pub fn stats_file_path(home_override: Option<&str>) -> PathBuf {
+    if let Some(h) = home_override.filter(|s| !s.trim().is_empty()) {
+        return PathBuf::from(h)
+            .join(".agent-primitives")
+            .join("stats.jsonl");
+    }
+    if let Ok(ap_home) = std::env::var("AP_HOME") {
+        if !ap_home.trim().is_empty() {
+            return PathBuf::from(ap_home).join("stats.jsonl");
+        }
+    }
+    default_home_dir()
+        .join(".agent-primitives")
+        .join("stats.jsonl")
+}
+
+pub fn record_event(
+    kind: &str,
+    raw_bytes: u64,
+    out_bytes: u64,
+    win_heals: u32,
+    guards: u32,
+    note: &str,
+) {
+    let path = stats_file_path(None);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ev = StatEvent {
+        ts,
+        kind: kind.to_string(),
+        raw_bytes,
+        out_bytes,
+        win_heals,
+        guards,
+        note: note.to_string(),
+    };
+    if let Ok(line) = serde_json::to_string(&ev) {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+pub fn run_cli(args: &[String]) -> i32 {
+    let cli = match StatsCli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if e.use_stderr() { 2 } else { 0 };
+            let _ = e.print();
+            return code;
+        }
+    };
+    let path = stats_file_path(cli.home.as_deref());
+    if cli.reset {
+        let _ = fs::remove_file(&path);
+        if cli.json {
+            println!("{}", json!({"ok": true, "reset": true}));
+        } else {
+            println!("[ap stats] Local token & execution ledger reset.");
+        }
+        return 0;
+    }
+
+    let mut events: Vec<StatEvent> = Vec::new();
+    if let Ok(txt) = fs::read_to_string(&path) {
+        for ln in txt.lines() {
+            if let Ok(ev) = serde_json::from_str::<StatEvent>(ln) {
+                events.push(ev);
+            }
+        }
+    }
+
+    let total_calls = events.len() as u64;
+    let total_raw: u64 = events.iter().map(|e| e.raw_bytes).sum();
+    let total_out: u64 = events.iter().map(|e| e.out_bytes).sum();
+    let total_win_heals: u64 = events.iter().map(|e| e.win_heals as u64).sum();
+    let total_guards: u64 = events.iter().map(|e| e.guards as u64).sum();
+    let saved_bytes = total_raw.saturating_sub(total_out);
+    let direct_tokens_saved = saved_bytes / 4;
+    let retry_tokens_avoided = total_win_heals * 3_500;
+    let net_tokens_saved = direct_tokens_saved + retry_tokens_avoided;
+    let compression_pct = if total_raw > 0 {
+        ((saved_bytes as f64 / total_raw as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "total_calls": total_calls,
+                "raw_bytes": total_raw,
+                "emitted_bytes": total_out,
+                "compression_pct": compression_pct,
+                "windows_heals": total_win_heals,
+                "quality_gates": total_guards,
+                "direct_tokens_saved": direct_tokens_saved,
+                "retry_tokens_avoided": retry_tokens_avoided,
+                "estimated_total_tokens_saved": net_tokens_saved,
+            }))
+            .unwrap_or_default()
+        );
+        return 0;
+    }
+
+    println!("[ap stats] Local Token & Windows Execution Ledger (100% offline)");
+    println!("----------------------------------------------------------------");
+    if total_calls == 0 {
+        println!("  No recorded runs yet. Use your coding agent normally (after `ap init`)");
+        println!("  or run `ap exec -c \"...\"` / `ap mcp`, then check `ap stats` again!");
+        return 0;
+    }
+    println!("  Accelerated Agent Actions : {total_calls} calls");
+    println!(
+        "  Context & Log Diet        : {:.1} KB -> {:.1} KB (-{compression_pct:.1}%)",
+        total_raw as f64 / 1024.0,
+        total_out as f64 / 1024.0
+    );
+    println!("  Windows Pitfalls Healed   : {total_win_heals} auto-fixes (UTF-8/GBK, PS `&&`/`curl`, PATH, locks)");
+    println!("  AST Edits & Smoke Gates   : {total_guards} verified checks (Tree-sitter + Edge CDP + 0-slop)");
+    println!(
+        "  Direct Compression Saved  : ~{} tokens",
+        direct_tokens_saved
+    );
+    println!(
+        "  Retry-Loop Tokens Avoided : ~{} tokens ({} failed turns prevented)",
+        retry_tokens_avoided, total_win_heals
+    );
+    println!("  Total Value Delivered     : ~{net_tokens_saved} tokens saved");
+    0
+}

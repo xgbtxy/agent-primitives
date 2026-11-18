@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
-# 1-Line Zero-Toolchain Installer for agent-primitives (`ap` Rust single binary)
+# 1-Line Zero-Config macOS / Linux Installer for `ap` (agent-primitives)
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh -s -- --here
 set -eu
 
 REPO="${AP_REPO:-xgbtxy/agent-primitives}"
@@ -44,7 +43,7 @@ if [ -n "$TARGET" ]; then
   else
     BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
   fi
-  echo "[ap install] Downloading prebuilt Rust binary ${ARCHIVE} ..."
+  echo "[ap install] Downloading prebuilt native binary ${ARCHIVE} ..."
   if curl -fsSL "${BASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}" 2>/dev/null; then
     if curl -fsSL "${BASE_URL}/SHA256SUMS" -o "${TMP_DIR}/SHA256SUMS" 2>/dev/null; then
       EXPECTED="$(grep " ${ARCHIVE}\$" "${TMP_DIR}/SHA256SUMS" | awk '{print $1}' || true)"
@@ -85,3 +84,11 @@ if [ "$#" -gt 0 ]; then
 else
   "${BIN_DIR}/ap" init
 fi
+
+echo ""
+echo "----------------------------------------------------------------"
+echo "[ap] Ready! Your coding agents are now accelerated."
+echo "  -> Next step : Open your coding agent and chat normally (0 new commands needed)"
+echo "  -> Check env : ap doctor"
+echo "  -> View gains: ap stats   (see saved tokens & compressed logs)"
+echo "----------------------------------------------------------------"

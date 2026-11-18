@@ -1055,3 +1055,117 @@ fn test_aider_indentation_patch_fallback_and_rtk_pretooluse_rewrite() {
         .unwrap();
     assert!(rewritten.contains("sieve run -- cargo test --workspace"));
 }
+
+#[test]
+fn test_windows_exec_shield_bom_utf16_splice_and_stats_ledger() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_stats_home");
+
+    // 1. UTF-8 BOM (0xEF,0xBB,0xBF) + UTF-16LE BOM (0xFF,0xFE) + CRLF patching in `ap splice`
+    let bom_utf8_file = root.join("config.ts");
+    let mut utf8_bom_bytes = b"\xEF\xBB\xBF".to_vec();
+    utf8_bom_bytes.extend_from_slice(
+        "export const TITLE = \"旧标题\";\r\nexport const PORT = 3000;\r\n".as_bytes(),
+    );
+    fs::write(&bom_utf8_file, utf8_bom_bytes).unwrap();
+
+    let utf16_file = root.join("ps51_note.js");
+    let mut utf16_bytes = vec![0xFF, 0xFE];
+    for u in "const mode = 'legacy';\r\n".encode_utf16() {
+        utf16_bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    fs::write(&utf16_file, utf16_bytes).unwrap();
+
+    let patch_bom = "@@ FILE: config.ts\n<<<\nexport const TITLE = \"旧标题\";\n===\nexport const TITLE = \"新标题\";\n>>>\n@@ FILE: ps51_note.js\n<<<\nconst mode = 'legacy';\n===\nconst mode = 'utf8-clean';\n>>>\n";
+    let sp_out = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(patch_bom),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        sp_out.status.success(),
+        "BOM/UTF-16LE splice failed: {}",
+        String::from_utf8_lossy(&sp_out.stderr)
+    );
+    let after_ts = fs::read(&bom_utf8_file).unwrap();
+    assert!(
+        !after_ts.starts_with(b"\xEF\xBB\xBF"),
+        "UTF-8 BOM must be stripped cleanly"
+    );
+    assert!(std::str::from_utf8(&after_ts).unwrap().contains("新标题"));
+
+    let after_js = fs::read(&utf16_file).unwrap();
+    assert!(
+        !after_js.starts_with(&[0xFF, 0xFE]),
+        "UTF-16LE BOM must be converted to clean UTF-8"
+    );
+    assert!(std::str::from_utf8(&after_js)
+        .unwrap()
+        .contains("utf8-clean"));
+
+    // 2. Transparent Windows PreToolUse hook Base64 auto-heal (`AP_FORCE_WIN_SHIELD=1`)
+    let win_hook_in = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "python -c \"print('中文UTF8')\" && curl -s https://example.com/api?a=1&b=2 > /dev/null" }
+    })
+    .to_string();
+    let mut shield_cmd = Command::new(ap_bin());
+    shield_cmd
+        .args(["guard", "shield"])
+        .current_dir(root)
+        .env("AP_FORCE_WIN_SHIELD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut sh_child = shield_cmd.spawn().unwrap();
+    sh_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(win_hook_in.as_bytes())
+        .unwrap();
+    let sh_out = sh_child.wait_with_output().unwrap();
+    assert!(sh_out.status.success());
+    let sh_j: Value = serde_json::from_slice(&sh_out.stdout).unwrap();
+    let rewritten = sh_j["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        rewritten.contains("exec --base64 "),
+        "Expected Base64 zero-quoting Windows exec rewrite, got: {rewritten}"
+    );
+
+    // 3. `ap exec -c` UTF-8 + `&&` chain + large output auto-sieve + `ap stats` (`ap gain`) ledger
+    let noisy_cmd = if Command::new("node").arg("--version").output().is_ok() {
+        "node -e \"for(let i=0;i<120;i++) console.log('build step ' + i + ' 中文正常')\" && echo CHAIN_OK"
+    } else {
+        "echo first_ok && echo CHAIN_OK"
+    };
+    let ex_out = run_ap(
+        root,
+        &["exec", "-c", noisy_cmd, "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        ex_out.status.success(),
+        "ap exec failed: {}{}",
+        String::from_utf8_lossy(&ex_out.stdout),
+        String::from_utf8_lossy(&ex_out.stderr)
+    );
+    let ex_j: Value = serde_json::from_slice(&ex_out.stdout).unwrap();
+    assert_eq!(ex_j["ok"], true);
+    assert!(ex_j["output"].as_str().unwrap().contains("CHAIN_OK"));
+
+    // 4. Verify `ap stats` / `ap gain --json` recorded real savings & resets cleanly
+    let st_out = run_ap(root, &["gain", "--json"], None, &[("AP_HOME", &ap_home)]);
+    assert!(st_out.status.success());
+    let st_j: Value = serde_json::from_slice(&st_out.stdout).unwrap();
+    assert!(st_j["total_calls"].as_u64().unwrap() >= 1);
+
+    let rst_out = run_ap(root, &["stats", "--reset"], None, &[("AP_HOME", &ap_home)]);
+    assert!(rst_out.status.success());
+}

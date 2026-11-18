@@ -1,7 +1,9 @@
-# 1-Line Zero-Toolchain Windows Installer for agent-primitives (`ap.exe` Rust single binary)
+# 1-Line Zero-Config Windows Installer for `ap` (agent-primitives)
 # Usage:
 #   irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repo = if ($env:AP_REPO) { $env:AP_REPO } else { "xgbtxy/agent-primitives" }
 $Version = if ($env:AP_VERSION) { $env:AP_VERSION } else { "latest" }
@@ -21,14 +23,15 @@ New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 try {
     $ZipPath = Join-Path $TmpDir $Archive
     $Downloaded = $false
-    Write-Host "[ap install] Downloading prebuilt Rust binary $Archive ..."
+    Write-Host "[ap install] Downloading native Windows binary ($Archive) ..." -ForegroundColor Cyan
     if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
         & curl.exe -fsSL "$BaseUrl/$Archive" -o $ZipPath 2>$null
         if ($LASTEXITCODE -eq 0 -and (Test-Path $ZipPath)) { $Downloaded = $true }
-    } else {
+    }
+    if (-not $Downloaded) {
         try {
             Invoke-WebRequest -Uri "$BaseUrl/$Archive" -OutFile $ZipPath -UseBasicParsing
-            $Downloaded = $true
+            if (Test-Path $ZipPath) { $Downloaded = $true }
         } catch {}
     }
 
@@ -50,7 +53,7 @@ try {
         Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
         Copy-Item -Path (Join-Path $TmpDir "ap.exe") -Destination (Join-Path $BinDir "ap.exe") -Force
     } elseif (Get-Command cargo -ErrorAction SilentlyContinue) {
-        Write-Host "[ap install] Building from Rust source via cargo ..."
+        Write-Host "[ap install] Building from Rust source via cargo ..." -ForegroundColor Cyan
         $CargoRoot = Join-Path $TmpDir "cargo"
         & cargo install --git "https://github.com/$Repo.git" --bin ap --locked --root $CargoRoot
         Copy-Item -Path (Join-Path $CargoRoot "bin\ap.exe") -Destination (Join-Path $BinDir "ap.exe") -Force
@@ -73,6 +76,14 @@ try {
     } else {
         & $ApExe init
     }
+
+    Write-Host ""
+    Write-Host "----------------------------------------------------------------" -ForegroundColor Green
+    Write-Host "[ap] Ready! Your coding agents are now accelerated on Windows." -ForegroundColor Green
+    Write-Host "  -> Next step : Open your coding agent and chat normally (0 new commands needed)"
+    Write-Host "  -> Check env : ap doctor"
+    Write-Host "  -> View gains: ap stats   (see tokens & Windows crashes saved)"
+    Write-Host "----------------------------------------------------------------" -ForegroundColor Green
 } finally {
     Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 }

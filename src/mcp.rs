@@ -1,6 +1,5 @@
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
-use std::path::PathBuf;
 use std::process::Command;
 
 fn mcp_tools_schema() -> Value {
@@ -79,6 +78,20 @@ fn mcp_tools_schema() -> Value {
             }
         },
         {
+            "name": "ap_exec",
+            "description": "Run shell, build, git, package-manager, Python or Node commands on Windows/macOS/Linux WITHOUT PowerShell `&&`/`curl`/heredoc syntax crashes, GBK/BOM encoding mojibake, pipe deadlocks, or noisy log floods. Automatically heals Windows commands, frees locked ports (`free_port`), kills hung process trees on timeout, and compresses >1.8KB logs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "command": { "type": "string", "description": "Shell command string to execute safely" },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds (default: 120)" },
+                    "free_port": { "type": "integer", "description": "Optional local TCP port to free before running" }
+                },
+                "required": ["command"]
+            }
+        },
+        {
             "name": "ap_probe",
             "description": "Execute a concrete Python/TS/JS/Rust snippet in the workspace (detecting heap aliasing, mutation & rounding bugs) OR run a noisy command through lossless log compression.",
             "inputSchema": {
@@ -135,11 +148,28 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
     match name {
         "ap_orient" => {
             let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let (_, map_json) = run_self_captured(
+                &["atlas".into(), "map".into(), root.into(), "--json".into()],
+                None,
+            );
+            let raw_b = serde_json::from_str::<Value>(&map_json)
+                .ok()
+                .and_then(|v| v.get("raw_bytes").and_then(Value::as_u64))
+                .unwrap_or(0);
             let (_, map_txt) =
                 run_self_captured(&["atlas".into(), "map".into(), root.into()], None);
             let (_, prod_txt) =
                 run_self_captured(&["atlas".into(), "product".into(), root.into()], None);
-            (true, format!("{map_txt}\n{prod_txt}"))
+            let out = format!("{map_txt}\n{prod_txt}");
+            crate::stats::record_event(
+                "orient",
+                raw_b.max(out.len() as u64),
+                out.len() as u64,
+                0,
+                1,
+                "mcp-orient",
+            );
+            (true, out)
         }
         "ap_edit" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
@@ -175,6 +205,7 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                     "Provide at least one entry in `writes` or `edits`.".to_string(),
                 );
             }
+            let n_ops = ops.len() as u32;
             let spec = json!({ "edits": ops }).to_string();
             let mut cli = vec![
                 "splice".to_string(),
@@ -186,7 +217,38 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if run_tests {
                 cli.push("--test".to_string());
             }
-            run_self_captured(&cli, Some(&spec))
+            let (ok, out) = run_self_captured(&cli, Some(&spec));
+            if ok {
+                crate::stats::record_event("edit", 0, 0, 0, n_ops, "mcp-edit");
+            }
+            (ok, out)
+        }
+        "ap_exec" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            let cmd = args
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if cmd.is_empty() {
+                return (false, "Pass non-empty `command` to `ap_exec`.".to_string());
+            }
+            let mut cli = vec![
+                "exec".to_string(),
+                "--cwd".to_string(),
+                cwd.to_string(),
+                "-c".to_string(),
+                cmd.to_string(),
+            ];
+            if let Some(t) = args.get("timeout").and_then(Value::as_u64) {
+                cli.push("--timeout".to_string());
+                cli.push(t.to_string());
+            }
+            if let Some(fp) = args.get("free_port").and_then(Value::as_u64) {
+                cli.push("--free-port".to_string());
+                cli.push(fp.to_string());
+            }
+            run_self_captured(&cli, None)
         }
         "ap_smoke" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
@@ -211,7 +273,9 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 cli.push("--start".to_string());
                 cli.push(st.to_string());
             }
-            run_self_captured(&cli, Some(&spec_txt))
+            let (ok, out) = run_self_captured(&cli, Some(&spec_txt));
+            crate::stats::record_event("smoke", 0, 0, 1, 1, "mcp-smoke");
+            (ok, out)
         }
         "ap_verify" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
@@ -239,6 +303,7 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 None,
             );
             let ok = g_ok && mismatch_lines.is_empty();
+            crate::stats::record_event("verify", 0, 0, 0, 1, "mcp-verify");
             let combined = if mismatch_lines.is_empty() {
                 g_txt
             } else {
@@ -272,27 +337,16 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty())
             {
-                let shell_args: Vec<String> = if cfg!(windows) {
-                    vec![
-                        "sieve".into(),
-                        "run".into(),
-                        "--".into(),
-                        "cmd".into(),
-                        "/C".into(),
-                        scmd.into(),
-                    ]
-                } else {
-                    vec![
-                        "sieve".into(),
-                        "run".into(),
-                        "--".into(),
-                        "sh".into(),
+                return run_self_captured(
+                    &[
+                        "exec".into(),
+                        "--cwd".into(),
+                        cwd.into(),
                         "-c".into(),
                         scmd.into(),
-                    ]
-                };
-                let _ = std::env::set_current_dir(PathBuf::from(cwd));
-                return run_self_captured(&shell_args, None);
+                    ],
+                    None,
+                );
             }
             (
                 false,

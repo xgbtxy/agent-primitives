@@ -145,6 +145,45 @@ fn format_numbered(lines: &[&str], s_1idx: usize, e_1idx: usize) -> String {
         .join("\n")
 }
 
+fn decode_source_bytes_clean(raw_b: &[u8], label: &str) -> Result<(String, &'static str), String> {
+    let text = if let Some(rest) = raw_b.strip_prefix(b"\xEF\xBB\xBF") {
+        std::str::from_utf8(rest)
+            .map_err(|e| format!("`{label}` is not valid UTF-8: {e}"))?
+            .to_string()
+    } else if let Some(rest) = raw_b.strip_prefix(b"\xFF\xFE") {
+        if rest.len() % 2 != 0 {
+            return Err(format!("`{label}` has truncated UTF-16LE byte length"));
+        }
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|e| format!("`{label}` invalid UTF-16LE: {e}"))?
+    } else if let Some(rest) = raw_b.strip_prefix(b"\xFE\xFF") {
+        if rest.len() % 2 != 0 {
+            return Err(format!("`{label}` has truncated UTF-16BE byte length"));
+        }
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|e| format!("`{label}` invalid UTF-16BE: {e}"))?
+    } else {
+        std::str::from_utf8(raw_b)
+            .map_err(|e| format!("`{label}` is not valid UTF-8: {e}"))?
+            .to_string()
+    };
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    Ok((
+        text.trim_start_matches('\u{FEFF}').replace("\r\n", "\n"),
+        nl,
+    ))
+}
+
 pub fn view_single_file(
     target: &Path,
     symbols: &[String],
@@ -158,7 +197,10 @@ pub fn view_single_file(
         ));
     }
     let canon = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let raw = String::from_utf8_lossy(&fs::read(&canon).map_err(|e| e.to_string())?).to_string();
+    let raw_b = fs::read(&canon).map_err(|e| e.to_string())?;
+    let raw = decode_source_bytes_clean(&raw_b, &target.to_string_lossy())
+        .map(|(s, _)| s)
+        .unwrap_or_else(|_| String::from_utf8_lossy(&raw_b).to_string());
     let lines: Vec<&str> = raw.lines().collect();
     let ext = canon
         .extension()
@@ -395,14 +437,8 @@ fn apply_spec_inner(
             if !backups.contains_key(&p) {
                 if p.exists() {
                     let raw_b = fs::read(&p).map_err(|e| e.to_string())?;
-                    let nl = if raw_b.windows(2).any(|w| w == b"\r\n") {
-                        "\r\n"
-                    } else {
-                        "\n"
-                    };
-                    let txt = std::str::from_utf8(&raw_b)
-                        .map_err(|e| format!("`{}` is not valid UTF-8: {e}", item.path))?;
-                    working_text.insert(p.clone(), (txt.replace("\r\n", "\n"), nl));
+                    let (clean_lf, nl) = decode_source_bytes_clean(&raw_b, &item.path)?;
+                    working_text.insert(p.clone(), (clean_lf, nl));
                     backups.insert(p.clone(), Some(raw_b));
                 } else {
                     working_text.insert(p.clone(), (String::new(), "\n"));
@@ -419,13 +455,23 @@ fn apply_spec_inner(
             };
             match op_kind {
                 "write" => {
-                    let body = item.content.as_deref().unwrap_or(&item.new);
+                    let body = item
+                        .content
+                        .as_deref()
+                        .unwrap_or(&item.new)
+                        .trim_start_matches('\u{FEFF}');
                     working_text.insert(p.clone(), (body.replace("\r\n", "\n"), nl_sep));
                     applied_summary.push(json!({"index": idx, "path": item.path, "op": "write"}));
                 }
                 "replace" => {
-                    let old_lf = item.old.replace("\r\n", "\n");
-                    let new_lf = item.new.replace("\r\n", "\n");
+                    let old_lf = item
+                        .old
+                        .trim_start_matches('\u{FEFF}')
+                        .replace("\r\n", "\n");
+                    let new_lf = item
+                        .new
+                        .trim_start_matches('\u{FEFF}')
+                        .replace("\r\n", "\n");
                     let (updated, cnt) = replace_crlf_tolerant(&cur_lf, &old_lf, &new_lf, item.all)
                         .map_err(|e| format!("`{}`: {e}", item.path))?;
                     working_text.insert(p.clone(), (updated, nl_sep));

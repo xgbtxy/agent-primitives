@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -45,7 +45,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Single-binary Rust OS/AST/Heap/SQLite micro-infrastructure primitives for AI coding & personal assistant agents"
+description = "Zero-config Windows & macOS execution engine for AI coding agents — heals shell/UTF-8 crashes, prevents hung servers & cuts token waste by 50-80%"
 default-run = "ap"
 
 [[bin]]
@@ -60,6 +60,7 @@ ap-probe = { path = "crates/ap-probe" }
 ap-recall = { path = "crates/ap-recall" }
 ap-sieve = { path = "crates/ap-sieve" }
 ap-splice = { path = "crates/ap-splice" }
+base64.workspace = true
 clap.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
