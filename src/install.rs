@@ -120,6 +120,17 @@ const HARNESS_SPECS: &[HarnessSpec] = &[
         rule_file: ".agents/AGENTS.md",
     },
     HarnessSpec {
+        id: "claude-desktop",
+        cli_bin: "claude-desktop-nonexistent-cli",
+        probe_dirs: &[
+            "AppData/Roaming/Claude",
+            "Library/Application Support/Claude",
+            ".config/Claude",
+        ],
+        skill_dirs: &[".agents/skills"],
+        rule_file: ".agents/AGENTS.md",
+    },
+    HarnessSpec {
         id: "openclaw",
         cli_bin: "openclaw",
         probe_dirs: &[".openclaw"],
@@ -184,6 +195,7 @@ fn normalize_harness_alias(raw: &str) -> Option<&'static str> {
         "cursor" => Some("cursor"),
         "windsurf" | "codeium" => Some("windsurf"),
         "vscode" | "vs-code" | "copilot" => Some("vscode"),
+        "claude-desktop" | "claudedesktop" => Some("claude-desktop"),
         "openclaw" => Some("openclaw"),
         "hermes" => Some("hermes"),
         "agents" => Some("agents"),
@@ -252,7 +264,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Exec & Extras (Windows/macOS Shield)**: Run shell/build/python/curl commands via `{ap_cmd} exec -c \"<cmd>\"` (auto-locks UTF-8, heals PS `&&`/`curl`/POSIX pipes, frees ports via `--free-port <p>` & auto-compresses >1.8KB logs); `{ap_cmd} probe run --cwd . --stdin`; `{ap_cmd} guard rule add`; `{ap_cmd} recall`; `{ap_cmd} baton`."
+            "4. **Read, Exec & Undo (General & Coding Shield)**: Read `.docx`/`.xlsx`/`.pptx`/`.pdf`/`.csv`/GBK files or URLs cleanly via `{ap_cmd} read <path_or_url> [--query Q | --lines A-B]`; run commands via `{ap_cmd} exec -c \"<cmd>\"` (UTF-8 lock, PS `&&`/`curl` heal & log diet); restore edits outside Git via `{ap_cmd} undo`; `{ap_cmd} recall`; `{ap_cmd} baton`."
         ));
     }
     format!(
@@ -1163,6 +1175,28 @@ pub fn cmd_init(
             false,
         ));
     }
+    if harnesses.contains(&"claude-desktop") {
+        let cd_rel = [
+            "AppData/Roaming/Claude",
+            "Library/Application Support/Claude",
+            ".config/Claude",
+        ]
+        .iter()
+        .copied()
+        .find(|d| home.join(d).is_dir())
+        .unwrap_or(if cfg!(windows) {
+            "AppData/Roaming/Claude"
+        } else if cfg!(target_os = "macos") {
+            "Library/Application Support/Claude"
+        } else {
+            ".config/Claude"
+        });
+        mcp_paths.push(merge_mcp_servers_json(
+            &home.join(cd_rel).join("claude_desktop_config.json"),
+            &global_bin_posix,
+            false,
+        ));
+    }
 
     println!("[ap init] Global native Rust onboarding complete!");
     println!(
@@ -1316,6 +1350,13 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
             .join("windsurf")
             .join("mcp_config.json"),
     );
+    for cd_rel in [
+        "AppData/Roaming/Claude",
+        "Library/Application Support/Claude",
+        ".config/Claude",
+    ] {
+        remove_mcp_servers_json(&home.join(cd_rel).join("claude_desktop_config.json"));
+    }
 
     let cur_exe = std::env::current_exe()
         .ok()

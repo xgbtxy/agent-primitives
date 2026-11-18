@@ -133,3 +133,8 @@ impl WinJobGuard {
         None
     }
 }
+
+#[cfg(not(windows))]
+impl Drop for WinJobGuard {
+    fn drop(&mut self) {}
+}

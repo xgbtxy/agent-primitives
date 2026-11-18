@@ -5,6 +5,30 @@ use std::process::Command;
 fn mcp_tools_schema() -> Value {
     json!([
         {
+            "name": "ap_read",
+            "description": "Universal zero-dependency reader for general & coding agents: reads Word (.docx), Excel (.xlsx worksheets/tables), PowerPoint (.pptx), PDF text, CSV/TSV/JSON, legacy GBK/GB18030/UTF-16 files on Windows, or web http(s):// URLs without mojibake or context-window overflow. Supports `lines` paging and `query` filtering.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "Local file/folder path or http(s):// URL" },
+                    "lines": { "type": "string", "description": "Optional line window, e.g. '1-120'" },
+                    "query": { "type": "string", "description": "Optional keyword filter for rows/paragraphs" },
+                    "sheet": { "type": "string", "description": "Optional worksheet filter for .xlsx" }
+                },
+                "required": ["target"]
+            }
+        },
+        {
+            "name": "ap_undo",
+            "description": "Safety net for non-Git folders (Desktop, Documents, notes, configs): atomically restores files modified by the most recent `ap_edit` checkpoint, or lists checkpoints.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "list": { "type": "boolean", "description": "If true, list available checkpoints without restoring" }
+                }
+            }
+        },
+        {
             "name": "ap_orient",
             "description": "Call FIRST on any empty or existing project. Returns verified host runtimes (Node/SQLite/Python/Rust/Browser), Tree-sitter code map, reachable files (pruning dead slop), UI controls, API routes, and broken DOM #id or route mismatches in <30ms.",
             "inputSchema": {
@@ -158,6 +182,52 @@ fn run_self_captured(args: &[String], stdin_data: Option<&str>) -> (bool, String
 
 fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
     match name {
+        "ap_read" => {
+            let target = args
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if target.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `target` path or URL to `ap_read`.".to_string(),
+                );
+            }
+            let mut cli = vec!["read".to_string(), target.to_string()];
+            if let Some(l) = args
+                .get("lines")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--lines".to_string());
+                cli.push(l.to_string());
+            }
+            if let Some(q) = args
+                .get("query")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--query".to_string());
+                cli.push(q.to_string());
+            }
+            if let Some(sh) = args
+                .get("sheet")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--sheet".to_string());
+                cli.push(sh.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_undo" => {
+            let mut cli = vec!["undo".to_string()];
+            if args.get("list").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--list".to_string());
+            }
+            run_self_captured(&cli, None)
+        }
         "ap_orient" => {
             let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
             let (_, map_json) = run_self_captured(
@@ -217,6 +287,14 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                     "Provide at least one entry in `writes` or `edits`.".to_string(),
                 );
             }
+            let mut touched_for_undo = Vec::new();
+            for item in &ops {
+                if let Some(p) = item.get("path").and_then(Value::as_str) {
+                    touched_for_undo.push(p.to_string());
+                }
+            }
+            let undo_snap =
+                crate::undo::record_pre_edit_snapshot(std::path::Path::new(cwd), &touched_for_undo);
             let n_ops = ops.len() as u32;
             let spec = json!({ "edits": ops }).to_string();
             let mut cli = vec![
@@ -229,9 +307,16 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if run_tests {
                 cli.push("--test".to_string());
             }
-            let (ok, out) = run_self_captured(&cli, Some(&spec));
+            let (ok, mut out) = run_self_captured(&cli, Some(&spec));
             if ok {
                 crate::stats::record_event("edit", 0, 0, 0, n_ops, "mcp-edit");
+                if let Some(ref snap) = undo_snap {
+                    let warns = crate::undo::check_truncation_warnings(snap);
+                    if !warns.is_empty() {
+                        out.push('\n');
+                        out.push_str(&warns.join("\n"));
+                    }
+                }
             }
             (ok, out)
         }

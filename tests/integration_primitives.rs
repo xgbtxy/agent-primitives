@@ -1304,3 +1304,165 @@ fn test_ast_impact_proactive_blast_radius_win_job_and_ide_mcp() {
     .success());
     assert!(!fake_home.join(".cursor/mcp.json").exists());
 }
+
+#[test]
+fn test_general_agent_docx_xlsx_gbk_read_undo_and_claude_desktop() {
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let tmp = TempDir::new().unwrap();
+    let space_dir = tmp.path().join("Desktop Reports 2026");
+    let ap_home = tmp.path().join("ap_general_home");
+    let cd_home = tmp.path().join("cd_home");
+    fs::create_dir_all(&space_dir).unwrap();
+    fs::create_dir_all(cd_home.join("AppData/Roaming/Claude")).unwrap();
+
+    // 1. Synthesize a real .docx ZIP (`word/document.xml`)
+    let docx_p = space_dir.join("Q4 经营纪要.docx");
+    {
+        let f = fs::File::create(&docx_p).unwrap();
+        let mut zw = ZipWriter::new(f);
+        zw.start_file("word/document.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document><w:body>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Q4 经营复盘</w:t></w:r></w:p>
+  <w:tbl>
+    <w:tr><w:tc><w:t>部门</w:t></w:tc><w:tc><w:t>达成率</w:t></w:tc></w:tr>
+    <w:tr><w:tc><w:t>华东区</w:t></w:tc><w:tc><w:t>118%</w:t></w:tc></w:tr>
+  </w:tbl>
+</w:body></w:document>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        zw.finish().unwrap();
+    }
+    let docx_out = run_ap(
+        tmp.path(),
+        &["read", docx_p.to_str().unwrap()],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(docx_out.status.success());
+    let docx_s = String::from_utf8_lossy(&docx_out.stdout);
+    assert!(docx_s.contains("# Q4 经营复盘") && docx_s.contains("| 华东区 | 118% |"));
+
+    // 2. Synthesize a real .xlsx ZIP (`xl/workbook.xml` + `xl/sharedStrings.xml` + `xl/worksheets/sheet1.xml`)
+    let xlsx_p = space_dir.join("财务台账.xlsx");
+    {
+        let f = fs::File::create(&xlsx_p).unwrap();
+        let mut zw = ZipWriter::new(f);
+        zw.start_file("xl/workbook.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<workbook><sheets><sheet name="报销单" sheetId="1"/></sheets></workbook>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/sharedStrings.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<sst><si><t>项目</t></si><si><t>金额</t></si><si><t>服务器扩容</t></si></sst>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/worksheets/sheet1.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"<worksheet><sheetData>
+              <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+              <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>4200</v></c></row>
+            </sheetData></worksheet>"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+    }
+    let xlsx_out = run_ap(
+        tmp.path(),
+        &["read", xlsx_p.to_str().unwrap(), "--query", "4200"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(xlsx_out.status.success());
+    let xlsx_s = String::from_utf8_lossy(&xlsx_out.stdout);
+    assert!(xlsx_s.contains("报销单") && xlsx_s.contains("| 服务器扩容 | 4200 |"));
+
+    // 3. GBK/GB18030 legacy Windows CSV bill read without mojibake
+    let gbk_p = space_dir.join("支付宝账单_gbk.csv");
+    let (gbk_cow, _, _) =
+        encoding_rs::GB18030.encode("日期,商户,金额\r\n2026-11-18,阿里云计算,368.00\r\n");
+    fs::write(&gbk_p, gbk_cow.as_ref()).unwrap();
+    let gbk_out = run_ap(
+        tmp.path(),
+        &["read", gbk_p.to_str().unwrap()],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(gbk_out.status.success());
+    let gbk_s = String::from_utf8_lossy(&gbk_out.stdout);
+    assert!(gbk_s.contains("阿里云计算") && gbk_s.contains("gb18030/gbk"));
+
+    // 4. Non-Git Desktop folder: `ap_edit` truncation warning + 1-command `ap undo` recovery!
+    let note_p = space_dir.join("重要会议纪要.md");
+    let orig_note: String = (1..=85)
+        .map(|i| format!("第 {i} 条核心决议：保留完整历史记录\n"))
+        .collect();
+    fs::write(&note_p, &orig_note).unwrap();
+
+    let mcp_bad_overwrite = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "ap_edit",
+            "arguments": {
+                "cwd": space_dir.to_string_lossy(),
+                "writes": [{ "path": "重要会议纪要.md", "content": "# 被大模型不小心截断只剩一行\n" }]
+            }
+        }
+    })
+    .to_string()
+        + "\n";
+    let mcp_res = run_ap(
+        &space_dir,
+        &["mcp"],
+        Some(&mcp_bad_overwrite),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(mcp_res.status.success());
+    let mcp_str = String::from_utf8_lossy(&mcp_res.stdout);
+    assert!(
+        mcp_str.contains("TRUNCATION WARNING"),
+        "Expected truncation warning on >75% file shrink, got: {mcp_str}"
+    );
+
+    // Run `ap undo` in non-Git Desktop folder -> 100% original 85 lines restored!
+    let undo_out = run_ap(&space_dir, &["undo"], None, &[("AP_HOME", &ap_home)]);
+    assert!(undo_out.status.success());
+    assert_eq!(fs::read_to_string(&note_p).unwrap(), orig_note);
+
+    // 5. Claude Desktop `claude_desktop_config.json` auto-wiring & clean uninstall
+    assert!(run_ap(
+        tmp.path(),
+        &["init", "--home", cd_home.to_str().unwrap()],
+        None,
+        &[]
+    )
+    .status
+    .success());
+    assert!(cd_home
+        .join("AppData/Roaming/Claude/claude_desktop_config.json")
+        .is_file());
+    assert!(run_ap(
+        tmp.path(),
+        &["uninstall", "--home", cd_home.to_str().unwrap()],
+        None,
+        &[]
+    )
+    .status
+    .success());
+    assert!(!cd_home
+        .join("AppData/Roaming/Claude/claude_desktop_config.json")
+        .exists());
+}

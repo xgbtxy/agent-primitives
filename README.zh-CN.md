@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./assets/logo.svg" width="60" height="60" alt="ap logo" />
   <h1>ap</h1>
-  <p><strong>顺着大模型真实 <code>&lt;thinking&gt;</code> 思考卡点打造的 Coding Agent 提效引擎 —— 让 AI 在 Windows 和 Mac 上少走弯路、快 2 倍、一次写出真机验证通过的好代码。</strong></p>
+  <p><strong>不只是编程：顺着大模型真实 <code>&lt;thinking&gt;</code> 卡点打造的通用与编程智能体底座 —— 把「读任意文件、跑终端命令、安全改文档、真机验功能」在 Windows 和 Mac 上彻底铺平。</strong></p>
   <p>
     <a href="https://github.com/xgbtxy/ap/actions/workflows/ci.yml"><img src="https://github.com/xgbtxy/ap/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
     <a href="https://github.com/xgbtxy/ap/releases/latest"><img src="https://img.shields.io/github/v/release/xgbtxy/ap?color=22c55e&label=%E7%9B%B4%E6%8E%A5%E4%B8%8B%E8%BD%BD" alt="Latest Release" /></a>
@@ -19,7 +19,7 @@
 
 ## 10 秒一行安装，装完即忘
 
-不需要装 `Python`、不需要装 `Node`、不需要装 400MB `Playwright`，**更不需要你背任何新命令**。复制一行执行，自动识别并接好你电脑上的 AI 编辑器与终端 Agent（`Cursor`、`Windsurf`、`VS Code`、`Claude Code`、`Codex`、`OpenCode`、`Gemini CLI`、`Qwen Code`、`Pi`、`Goose`、`Antigravity`、`Grok`）：
+不需要装 `Python`、不需要装 `Node`、不需要装 400MB `Playwright`，**更不需要你背任何新命令**。复制一行执行，自动识别并接好你电脑上的通用桌面助手、AI 编辑器与终端 Agent（`Claude Desktop`、`OpenClaw`、`Hermes`、`Cursor`、`Windsurf`、`VS Code`、`Claude Code`、`Codex`、`OpenCode`、`Gemini CLI`、`Qwen Code`、`Pi`、`Goose`、`Antigravity`、`Grok`）：
 
 **Windows（打开 PowerShell 粘贴回车）：**
 ```powershell
@@ -43,10 +43,11 @@ curl -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.sh | sh
 
 | AI `<thinking>` 真实卡点 | 没装 `ap` 时为什么会越干越乱？ | `ap` 怎么在底层顺着思考链路提效？（用户零感知） |
 | :--- | :--- | :--- |
-| **1. 开局盲猜与跨文件漏改**<br>*(认知与影响面盲区)* | 盲读废弃旧代码，或在多文件重构时只改了 2 处、漏掉另外 5 处下游调用方。 | **<15 ms** 给出 PageRank 核心主干 + **语法树级 `ap_impact` 全量调用链** + UI `#id` ↔ 路由契约（免起 2GB 语言服务）。 |
-| **2. 改代码被格式绊倒**<br>*(思路被迫中断)* | 方案想对了，却栽在 Windows `CRLF`、PowerShell `UTF-8 BOM` / `UTF-16LE` 或缩进偏差上反复报错。 | 自动净化 **UTF-8 BOM 与 UTF-16LE**，3 级缩进容错，写盘前 **6 语言语法树秒级验错**，并在改函数签名时主动弹出 **`[BLAST RADIUS]`** 提醒未同步的调用方。 |
-| **3. 终端水土不服死循环**<br>*(Windows/Mac 头号泥潭)* | 模型 90% 语料是 Linux Bash，到了 Windows 撞上 **528 次崩溃**（`'gbk'` 乱码、PS 5.1 不认 `&&`/`curl`/`<<EOF`）与残留孤儿进程。 | **Base64 零转义 Hook + `ap exec`** 无感锁死 UTF-8、治愈 PS 语法坑，通过 **Windows NT 内核 `Job Object`** 根除孤儿进程锁死，并过滤 90%+ 刷屏日志。 |
-| **4. 写完没法真机自检**<br>*(闭环缺失与烂尾)* | 后台起服务锁死管道卡住终端或报 `EADDRINUSE` 端口冲突，模型被迫放弃验页面，留下断链或空 `catch {}` 糊弄交差。 | 自动清端口并直连**系统自带无头 Edge / Chrome** 像真人一样点按钮验功能（0 MB 依赖），最后用 **<2 ms 硬门禁**逼模型自己把 Slop 改干净再交卷。 |
+| **1. 读任意文档、表格与网页**<br>*(通用办公与数据处理)* | 读 `.docx`/`.xlsx`/`.pptx`/`.pdf` 报二进制乱码（没装 Python 就抓瞎），读支付宝/银行 `GBK` 账单变乱码，或大文件把上下文直接撑爆。 | **`ap read` (`ap_read`)** 免 Python 原生解析 Word/Excel 多工作表/PPT/PDF、`GBK`/`UTF-16` 账单与网页，自动生成结构大纲并支持 `--query` 检索分页。 |
+| **2. 开局盲猜与跨文件漏改**<br>*(代码认知与影响面盲区)* | 盲读废弃旧代码，或在多文件重构时只改了 2 处、漏掉另外 5 处下游调用方。 | **<15 ms** 给出 PageRank 核心主干 + **语法树级 `ap_impact` 全量调用链** + UI `#id` ↔ 路由契约（免起 2GB 语言服务）。 |
+| **3. 改文件截断与无 Git 误覆盖**<br>*(桌面文档与代码安全)* | 栽在 Windows `CRLF` / `UTF-8 BOM` / `UTF-16LE` 上，或在没有 Git 的桌面文件夹里把用户 100 行纪要误截断覆盖且无法撤回。 | 自动净化 BOM/UTF-16LE、写盘前 6 语言语法树验错、主动拦截提醒 `>75%` 异常截断，并提供非 Git 目录一键回滚 **`ap undo`**（后悔药）。 |
+| **4. 终端水土不服死循环**<br>*(Windows/Mac 头号泥潭)* | 模型 90% 语料是 Linux Bash，到了 Windows 撞上 **528 次崩溃**（`'gbk'` 乱码、PS 5.1 不认 `&&`/`curl`/`<<EOF`）与残留孤儿进程。 | **Base64 零转义 Hook + `ap exec`** 无感锁死 UTF-8、治愈 PS 语法坑，通过 **Windows NT 内核 `Job Object`** 根除孤儿进程锁死，并过滤 90%+ 刷屏日志。 |
+| **5. 写完没法真机自检**<br>*(闭环缺失与烂尾)* | 后台起服务锁死管道卡住终端或报 `EADDRINUSE` 端口冲突，模型被迫放弃验页面，留下断链或空 `catch {}` 糊弄交差。 | 自动清端口并直连**系统自带无头 Edge / Chrome** 像真人一样点按钮验功能（0 MB 依赖），最后用 **<2 ms 硬门禁**逼模型自己把 Slop 改干净再交卷。 |
 
 ---
 
@@ -75,6 +76,7 @@ $ ap stats
 | 测试 Agent 与真实任务 | 未装 `ap` → **安装 `ap` 后**（速度与步数） | 代码质量与自纠错结果 | 顺带避免的冤枉 Token |
 | :--- | :--- | :---: | :--- |
 | **`OpenCode` 免费版 (`$0` `big-pickle`)** · *小白一句话需求* | `430.2s`（乱撞 `60` 步）→ **`182.4s`（`23` 步直达，快 2.36 倍）** | `7/8` *(留吞错 Slop)* → **`8/8`（0 Slop）** | **`-75.1%`** (`1.61M → 402k`) |
+| **非编程日常办公（无 Python 电脑）** · *核对 `.docx` + `.xlsx` + `GBK` 流水* | `70.5s` *(读出乱码+调 Python 报错)* → **`46.5s`（快 1.52 倍）** | **`5/5` → `5/5`** *(`ap read` 一次直读零报错)* | **`-54.3%`** (`127k → 58k`) |
 | **`Codex CLI` (`gpt-6-astra`)** · *14 文件跨模块函数签名重构* | `151.6s` → **`96.6s`（快 1.57 倍）** | **`7/7` → `7/7`** *(5 处下游调用与无头 Edge 一次全通)* | **`-57.4%`** (`296k → 126k`) |
 | **`Codex CLI` (`gpt-6-astra`)** · *空目录随机新项目* | `345.3s`（`23` 步）→ **`244.6s`（`9` 步完成，少走 61% 弯路）** | **`6/6` → `6/6`** *(1 次无头 Edge 验通)* | **`-83.3%`** (`1.12M → 186k`) |
 | **`Codex CLI` (`gpt-6-astra`)** · *全栈功能升级* | `333.6s`（`24` 步）→ **`294.3s`（`11` 步完成，少调 54% 工具）** | **`8/8` → `8/8`** | **`-65.4%`** (`1.05M → 365k`) |

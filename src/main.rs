@@ -3,7 +3,9 @@ pub mod bench;
 pub mod exec;
 pub mod install;
 pub mod mcp;
+pub mod read;
 pub mod stats;
+pub mod undo;
 pub mod win_job;
 
 use clap::{Parser, Subcommand};
@@ -52,10 +54,17 @@ enum TopCmd {
     },
     /// Check Windows/macOS shell, UTF-8, headless browser CDP & agent wiring health
     Doctor,
+    /// Read any file (.docx, .xlsx, .pptx, .pdf, .csv, GBK/UTF-16) or URL without context overflow
+    Read { target: Option<String> },
     /// Run commands with UTF-8 lock, Bash-in-PowerShell auto-heal, port unlock & log compression
     Exec {
         #[arg(short = 'c', long = "cmd")]
         cmd: Option<String>,
+    },
+    /// Restore files from the most recent agent edit snapshot (works even outside Git!)
+    Undo {
+        #[arg(long)]
+        list: bool,
     },
     /// Show current repository and global multi-agent installation status
     Status {
@@ -89,7 +98,9 @@ fn dispatch_primitive(name: &str, tail_args: &[String]) -> Option<i32> {
     let is_help = tail_args.iter().any(|a| a == "--help" || a == "-h");
     let from_mcp = std::env::var("AP_MCP_CHILD").ok().as_deref() == Some("1");
     let code = match name {
+        "read" => return Some(read::run_cli(&sub_argv)),
         "exec" => return Some(exec::run_cli(&sub_argv)),
+        "undo" => return Some(undo::run_cli(&sub_argv)),
         "stats" | "gain" => return Some(stats::run_cli(&sub_argv)),
         "sieve" => Some(ap_sieve::run_cli(&sub_argv)),
         "baton" => Some(ap_baton::run_cli(&sub_argv)),
@@ -197,7 +208,9 @@ fn main() {
         ),
         TopCmd::Stats { .. } => stats::run_cli(&args[1..]),
         TopCmd::Doctor => install::cmd_doctor(),
+        TopCmd::Read { .. } => read::run_cli(&args[1..]),
         TopCmd::Exec { .. } => exec::run_cli(&args[1..]),
+        TopCmd::Undo { .. } => undo::run_cli(&args[1..]),
         TopCmd::Status { dir, home } => install::cmd_status(dir.as_deref(), home.as_deref()),
         TopCmd::Uninstall { here, dir, home } => {
             install::cmd_uninstall(here, dir.as_deref(), home.as_deref())
