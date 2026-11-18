@@ -33,7 +33,10 @@ pub struct ViewFileResult {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "splice", about = "Tree-sitter AST symbol surgeon, atomic patcher & auto-test gate")]
+#[command(
+    name = "splice",
+    about = "Tree-sitter AST symbol surgeon, atomic patcher & auto-test gate"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: SubCmd,
@@ -99,7 +102,11 @@ fn md_heading_re() -> &'static (Regex, Regex) {
 
 fn find_md_section_span(lines: &[&str], heading_query: &str) -> Option<(usize, usize)> {
     let (md_re, _) = md_heading_re();
-    let q = heading_query.trim().trim_start_matches('#').trim().to_lowercase();
+    let q = heading_query
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_lowercase();
     let mut start_idx: Option<usize> = None;
     let mut start_lvl = 0usize;
     for (idx, &ln) in lines.iter().enumerate() {
@@ -145,7 +152,10 @@ pub fn view_single_file(
     line_range: &str,
 ) -> Result<ViewFileResult, String> {
     if !target.exists() {
-        return Err(format!("[splice view] file not found: {}", target.display()));
+        return Err(format!(
+            "[splice view] file not found: {}",
+            target.display()
+        ));
     }
     let canon = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     let raw = String::from_utf8_lossy(&fs::read(&canon).map_err(|e| e.to_string())?).to_string();
@@ -203,7 +213,10 @@ pub fn view_single_file(
             .iter()
             .map(|it| {
                 let pad = if it.qual.contains('.') { "  " } else { "" };
-                format!("{pad}L{}-L{}: {} {}", it.start_line, it.end_line, it.kind, it.qual)
+                format!(
+                    "{pad}L{}-L{}: {} {}",
+                    it.start_line, it.end_line, it.kind, it.qual
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -215,7 +228,11 @@ pub fn view_single_file(
         });
     } else {
         let cap = lines.len().min(160);
-        let sel = if cap == lines.len() { "<full>" } else { "<head>" };
+        let sel = if cap == lines.len() {
+            "<full>"
+        } else {
+            "<head>"
+        };
         blocks.push(ViewBlock {
             selector: sel.to_string(),
             start_line: 1,
@@ -232,7 +249,9 @@ pub fn view_single_file(
 }
 
 fn purge_stale_pyc(py_file: &Path) {
-    let Some(parent) = py_file.parent() else { return };
+    let Some(parent) = py_file.parent() else {
+        return;
+    };
     let cache_dir = parent.join("__pycache__");
     if !cache_dir.is_dir() {
         return;
@@ -273,7 +292,8 @@ fn emit_check_human(payload: &CheckPayload) {
         payload.checked_py_files, payload.checked_ts_js_files, payload.checked_rs_go_c_files
     );
     if payload.ok {
-        let mut msg = format!("[splice check] OK — ({counts}) UTF-8, Tree-sitter AST & local-import clean");
+        let mut msg =
+            format!("[splice check] OK — ({counts}) UTF-8, Tree-sitter AST & local-import clean");
         if let Some(tr) = &payload.test_result {
             msg.push_str(&format!(" + tests PASSED (`{}`)", tr.command));
         }
@@ -317,7 +337,15 @@ pub fn apply_spec_str(
     rollback_on_test_fail: bool,
     as_json: bool,
 ) -> i32 {
-    apply_spec_inner(cwd, raw_spec, run_tests, test_cmd_override, rollback_on_test_fail, as_json, true)
+    apply_spec_inner(
+        cwd,
+        raw_spec,
+        run_tests,
+        test_cmd_override,
+        rollback_on_test_fail,
+        as_json,
+        true,
+    )
 }
 
 fn apply_spec_inner(
@@ -384,7 +412,11 @@ fn apply_spec_inner(
             }
 
             let (cur_lf, nl_sep) = working_text.get(&p).cloned().unwrap();
-            let op_kind = if item.op.is_empty() { "replace" } else { item.op.as_str() };
+            let op_kind = if item.op.is_empty() {
+                "replace"
+            } else {
+                item.op.as_str()
+            };
             match op_kind {
                 "write" => {
                     let body = item.content.as_deref().unwrap_or(&item.new);
@@ -397,12 +429,15 @@ fn apply_spec_inner(
                     let (updated, cnt) = replace_crlf_tolerant(&cur_lf, &old_lf, &new_lf, item.all)
                         .map_err(|e| format!("`{}`: {e}", item.path))?;
                     working_text.insert(p.clone(), (updated, nl_sep));
-                    applied_summary.push(json!({"index": idx, "path": item.path, "op": "replace", "matches": cnt}));
+                    applied_summary.push(
+                        json!({"index": idx, "path": item.path, "op": "replace", "matches": cnt}),
+                    );
                 }
                 "replace_symbol" => {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let sp = find_symbol_span(&cur_lf, ext, &item.symbol)
-                        .ok_or_else(|| format!("Symbol `{}` not found in `{}`.", item.symbol, item.path))?;
+                    let sp = find_symbol_span(&cur_lf, ext, &item.symbol).ok_or_else(|| {
+                        format!("Symbol `{}` not found in `{}`.", item.symbol, item.path)
+                    })?;
                     let indented = dedent_and_reindent(&item.new, sp.indent_col);
                     let src_lines: Vec<&str> = cur_lf.split('\n').collect();
                     let mut updated_lines: Vec<String> = src_lines[..sp.start_line - 1]
@@ -411,7 +446,8 @@ fn apply_spec_inner(
                         .collect();
                     updated_lines.extend(indented);
                     if sp.end_line < src_lines.len() {
-                        updated_lines.extend(src_lines[sp.end_line..].iter().map(|s| (*s).to_string()));
+                        updated_lines
+                            .extend(src_lines[sp.end_line..].iter().map(|s| (*s).to_string()));
                     }
                     working_text.insert(p.clone(), (updated_lines.join("\n"), nl_sep));
                     applied_summary.push(json!({
@@ -453,8 +489,10 @@ fn apply_spec_inner(
         if as_json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&json!({"ok": false, "rolled_back": true, "error": err}))
-                    .unwrap_or_default()
+                serde_json::to_string_pretty(
+                    &json!({"ok": false, "rolled_back": true, "error": err})
+                )
+                .unwrap_or_default()
             );
         } else {
             eprintln!("[splice apply] ABORTED & ROLLED BACK: {err}");
@@ -526,7 +564,11 @@ fn apply_spec_inner(
             emit_check_human(cp);
         }
     }
-    if overall_ok { 0 } else { 1 }
+    if overall_ok {
+        0
+    } else {
+        1
+    }
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -634,7 +676,14 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 2;
             };
 
-            let rc = apply_spec_str(&cwd, &raw_spec, test, &test_cmd, rollback_on_test_fail, as_json);
+            let rc = apply_spec_str(
+                &cwd,
+                &raw_spec,
+                test,
+                &test_cmd,
+                rollback_on_test_fail,
+                as_json,
+            );
             if rc == 0 {
                 if let Some(sf) = spec_file_to_unlink {
                     let _ = fs::remove_file(sf);
@@ -650,11 +699,18 @@ pub fn run_cli(args: &[String]) -> i32 {
         } => {
             let payload = collect_check_payload(&root, test, &test_cmd);
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
             } else {
                 emit_check_human(&payload);
             }
-            if payload.ok { 0 } else { 1 }
+            if payload.ok {
+                0
+            } else {
+                1
+            }
         }
     }
 }

@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "agent-primitives"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "ap-atlas",
  "ap-baton",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "ap-atlas"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "ignore",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "ap-baton"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "serde",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "ap-guard"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "regex",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "ap-probe"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "clap",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "ap-recall"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "rusqlite",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "ap-sieve"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "csv",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "ap-splice"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "clap",

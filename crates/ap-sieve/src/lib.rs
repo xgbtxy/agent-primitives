@@ -37,7 +37,10 @@ pub struct SearchHit {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "sieve", about = "Lossless output compressor & SQLite FTS5 flight recorder")]
+#[command(
+    name = "sieve",
+    about = "Lossless output compressor & SQLite FTS5 flight recorder"
+)]
 struct Cli {
     #[command(subcommand)]
     subcmd: SubCmd,
@@ -174,7 +177,13 @@ fn prune_ring_buffer(store: &Path, max_bytes: u64) {
     }
 }
 
-fn archive_stream(store: &Path, raw_text: &str, label: &str, exit_code: i32, elapsed_ms: f64) -> String {
+fn archive_stream(
+    store: &Path,
+    raw_text: &str,
+    label: &str,
+    exit_code: i32,
+    elapsed_ms: f64,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw_text.as_bytes());
     let id = format!("{:x}", hasher.finalize())[..10].to_string();
@@ -204,7 +213,12 @@ fn format_pipe_table(rows: &[Vec<String>], max_rows: usize) -> String {
         return String::new();
     }
     let sample_n = rows.len().min(max_rows + 2);
-    let ncols = rows[..sample_n].iter().map(|r| r.len()).max().unwrap_or(0).min(10);
+    let ncols = rows[..sample_n]
+        .iter()
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(0)
+        .min(10);
     if ncols == 0 {
         return String::new();
     }
@@ -217,7 +231,10 @@ fn format_pipe_table(rows: &[Vec<String>], max_rows: usize) -> String {
             .collect();
         format!("| {} |", cells.join(" | "))
     };
-    let mut out = vec![fmt_row(&rows[0]), format!("| {} |", vec!["---"; ncols].join(" | "))];
+    let mut out = vec![
+        fmt_row(&rows[0]),
+        format!("| {} |", vec!["---"; ncols].join(" | ")),
+    ];
     let body = &rows[1..];
     if body.len() <= max_rows {
         for r in body {
@@ -260,18 +277,24 @@ fn summarize_json(val: &Value) -> String {
                 match v {
                     Value::Array(arr) => {
                         let schema = match arr.first() {
-                            Some(Value::Object(o)) => format!(
-                                "{:?}",
-                                o.keys().take(8).collect::<Vec<_>>()
-                            ),
+                            Some(Value::Object(o)) => {
+                                format!("{:?}", o.keys().take(8).collect::<Vec<_>>())
+                            }
                             Some(other) => value_type_name(other).to_string(),
                             None => "empty".to_string(),
                         };
-                        lines.push(format!("  - {k}: Array[{}] (item schema: {schema})", arr.len()));
+                        lines.push(format!(
+                            "  - {k}: Array[{}] (item schema: {schema})",
+                            arr.len()
+                        ));
                     }
                     Value::Object(sub) => {
                         let sk: Vec<&str> = sub.keys().take(8).map(|s| s.as_str()).collect();
-                        lines.push(format!("  - {k}: Object({} keys: {})", sub.len(), sk.join(", ")));
+                        lines.push(format!(
+                            "  - {k}: Object({} keys: {})",
+                            sub.len(),
+                            sk.join(", ")
+                        ));
                     }
                     _ => {
                         let s = serde_json::to_string(v).unwrap_or_default();
@@ -281,7 +304,11 @@ fn summarize_json(val: &Value) -> String {
             }
             for alert_k in ["error", "errors", "message", "status", "detail", "warnings"] {
                 if let Some(av) = map.get(alert_k) {
-                    if !av.is_null() && av != &Value::Bool(false) && av != &json!("") && av != &json!([]) {
+                    if !av.is_null()
+                        && av != &Value::Bool(false)
+                        && av != &json!("")
+                        && av != &json!([])
+                    {
                         let s = serde_json::to_string(av).unwrap_or_default();
                         lines.push(format!("  ! {alert_k}: {}", trunc_chars(&s, 240)));
                     }
@@ -294,7 +321,10 @@ fn summarize_json(val: &Value) -> String {
                 Some(other) => value_type_name(other).to_string(),
                 None => "empty".to_string(),
             };
-            lines.push(format!("JSON Array ({} items, item schema: {schema})", arr.len()));
+            lines.push(format!(
+                "JSON Array ({} items, item schema: {schema})",
+                arr.len()
+            ));
             if let Some(first) = arr.first() {
                 let s = serde_json::to_string(first).unwrap_or_default();
                 lines.push(format!("  - [0] preview: {}", trunc_chars(&s, 260)));
@@ -381,16 +411,31 @@ fn try_summarize_jsonl(raw: &str) -> Option<String> {
                 }
             }
         }
-        let is_err = obj.get("error").map(|v| !v.is_null() && v != &Value::Bool(false) && v != &json!("")).unwrap_or(false)
-            || obj.get("errors").map(|v| !v.is_null() && v != &json!([])).unwrap_or(false)
+        let is_err = obj
+            .get("error")
+            .map(|v| !v.is_null() && v != &Value::Bool(false) && v != &json!(""))
+            .unwrap_or(false)
+            || obj
+                .get("errors")
+                .map(|v| !v.is_null() && v != &json!([]))
+                .unwrap_or(false)
             || obj.get("isError") == Some(&Value::Bool(true))
             || obj.get("ok") == Some(&Value::Bool(false))
             || obj
                 .get("level")
                 .and_then(Value::as_str)
-                .map(|l| matches!(l.to_ascii_lowercase().as_str(), "error" | "fatal" | "critical"))
+                .map(|l| {
+                    matches!(
+                        l.to_ascii_lowercase().as_str(),
+                        "error" | "fatal" | "critical"
+                    )
+                })
                 .unwrap_or(false)
-            || obj.get("status").and_then(Value::as_i64).map(|s| s >= 400).unwrap_or(false);
+            || obj
+                .get("status")
+                .and_then(Value::as_i64)
+                .map(|s| s >= 400)
+                .unwrap_or(false);
         if is_err && err_records.len() < 5 {
             err_records.push(format!("  - L{lineno}: {}", trunc_chars(ln, 220)));
         }
@@ -428,7 +473,10 @@ fn try_summarize_jsonl(raw: &str) -> Option<String> {
         out.extend(err_records);
     }
     if !first_preview.is_empty() {
-        out.push(format!("First record (L{}): {first_preview}", non_empty[0].0));
+        out.push(format!(
+            "First record (L{}): {first_preview}",
+            non_empty[0].0
+        ));
     }
     if !last_preview.is_empty() && non_empty.len() > 1 {
         out.push(format!(
@@ -446,7 +494,13 @@ fn try_summarize_tabular(raw: &str) -> Option<(String, String)> {
     }
     let sample_txt = non_empty[..non_empty.len().min(15)].join("\n");
     for (delim, kind_name) in [(b'\t', "tsv"), (b',', "csv")] {
-        if non_empty[0].as_bytes().iter().filter(|&&b| b == delim).count() < 2 {
+        if non_empty[0]
+            .as_bytes()
+            .iter()
+            .filter(|&&b| b == delim)
+            .count()
+            < 2
+        {
             continue;
         }
         let mut rdr = csv::ReaderBuilder::new()
@@ -534,7 +588,10 @@ fn summarize_html(raw: &str) -> String {
                 let tag_inner = raw[i + 1..i + gt_rel].trim();
                 let is_end = tag_inner.starts_with('/');
                 let is_self_close = tag_inner.ends_with('/');
-                let clean = tag_inner.trim_start_matches('/').trim_end_matches('/').trim();
+                let clean = tag_inner
+                    .trim_start_matches('/')
+                    .trim_end_matches('/')
+                    .trim();
                 let tag_name: String = clean
                     .split(|c: char| c.is_whitespace() || c == '/')
                     .next()
@@ -542,7 +599,9 @@ fn summarize_html(raw: &str) -> String {
                     .to_ascii_lowercase();
 
                 if !is_end {
-                    if matches!(tag_name.as_str(), "script" | "style" | "svg" | "noscript") && !is_self_close {
+                    if matches!(tag_name.as_str(), "script" | "style" | "svg" | "noscript")
+                        && !is_self_close
+                    {
                         skip_depth += 1;
                     } else if skip_depth == 0 {
                         match tag_name.as_str() {
@@ -566,20 +625,25 @@ fn summarize_html(raw: &str) -> String {
                             "title" => in_title = false,
                             "h1" | "h2" | "h3" => {
                                 if let Some(ht) = heading_tag.take() {
-                                    let h = cur_heading.split_whitespace().collect::<Vec<_>>().join(" ");
+                                    let h = cur_heading
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
                                     if !h.is_empty() {
                                         headings.push(format!("{ht}: {}", trunc_chars(&h, 100)));
                                     }
                                 }
                             }
                             "th" | "td" => {
-                                if let (Some(cell), Some(row)) = (cur_cell.take(), cur_row.as_mut()) {
+                                if let (Some(cell), Some(row)) = (cur_cell.take(), cur_row.as_mut())
+                                {
                                     let c = cell.split_whitespace().collect::<Vec<_>>().join(" ");
                                     row.push(trunc_chars(&c, 80));
                                 }
                             }
                             "tr" => {
-                                if let (Some(row), Some(tbl)) = (cur_row.take(), cur_table.as_mut()) {
+                                if let (Some(row), Some(tbl)) = (cur_row.take(), cur_table.as_mut())
+                                {
                                     if row.iter().any(|c| !c.is_empty()) {
                                         tbl.push(row);
                                     }
@@ -647,7 +711,11 @@ fn summarize_html(raw: &str) -> String {
         ));
     }
     let body_lead = trunc_chars(&body, 450);
-    let ellipsis = if body.chars().count() > 450 { "..." } else { "" };
+    let ellipsis = if body.chars().count() > 450 {
+        "..."
+    } else {
+        ""
+    };
     out.push(format!("Lead text: {body_lead}{ellipsis}"));
     out.join("\n")
 }
@@ -718,7 +786,10 @@ fn summarize_log(raw: &str) -> String {
                 error_windows.len()
             )
         } else {
-            format!("High-Signal Failure/Error Blocks ({} total):", error_windows.len())
+            format!(
+                "High-Signal Failure/Error Blocks ({} total):",
+                error_windows.len()
+            )
         };
         sections.push(format!("{hdr}\n{}", kept_blocks.join("\n")));
     }
@@ -792,7 +863,10 @@ pub fn compress_stream_in(
         }
     } else {
         let head_low = trunc_chars(stripped, 400).to_ascii_lowercase();
-        if head_low.starts_with("<!doctype html") || head_low.contains("<html") || head_low.contains("<table") {
+        if head_low.starts_with("<!doctype html")
+            || head_low.contains("<html")
+            || head_low.contains("<table")
+        {
             ("html".to_string(), summarize_html(raw_text))
         } else if let Some((tk, ts)) = try_summarize_tabular(raw_text) {
             (tk, ts)
@@ -808,7 +882,8 @@ pub fn compress_stream_in(
     let rendered = format!("{body_summary}\n{footer}");
     let dig_bytes = rendered.len();
     let dig_tok = est_tokens(&rendered);
-    let saved_pct = ((1.0 - (dig_bytes as f64) / (raw_bytes.max(1) as f64)) * 1000.0).round() / 10.0;
+    let saved_pct =
+        ((1.0 - (dig_bytes as f64) / (raw_bytes.max(1) as f64)) * 1000.0).round() / 10.0;
 
     SieveResult {
         id: item_id,
@@ -934,11 +1009,20 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 2;
             }
             let t0 = Instant::now();
-            let out = match Command::new(&clean_cmd[0]).args(&clean_cmd[1..]).current_dir(&cwd).output() {
+            let out = match Command::new(&clean_cmd[0])
+                .args(&clean_cmd[1..])
+                .current_dir(&cwd)
+                .output()
+            {
                 Ok(o) => o,
                 #[cfg(windows)]
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    match Command::new("cmd").arg("/C").args(&clean_cmd).current_dir(&cwd).output() {
+                    match Command::new("cmd")
+                        .arg("/C")
+                        .args(&clean_cmd)
+                        .current_dir(&cwd)
+                        .output()
+                    {
                         Ok(o) => o,
                         Err(e2) => {
                             eprintln!("[sieve] failed to execute `{}`: {e2}", clean_cmd.join(" "));
@@ -961,7 +1045,12 @@ pub fn run_cli(args: &[String]) -> i32 {
                 combined.push_str(&stderr_s);
             }
             let code = out.status.code().unwrap_or(1);
-            let label = clean_cmd.iter().take(3).cloned().collect::<Vec<_>>().join(" ");
+            let label = clean_cmd
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
             let res = compress_stream_in(&store, &combined, &label, code, elapsed_ms);
             if as_json {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
@@ -1007,7 +1096,10 @@ pub fn run_cli(args: &[String]) -> i32 {
                 }
             }
             let Some(raw_path) = match_file else {
-                eprintln!("[sieve] error: unknown archive id '{id}' in {}", store.display());
+                eprintln!(
+                    "[sieve] error: unknown archive id '{id}' in {}",
+                    store.display()
+                );
                 return 1;
             };
             let raw = String::from_utf8_lossy(&fs::read(&raw_path).unwrap_or_default()).to_string();
@@ -1024,7 +1116,9 @@ pub fn run_cli(args: &[String]) -> i32 {
                             .and_then(|s| s.parse::<usize>().ok())
                             .unwrap_or(1)
                             .saturating_sub(1);
-                        raw_lines.get(idx).and_then(|ln| serde_json::from_str::<Value>(ln).ok())
+                        raw_lines
+                            .get(idx)
+                            .and_then(|ln| serde_json::from_str::<Value>(ln).ok())
                     } else {
                         let arr: Vec<Value> = raw_lines
                             .iter()
@@ -1097,7 +1191,10 @@ pub fn run_cli(args: &[String]) -> i32 {
                     }
                 }
                 if hits == 0 {
-                    println!("[sieve] 0 matches for /{pat_str}/ in {} lines.", all_lines.len());
+                    println!(
+                        "[sieve] 0 matches for /{pat_str}/ in {} lines.",
+                        all_lines.len()
+                    );
                 }
                 return 0;
             }

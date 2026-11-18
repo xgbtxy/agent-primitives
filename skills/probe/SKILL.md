@@ -1,29 +1,30 @@
 ---
 name: probe
-description: Prune dead distractor modules and bundle active reachable code across Py/TS/JS/Go/Rust/C (`slice --bundle`), trace Py/TS/JS aliasing/mutation/state-noop/`-0` bugs (`run`), and run differential oracles (`diff`).
+description: Prune dead files & bundle active code (`slice --bundle`), run Windows-safe headless browser/HTTP server smoke journeys (`smoke`), trace heap/mutation bugs (`run`), and run diff oracles (`diff`).
 ---
 
-# Probe — Tree-sitter Reachability Bundler & Causal Runtime Microscope
+# Probe — Reachability Bundler, Live Server/DOM Smoke Runner & Runtime Microscope
 
-Never burn 15+ tool calls reading dead/unreferenced modules or 20,000+ reasoning tokens mentally simulating heap aliasing, partial exception mutations, void-method no-ops, `-0`/`NaN`, or integer/type edge cases.
+Never read unreferenced slop modules, never burn 20+ interactive browser/curl turns verifying a local web server on Windows, and never guess heap aliasing or rounding behavior in prose.
 
-## Fast 3-Step Debugging Workflow
+## Usage
 
 ```bash
-# 1. Prune dead distractor files AND emit manifest + numbered source of active reachable modules in 1 call (Py, TS/JS, Go, Rust, C)
+# 1. Prune dead distractor files AND emit numbered source of active reachable modules in 1 call
 ap probe slice . --bundle
 
-# 2a. Trace a Python, TypeScript/JS, or Rust reproducer (detects aliasing, unrolled exception mutations, state no-ops & -0/NaN):
-ap probe run --cwd . --code "import { Ledger } from './src/ledger.js'; const l = new Ledger(); l.snapshot();"
-ap probe run --cwd . --focus <pkg> --code "<single-line python repro>"
-
-# 2b. Multi-line reproducer (PowerShell `@' ... '@ |` — NEVER use `<<` in PowerShell; POSIX bash `<<'EOF'`):
+# 2. Windows-safe ephemeral server + headless Edge/Chrome DOM + UTF-8 HTTP E2E smoke test (1 turn, 0 orphan processes):
 @'
-from pkg import Engine
-Engine().run(...)
-'@ | ap probe run --cwd . --stdin
+BROWSER /
+EXPECT CONTAINS 待处理
+GET /api/tickets?q=支付
+EXPECT STATUS 200
+POST /api/tickets/archive
+BODY {"confirm":true}
+EXPECT JSON stats.done == 0
+'@ | ap probe smoke --cwd . --stdin
 
-# 3. Differential & boundary/cache oracle across Python, TypeScript/JS, OR Rust
-ap probe diff --cwd . --setup "import { f, ref } from './src/m.js';" --fn-a "f(x)" --fn-b "ref(x)"
+# 3. Runtime microscope & differential oracle across Python, TypeScript/JS, or Rust
+ap probe run --cwd . --code "import { Ledger } from './src/ledger.js'; new Ledger().snapshot();"
 ap probe diff --lang rust --fn-a "|x: i64| (x * 250 + 5000) / 10000" --fn-b "|x: i64| ((x as f64 / 100.0) * 2.5).round() as i64"
 ```

@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
+pub mod product;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -107,7 +108,10 @@ pub struct AtlasData {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "atlas", about = "Sub-50ms Tree-sitter structural map for codebases & knowledge vaults")]
+#[command(
+    name = "atlas",
+    about = "Sub-50ms Tree-sitter structural map for codebases & knowledge vaults"
+)]
 struct Cli {
     #[command(subcommand)]
     subcmd: Option<SubCmd>,
@@ -136,6 +140,15 @@ enum SubCmd {
         max_files: usize,
         #[arg(long, default_value_t = 90)]
         stale_days: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Extract UI pages, controls, API routes, frontend<->backend broken links & slop radar
+    Product {
+        #[arg(default_value = ".")]
+        root: String,
+        #[arg(long, default_value = "")]
+        write: String,
         #[arg(long)]
         json: bool,
     },
@@ -176,7 +189,9 @@ fn extract_py_ast(text: &str) -> (Vec<String>, Vec<String>) {
         };
         match target.kind() {
             "class_definition" => {
-                let Some(name_n) = target.child_by_field_name("name") else { continue };
+                let Some(name_n) = target.child_by_field_name("name") else {
+                    continue;
+                };
                 let cname = node_text(name_n, src);
                 let mut methods = Vec::new();
                 if let Some(body) = target.child_by_field_name("body") {
@@ -288,7 +303,9 @@ fn extract_ts_js_ast(text: &str, ext: &str) -> (Vec<String>, Vec<String>) {
         }
         match decl.kind() {
             "class_declaration" | "abstract_class_declaration" => {
-                let Some(nn) = decl.child_by_field_name("name") else { continue };
+                let Some(nn) = decl.child_by_field_name("name") else {
+                    continue;
+                };
                 let cname = node_text(nn, src);
                 let mut methods = Vec::new();
                 if let Some(body) = decl.child_by_field_name("body") {
@@ -297,7 +314,10 @@ fn extract_ts_js_ast(text: &str, ext: &str) -> (Vec<String>, Vec<String>) {
                         if sub.kind() == "method_definition" {
                             if let Some(mn) = sub.child_by_field_name("name") {
                                 let mname = node_text(mn, src);
-                                if mname != "constructor" && !mname.starts_with('_') && methods.len() < 4 {
+                                if mname != "constructor"
+                                    && !mname.starts_with('_')
+                                    && methods.len() < 4
+                                {
                                     methods.push(mname.to_string());
                                 }
                             }
@@ -335,8 +355,15 @@ fn extract_ts_js_ast(text: &str, ext: &str) -> (Vec<String>, Vec<String>) {
                 let mut dcur = decl.walk();
                 for vd in decl.children(&mut dcur) {
                     if vd.kind() == "variable_declarator" {
-                        if let (Some(nn), Some(vn)) = (vd.child_by_field_name("name"), vd.child_by_field_name("value")) {
-                            if matches!(vn.kind(), "arrow_function" | "function_expression" | "function") && symbols.len() < 8 {
+                        if let (Some(nn), Some(vn)) = (
+                            vd.child_by_field_name("name"),
+                            vd.child_by_field_name("value"),
+                        ) {
+                            if matches!(
+                                vn.kind(),
+                                "arrow_function" | "function_expression" | "function"
+                            ) && symbols.len() < 8
+                            {
                                 symbols.push(format!("fn {}()", node_text(nn, src)));
                             }
                         }
@@ -513,7 +540,10 @@ fn extract_rs_ast(text: &str) -> (Vec<String>, Vec<String>) {
                                     if let Some(mn) = sub.child_by_field_name("name") {
                                         let mname = node_text(mn, src);
                                         if !mname.starts_with('_') {
-                                            impl_methods.entry(base.clone()).or_default().push(mname.to_string());
+                                            impl_methods
+                                                .entry(base.clone())
+                                                .or_default()
+                                                .push(mname.to_string());
                                         }
                                     }
                                 }
@@ -660,7 +690,12 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
     let dirty_paths = detect_git_dirty_paths(&root_canon);
     let go_mod_name = fs::read_to_string(root_canon.join("go.mod"))
         .ok()
-        .and_then(|s| go_mod_re.captures(&s).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()))
+        .and_then(|s| {
+            go_mod_re
+                .captures(&s)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string())
+        })
         .unwrap_or_default();
 
     let mut code_records: Vec<CodeRecord> = Vec::new();
@@ -698,7 +733,9 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
         if fname.starts_with('.') && fname != ".env.example" {
             continue;
         }
-        let Ok(rel) = fpath.strip_prefix(&root_canon) else { continue };
+        let Ok(rel) = fpath.strip_prefix(&root_canon) else {
+            continue;
+        };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let top_bucket = rel
             .components()
@@ -744,11 +781,25 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
 
         let is_code = matches!(
             ext.as_str(),
-            "py" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "go" | "rs" | "c" | "cc" | "cpp" | "h" | "hpp"
+            "py" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "go"
+                | "rs"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "h"
+                | "hpp"
         ) && !fname.ends_with(".d.ts");
 
         if is_code {
-            let Ok(bytes) = fs::read(&fpath) else { continue };
+            let Ok(bytes) = fs::read(&fpath) else {
+                continue;
+            };
             let txt = String::from_utf8_lossy(&bytes);
             let (syms, imps) = match ext.as_str() {
                 "py" => extract_py_ast(&txt),
@@ -791,7 +842,9 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
                 score: 0.0,
             });
         } else if matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt") {
-            let Ok(bytes) = fs::read(&fpath) else { continue };
+            let Ok(bytes) = fs::read(&fpath) else {
+                continue;
+            };
             let txt = String::from_utf8_lossy(&bytes);
             let headings: Vec<String> = md_re
                 .captures_iter(&txt)
@@ -813,12 +866,20 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
     let known_rel: HashSet<String> = code_records.iter().map(|r| r.path.clone()).collect();
     let mut inbound_by_path: HashMap<String, usize> = HashMap::new();
     let mut inbound_by_stem: HashMap<String, usize> = HashMap::new();
+    let mut directed_edges: Vec<(String, String)> = Vec::new();
 
     for (src_f, ext, imps) in raw_imports_by_file {
+        let src_rel = src_f
+            .strip_prefix(&root_canon)
+            .unwrap_or(&src_f)
+            .to_string_lossy()
+            .replace('\\', "/");
         let src_dir = src_f.parent().unwrap_or(&root_canon);
         for imp in imps {
             let mut matched_rel = String::new();
-            if matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") && imp.starts_with('.') {
+            if matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+                && imp.starts_with('.')
+            {
                 let base = src_dir.join(&imp);
                 let mut cands = vec![base.clone()];
                 if let Some(bext) = base.extension().and_then(|e| e.to_str()) {
@@ -887,7 +948,10 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
             }
 
             if !matched_rel.is_empty() {
-                *inbound_by_path.entry(matched_rel).or_insert(0) += 1;
+                *inbound_by_path.entry(matched_rel.clone()).or_insert(0) += 1;
+                if src_rel != matched_rel {
+                    directed_edges.push((src_rel.clone(), matched_rel));
+                }
             } else {
                 let stem = if imp.contains('/') {
                     Path::new(&imp)
@@ -904,14 +968,69 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
         }
     }
 
+    // Personalized PageRank (8 power iterations, damping=0.85) biased toward dirty & focus files
+    let n_nodes = code_records.len();
+    let mut ppr_scores = vec![1.0_f64; n_nodes];
+    if n_nodes > 1 {
+        let idx_of: HashMap<&str, usize> = code_records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.path.as_str(), i))
+            .collect();
+        let focus_low = focus.to_ascii_lowercase();
+        let mut pers = vec![1.0_f64; n_nodes];
+        for (i, r) in code_records.iter().enumerate() {
+            if r.dirty {
+                pers[i] += 3.0;
+            }
+            if !focus_low.is_empty() && r.path.to_ascii_lowercase().contains(&focus_low) {
+                pers[i] += 5.0;
+            }
+        }
+        let pers_sum: f64 = pers.iter().sum::<f64>().max(1e-9);
+        for w in &mut pers {
+            *w /= pers_sum;
+        }
+        let mut out_adj: Vec<Vec<usize>> = vec![Vec::new(); n_nodes];
+        for (u_s, v_s) in &directed_edges {
+            if let (Some(&u), Some(&v)) = (idx_of.get(u_s.as_str()), idx_of.get(v_s.as_str())) {
+                if !out_adj[u].contains(&v) {
+                    out_adj[u].push(v);
+                }
+            }
+        }
+        ppr_scores = pers.clone();
+        let damping = 0.85_f64;
+        for _ in 0..8 {
+            let mut next = vec![0.0_f64; n_nodes];
+            let mut sink_mass = 0.0_f64;
+            for u in 0..n_nodes {
+                if out_adj[u].is_empty() {
+                    sink_mass += ppr_scores[u];
+                } else {
+                    let share = ppr_scores[u] / (out_adj[u].len() as f64);
+                    for &v in &out_adj[u] {
+                        next[v] += damping * share;
+                    }
+                }
+            }
+            for i in 0..n_nodes {
+                next[i] += (1.0 - damping + damping * sink_mass) * pers[i];
+            }
+            ppr_scores = next;
+        }
+    }
+
     let ep_set: HashSet<String> = entrypoints.iter().cloned().collect();
-    for rec in &mut code_records {
+    let scale = (n_nodes.max(1)) as f64;
+    for (i, rec) in code_records.iter_mut().enumerate() {
         let hub = inbound_by_path.get(&rec.path).copied().unwrap_or(0)
             + inbound_by_stem.get(&rec.stem).copied().unwrap_or(0);
         rec.hub_refs = hub;
-        rec.score = (hub as f64) * 4.0
+        rec.score = (ppr_scores[i] * scale) * 6.0
+            + (hub as f64) * 2.5
             + if rec.dirty { 3.0 } else { 0.0 }
-            + (rec.symbols.len().min(6) as f64) * 1.5
+            + (rec.symbols.len().min(6) as f64) * 1.2
             + if ep_set.contains(&rec.path) { 1.0 } else { 0.0 };
     }
 
@@ -953,11 +1072,56 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
     }
 }
 
+fn probe_host_capabilities() -> String {
+    let mut caps = vec![format!(
+        "OS={}/{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )];
+    if let Ok(o) = Command::new("node").arg("--version").output() {
+        if o.status.success() {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            caps.push(format!("node={v} (built-in `node:sqlite`, `node:test`, `--experimental-strip-types` [avoid TS `enum`/param-props])"));
+        }
+    }
+    if let Ok(o) = Command::new("python").arg("--version").output() {
+        if o.status.success() {
+            caps.push(String::from_utf8_lossy(&o.stdout).trim().replace(' ', "="));
+        }
+    }
+    if let Ok(o) = Command::new("rustc").arg("--version").output() {
+        if o.status.success() {
+            let v = String::from_utf8_lossy(&o.stdout);
+            let short = v.split_whitespace().take(2).collect::<Vec<_>>().join("=");
+            caps.push(short);
+        }
+    }
+    let has_browser = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .any(|p| Path::new(p).is_file());
+    if has_browser {
+        caps.push(
+            "headless-CDP-browser=READY (`ap probe smoke` OPEN/FILL/SELECT/CLICK/EVAL)".to_string(),
+        );
+    }
+    caps.join(" | ")
+}
+
 pub fn render_atlas_md(data: &AtlasData) -> String {
     let mut lines = vec![format!(
         "# ATLAS MAP: `{}` ({} files scanned in {}ms | raw ~{} tok)",
         data.root, data.scanned_files, data.elapsed_ms, data.raw_tokens_if_read_all
     )];
+    if data.scanned_files <= 3 {
+        lines.push(format!("**Host Runtime**: {}", probe_host_capabilities()));
+    }
     if !data.top_dirs.is_empty() {
         let ds = data
             .top_dirs
@@ -997,7 +1161,10 @@ pub fn render_atlas_md(data: &AtlasData) -> String {
                 let take_n = c.symbols.len().min(5);
                 format!(": {}", c.symbols[..take_n].join(", "))
             };
-            lines.push(format!("- `{}` ({}L){dirty_tag}{hub}{syms}", c.path, c.lines));
+            lines.push(format!(
+                "- `{}` ({}L){dirty_tag}{hub}{syms}",
+                c.path, c.lines
+            ));
         }
     }
     if !data.top_docs.is_empty() {
@@ -1031,6 +1198,32 @@ pub fn run_cli(args: &[String]) -> i32 {
         }
     };
     let (root, focus, max_files, stale_days, as_json) = match cli.subcmd {
+        Some(SubCmd::Product { root, write, json }) => {
+            let root_p = PathBuf::from(&root);
+            if !root_p.exists() {
+                eprintln!("[atlas] path not found: {root}");
+                return 1;
+            }
+            let pm = product::build_product_map(&root_p, SKIP_DIRS);
+            let md = product::render_product_map(&pm);
+            if !write.trim().is_empty() {
+                let out_p = if Path::new(&write).is_absolute() {
+                    PathBuf::from(&write)
+                } else {
+                    root_p.join(&write)
+                };
+                if let Err(e) = fs::write(&out_p, &md) {
+                    eprintln!("[atlas] failed to write {}: {e}", out_p.display());
+                    return 1;
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&pm).unwrap_or_default());
+            } else {
+                print!("{md}");
+            }
+            return 0;
+        }
         Some(SubCmd::Map {
             root,
             focus,
@@ -1047,7 +1240,10 @@ pub fn run_cli(args: &[String]) -> i32 {
     }
     let data = scan_workspace(&root_p, &focus, max_files, stale_days);
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        );
     } else {
         print!("{}", render_atlas_md(&data));
     }

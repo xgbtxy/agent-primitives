@@ -27,7 +27,10 @@ pub struct VaultStats {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "recall", about = "Sub-millisecond triggered micro-memory vault (bundled SQLite FTS5)")]
+#[command(
+    name = "recall",
+    about = "Sub-millisecond triggered micro-memory vault (bundled SQLite FTS5)"
+)]
 struct Cli {
     #[command(subcommand)]
     subcmd: SubCmd,
@@ -162,7 +165,12 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn add_rule(conn: &Connection, triggers: &str, rule: &str, kind: &str) -> rusqlite::Result<String> {
+pub fn add_rule(
+    conn: &Connection,
+    triggers: &str,
+    rule: &str,
+    kind: &str,
+) -> rusqlite::Result<String> {
     let norm_rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
     let norm_trig = triggers
         .split(',')
@@ -174,7 +182,10 @@ pub fn add_rule(conn: &Connection, triggers: &str, rule: &str, kind: &str) -> ru
     hasher.update(format!("{norm_trig}::{norm_rule}").as_bytes());
     let rule_id = format!("{:x}", hasher.finalize())[..10].to_string();
     let now = now_epoch();
-    let tokens = tokenize_cjk_hybrid(&format!("{} {norm_rule} {kind}", norm_trig.replace(',', " ")));
+    let tokens = tokenize_cjk_hybrid(&format!(
+        "{} {norm_rule} {kind}",
+        norm_trig.replace(',', " ")
+    ));
 
     conn.execute(
         "INSERT INTO rules (id, kind, triggers, rule, search_tokens, hits, created_at, last_hit_at)
@@ -267,7 +278,12 @@ pub fn match_rules(
     let q_lower = query.to_lowercase();
     let norm_files: Vec<String> = files
         .iter()
-        .map(|f| f.trim().replace('\\', "/").trim_start_matches("./").to_string())
+        .map(|f| {
+            f.trim()
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .to_string()
+        })
         .filter(|f| !f.is_empty())
         .collect();
     let norm_files_lower: Vec<String> = norm_files.iter().map(|f| f.to_lowercase()).collect();
@@ -288,13 +304,19 @@ pub fn match_rules(
         for item in iter {
             let (rid, row) = item?;
             let mut sc = 0.0;
-            for trig in row.triggers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for trig in row
+                .triggers
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 let tl = trig.to_lowercase().replace('\\', "/");
                 if tl.contains('*') || tl.contains('?') || tl.contains('/') {
                     let prefix = tl.trim_end_matches(['/', '*']);
                     for nfl in &norm_files_lower {
                         if wildcard_match(&tl, nfl)
-                            || (!prefix.is_empty() && (nfl == prefix || nfl.starts_with(&format!("{prefix}/"))))
+                            || (!prefix.is_empty()
+                                && (nfl == prefix || nfl.starts_with(&format!("{prefix}/"))))
                         {
                             sc += 8.0;
                         }
@@ -324,7 +346,9 @@ pub fn match_rules(
             .chars()
             .filter(|&c| c.is_alphanumeric() || c == '_' || is_cjk(c))
             .collect();
-        if (cleaned.chars().count() >= 2 || cleaned.chars().any(is_cjk)) && !q_tokens.contains(&cleaned) {
+        if (cleaned.chars().count() >= 2 || cleaned.chars().any(is_cjk))
+            && !q_tokens.contains(&cleaned)
+        {
             q_tokens.push(cleaned);
             if q_tokens.len() >= 24 {
                 break;
@@ -468,7 +492,10 @@ pub fn run_cli(args: &[String]) -> i32 {
                         println!("[recall] 0 triggered rules ({elapsed_ms:.2}ms)");
                         return 0;
                     }
-                    println!("# Recall Active Rules ({} matched in {elapsed_ms:.2}ms)", hits.len());
+                    println!(
+                        "# Recall Active Rules ({} matched in {elapsed_ms:.2}ms)",
+                        hits.len()
+                    );
                     for h in hits {
                         println!("- **[{}]** (`{}`): {}", h.kind, h.triggers, h.rule);
                     }

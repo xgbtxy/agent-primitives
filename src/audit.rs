@@ -10,7 +10,10 @@ use std::sync::OnceLock;
 use std::time::{Instant, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
-#[command(name = "audit", about = "Local zero-cloud telemetry auditor across Codex, Pi, Antigravity, Claude & Grok")]
+#[command(
+    name = "audit",
+    about = "Local zero-cloud telemetry auditor across Codex, Pi, Antigravity, Claude & Grok"
+)]
 struct AuditCli {
     #[arg(long, default_value = "")]
     home: String,
@@ -111,7 +114,10 @@ fn classify_err(txt: &str, st: &mut Counters) {
     {
         st.encoding_utf8_crash += 1;
     }
-    if txt.contains("ModuleNotFoundError") || txt.contains("ImportError") || txt.contains("No module named pytest") {
+    if txt.contains("ModuleNotFoundError")
+        || txt.contains("ImportError")
+        || txt.contains("No module named pytest")
+    {
         st.import_syspath_error += 1;
     }
     if [
@@ -127,7 +133,12 @@ fn classify_err(txt: &str, st: &mut Counters) {
 }
 
 fn norm_cmd_key(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect()
 }
 
 fn scan_codex(f: &Path) -> Counters {
@@ -146,7 +157,9 @@ fn scan_codex(f: &Path) -> Counters {
             classify_err(&line, &mut st);
             continue;
         }
-        let Ok(o) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(o) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let pt = o["payload"]["type"].as_str().unwrap_or("");
         if pt == "function_call" || pt == "custom_tool_call" {
             st.tool_calls += 1;
@@ -181,7 +194,9 @@ fn scan_agy(f: &Path) -> Counters {
     let Ok(file) = File::open(f) else { return st };
     let mut seen_reads: HashMap<String, usize> = HashMap::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let Ok(o) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(o) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         if let Some(c) = o["content"].as_str() {
             if c.len() >= 8192 {
                 st.outputs_over_8kb += 1;
@@ -191,8 +206,12 @@ fn scan_agy(f: &Path) -> Counters {
         if let Some(tcs) = o["tool_calls"].as_array() {
             for tc in tcs {
                 st.tool_calls += 1;
-                let nm = tc["name"].as_str().or_else(|| tc["tool_name"].as_str()).unwrap_or("");
-                let args = if let Some(s) = tc["args"].as_str().or_else(|| tc["arguments"].as_str()) {
+                let nm = tc["name"]
+                    .as_str()
+                    .or_else(|| tc["tool_name"].as_str())
+                    .unwrap_or("");
+                let args = if let Some(s) = tc["args"].as_str().or_else(|| tc["arguments"].as_str())
+                {
                     serde_json::from_str::<Value>(s).unwrap_or(Value::Null)
                 } else if tc["args"].is_object() {
                     tc["args"].clone()
@@ -227,7 +246,9 @@ fn scan_claude(f: &Path) -> Counters {
         if !line.contains("tool_") {
             continue;
         }
-        let Ok(o) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(o) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         if let Some(arr) = o["message"]["content"].as_array() {
             for blk in arr {
                 match blk["type"].as_str().unwrap_or("") {
@@ -236,7 +257,9 @@ fn scan_claude(f: &Path) -> Counters {
                         let nm = blk["name"].as_str().unwrap_or("");
                         if nm == "Read" {
                             st.file_reads += 1;
-                            if let Some(fp) = blk["input"]["file_path"].as_str().filter(|s| !s.is_empty()) {
+                            if let Some(fp) =
+                                blk["input"]["file_path"].as_str().filter(|s| !s.is_empty())
+                            {
                                 let cnt = seen_reads.entry(fp.to_string()).or_insert(0);
                                 *cnt += 1;
                                 if *cnt >= 2 {
@@ -281,7 +304,9 @@ fn scan_grok(f: &Path) -> Counters {
             }
             continue;
         }
-        let Ok(o) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(o) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let upd = &o["params"]["update"];
         match upd["sessionUpdate"].as_str().unwrap_or("") {
             "tool_call" => {
@@ -339,7 +364,9 @@ fn scan_pi(f: &Path) -> Counters {
             classify_err(&line, &mut st);
             continue;
         }
-        let Ok(o) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(o) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         if o["type"].as_str() != Some("message") {
             continue;
         }
@@ -357,7 +384,10 @@ fn scan_pi(f: &Path) -> Counters {
                         let args = &blk["arguments"];
                         if nm == "read" {
                             st.file_reads += 1;
-                            let fp = args["path"].as_str().or_else(|| args["file_path"].as_str()).unwrap_or("");
+                            let fp = args["path"]
+                                .as_str()
+                                .or_else(|| args["file_path"].as_str())
+                                .unwrap_or("");
                             if !fp.is_empty() {
                                 let cnt = seen_reads.entry(fp.to_string()).or_insert(0);
                                 *cnt += 1;
@@ -395,7 +425,11 @@ fn scan_pi(f: &Path) -> Counters {
     st
 }
 
-fn collect_matching_files(root: &Path, suffix_or_name: &str, prefix_opt: Option<&str>) -> Vec<PathBuf> {
+fn collect_matching_files(
+    root: &Path,
+    suffix_or_name: &str,
+    prefix_opt: Option<&str>,
+) -> Vec<PathBuf> {
     let mut found: Vec<(u64, PathBuf)> = Vec::new();
     fn walk(d: &Path, suf: &str, pref: Option<&str>, out: &mut Vec<(u64, PathBuf)>) {
         let Ok(rd) = fs::read_dir(d) else { return };
@@ -406,7 +440,14 @@ fn collect_matching_files(root: &Path, suffix_or_name: &str, prefix_opt: Option<
                 let dname = os_nm.to_string_lossy();
                 if matches!(
                     dname.as_ref(),
-                    "scratch" | "node_modules" | ".git" | "target" | "tasks" | "steps" | ".user_uploaded" | "browser"
+                    "scratch"
+                        | "node_modules"
+                        | ".git"
+                        | "target"
+                        | "tasks"
+                        | "steps"
+                        | ".user_uploaded"
+                        | "browser"
                 ) {
                     continue;
                 }
@@ -508,13 +549,49 @@ pub fn default_home_dir() -> PathBuf {
 
 pub fn audit_home(home: &Path, max_per_harness: usize, compare: bool) -> Value {
     let t0 = Instant::now();
-    type AuditSpec<'a> = (&'a str, PathBuf, &'a str, Option<&'a str>, fn(&Path) -> Counters);
+    type AuditSpec<'a> = (
+        &'a str,
+        PathBuf,
+        &'a str,
+        Option<&'a str>,
+        fn(&Path) -> Counters,
+    );
     let specs: [AuditSpec; 5] = [
-        ("codex_cli", home.join(".codex").join("sessions"), ".jsonl", Some("rollout-"), scan_codex),
-        ("pi_cli", home.join(".pi").join("agent").join("sessions"), ".jsonl", None, scan_pi),
-        ("antigravity_cli", home.join(".gemini").join("antigravity-cli").join("brain"), "transcript.jsonl", None, scan_agy),
-        ("claude_code", home.join(".claude").join("projects"), ".jsonl", None, scan_claude),
-        ("grok_cli", home.join(".grok").join("sessions"), "updates.jsonl", None, scan_grok),
+        (
+            "codex_cli",
+            home.join(".codex").join("sessions"),
+            ".jsonl",
+            Some("rollout-"),
+            scan_codex,
+        ),
+        (
+            "pi_cli",
+            home.join(".pi").join("agent").join("sessions"),
+            ".jsonl",
+            None,
+            scan_pi,
+        ),
+        (
+            "antigravity_cli",
+            home.join(".gemini").join("antigravity-cli").join("brain"),
+            "transcript.jsonl",
+            None,
+            scan_agy,
+        ),
+        (
+            "claude_code",
+            home.join(".claude").join("projects"),
+            ".jsonl",
+            None,
+            scan_claude,
+        ),
+        (
+            "grok_cli",
+            home.join(".grok").join("sessions"),
+            "updates.jsonl",
+            None,
+            scan_grok,
+        ),
     ];
 
     let mut harnesses = serde_json::Map::new();
@@ -546,14 +623,20 @@ pub fn audit_home(home: &Path, max_per_harness: usize, compare: bool) -> Value {
     }
 
     let mut recs = Vec::new();
-    if totals.adhoc_inline_python + totals.import_syspath_error + totals.shell_quoting_collision > 0 {
+    if totals.adhoc_inline_python + totals.import_syspath_error + totals.shell_quoting_collision > 0
+    {
         recs.push(json!({
             "primitive": "probe",
             "evidence": format!("{} inline `python -c`/`node -e` probes, {} ImportError/sys.path failures, {} shell-quoting crashes", totals.adhoc_inline_python, totals.import_syspath_error, totals.shell_quoting_collision),
             "why": "Replaces brittle inline probes & prose mental execution with Tree-sitter reachability slicing (`ap probe slice --bundle`), heap/mutation tracing (`run`), and differential testing (`diff`)."
         }));
     }
-    if totals.redundant_same_file_rereads + totals.shell_line_slice_read + totals.patch_target_mismatch + totals.encoding_utf8_crash > 0 {
+    if totals.redundant_same_file_rereads
+        + totals.shell_line_slice_read
+        + totals.patch_target_mismatch
+        + totals.encoding_utf8_crash
+        > 0
+    {
         recs.push(json!({
             "primitive": "splice",
             "evidence": format!("{} redundant file re-reads, {} shell line-slice reads, {} patch mismatches, {} UTF-8/encoding crashes", totals.redundant_same_file_rereads, totals.shell_line_slice_read, totals.patch_target_mismatch, totals.encoding_utf8_crash),
@@ -611,7 +694,10 @@ pub fn run_cli(args: &[String]) -> i32 {
     };
     let report = audit_home(&home, cli.max_sessions, cli.compare);
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
         return 0;
     }
 
@@ -656,7 +742,10 @@ pub fn run_cli(args: &[String]) -> i32 {
         c["shell_broad_search"], c["identical_retry_loops"]
     );
 
-    if let Some(cmp_map) = report["period_comparison"].as_object().filter(|m| !m.is_empty()) {
+    if let Some(cmp_map) = report["period_comparison"]
+        .as_object()
+        .filter(|m| !m.is_empty())
+    {
         println!("\n## Period Trend (Older Half -> Recent Half of Scanned Sessions)");
         for (h, cmp) in cmp_map {
             let d = &cmp["delta"];
@@ -672,7 +761,10 @@ pub fn run_cli(args: &[String]) -> i32 {
         }
     }
 
-    if let Some(recs) = report["recommended_primitives"].as_array().filter(|a| !a.is_empty()) {
+    if let Some(recs) = report["recommended_primitives"]
+        .as_array()
+        .filter(|a| !a.is_empty())
+    {
         println!("\n## Recommended Primitives (`ap init` or `ap init --only <list>`)");
         for r in recs {
             println!(

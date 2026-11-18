@@ -153,7 +153,10 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
             let mut cur = root.walk();
             for child in root.children(&mut cur) {
                 let (outer, inner) = if child.kind() == "decorated_definition" {
-                    (child, child.child_by_field_name("definition").unwrap_or(child))
+                    (
+                        child,
+                        child.child_by_field_name("definition").unwrap_or(child),
+                    )
                 } else {
                     (child, child)
                 };
@@ -173,7 +176,9 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                         }
                     }
                     "class_definition" => {
-                        let Some(nn) = inner.child_by_field_name("name") else { continue };
+                        let Some(nn) = inner.child_by_field_name("name") else {
+                            continue;
+                        };
                         let cname = node_text(nn, src).to_string();
                         let s0 = outer.start_position().row;
                         items.push(SymbolSpan {
@@ -216,7 +221,10 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
             let mut cur = root.walk();
             for child in root.children(&mut cur) {
                 let (outer, decl) = if child.kind() == "export_statement" {
-                    (child, child.child_by_field_name("declaration").unwrap_or(child))
+                    (
+                        child,
+                        child.child_by_field_name("declaration").unwrap_or(child),
+                    )
                 } else {
                     (child, child)
                 };
@@ -224,7 +232,9 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                 let indent = line_indent(&lines, s0);
                 match decl.kind() {
                     "class_declaration" | "abstract_class_declaration" => {
-                        let Some(nn) = decl.child_by_field_name("name") else { continue };
+                        let Some(nn) = decl.child_by_field_name("name") else {
+                            continue;
+                        };
                         let cname = node_text(nn, src).to_string();
                         items.push(SymbolSpan {
                             qual: cname.clone(),
@@ -240,7 +250,8 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                                 if sub.kind() == "method_definition" {
                                     if let Some(mn) = sub.child_by_field_name("name") {
                                         let mname = node_text(mn, src).to_string();
-                                        let ms0 = expand_leading_attrs(&lines, sub.start_position().row);
+                                        let ms0 =
+                                            expand_leading_attrs(&lines, sub.start_position().row);
                                         items.push(SymbolSpan {
                                             qual: format!("{cname}.{mname}"),
                                             short: mname,
@@ -276,10 +287,14 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                         let mut dcur = decl.walk();
                         for vd in decl.children(&mut dcur) {
                             if vd.kind() == "variable_declarator" {
-                                if let (Some(nn), Some(vn)) =
-                                    (vd.child_by_field_name("name"), vd.child_by_field_name("value"))
-                                {
-                                    if matches!(vn.kind(), "arrow_function" | "function_expression" | "function") {
+                                if let (Some(nn), Some(vn)) = (
+                                    vd.child_by_field_name("name"),
+                                    vd.child_by_field_name("value"),
+                                ) {
+                                    if matches!(
+                                        vn.kind(),
+                                        "arrow_function" | "function_expression" | "function"
+                                    ) {
                                         let nm = node_text(nn, src).to_string();
                                         items.push(SymbolSpan {
                                             qual: nm.clone(),
@@ -318,7 +333,9 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                         }
                     }
                     "method_declaration" => {
-                        let Some(nn) = child.child_by_field_name("name") else { continue };
+                        let Some(nn) = child.child_by_field_name("name") else {
+                            continue;
+                        };
                         let mname = node_text(nn, src).to_string();
                         let recv = child
                             .child_by_field_name("receiver")
@@ -389,7 +406,9 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                         }
                     }
                     "impl_item" => {
-                        let Some(tn) = child.child_by_field_name("type") else { continue };
+                        let Some(tn) = child.child_by_field_name("type") else {
+                            continue;
+                        };
                         let raw_t = node_text(tn, src);
                         let owner = raw_t
                             .split('<')
@@ -406,7 +425,8 @@ pub fn scan_symbols(source: &str, ext: &str) -> Vec<SymbolSpan> {
                                 if sub.kind() == "function_item" {
                                     if let Some(mn) = sub.child_by_field_name("name") {
                                         let mname = node_text(mn, src).to_string();
-                                        let ms0 = expand_leading_attrs(&lines, sub.start_position().row);
+                                        let ms0 =
+                                            expand_leading_attrs(&lines, sub.start_position().row);
                                         items.push(SymbolSpan {
                                             qual: format!("{owner}.{mname}"),
                                             short: mname,

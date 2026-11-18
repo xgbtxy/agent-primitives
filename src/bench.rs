@@ -34,7 +34,8 @@ fn bench_sieve(tmp: &Path) -> Vec<Value> {
             ci_lines.extend([
                 "FAIL tests/exporter/test_otlp_retry.py::test_429_jitter".to_string(),
                 "Traceback (most recent call last):".to_string(),
-                "  File \"tests/exporter/test_otlp_retry.py\", line 142, in test_429_jitter".to_string(),
+                "  File \"tests/exporter/test_otlp_retry.py\", line 142, in test_429_jitter"
+                    .to_string(),
                 "    assert backoff_ms <= 5000".to_string(),
                 "AssertionError: assert 8192 <= 5000".to_string(),
             ]);
@@ -105,7 +106,10 @@ fn bench_sieve(tmp: &Path) -> Vec<Value> {
         if k == 177 {
             jl_lines.push(json!({"seq": k, "event": "rpc", "status": 502, "error": "upstream_gateway_timeout"}).to_string());
         } else {
-            jl_lines.push(json!({"seq": k, "event": "heartbeat", "status": 200, "region": "ap-east"}).to_string());
+            jl_lines.push(
+                json!({"seq": k, "event": "heartbeat", "status": 200, "region": "ap-east"})
+                    .to_string(),
+            );
         }
     }
     let raw_jl = format!("{}\n", jl_lines.join("\n"));
@@ -126,8 +130,14 @@ fn bench_sieve(tmp: &Path) -> Vec<Value> {
     }));
 
     // Case 4: Noisy HTML page w/ JS+CSS bloat & table
-    let script_noise = format!("<script>{}</script>", "const chunk = '0123456789abcdef'.repeat(40);\n".repeat(90));
-    let style_noise = format!("<style>{}</style>", ".cls-item { display:flex; margin:4px; color:#333; }\n".repeat(400));
+    let script_noise = format!(
+        "<script>{}</script>",
+        "const chunk = '0123456789abcdef'.repeat(40);\n".repeat(90)
+    );
+    let style_noise = format!(
+        "<style>{}</style>",
+        ".cls-item { display:flex; margin:4px; color:#333; }\n".repeat(400)
+    );
     let raw_html = format!(
         "<!doctype html><html><head><title>Vendor Release Notes v4.8</title>{style_noise}{script_noise}</head>\
          <body><h1>Breaking Changes in v4.8</h1><p>Webhook HMAC header renamed to X-Sig-256 on 2026-11-01.</p>\
@@ -182,7 +192,9 @@ fn bench_recall(tmp: &Path) -> Value {
         let _ = ap_recall::add_rule(
             &conn,
             &format!("client_{i},合同_{i},ops_{i}"),
-            &format!("客户 {i} 周报需附带里程碑验收哈希并抄送项目归档邮箱 archive_{i}@example.org。"),
+            &format!(
+                "客户 {i} 周报需附带里程碑验收哈希并抄送项目归档邮箱 archive_{i}@example.org。"
+            ),
             "workflow",
         );
     }
@@ -202,10 +214,18 @@ fn bench_recall(tmp: &Path) -> Value {
         )
         .unwrap();
         latencies.push(ms);
-        if hits.first().map(|h| h.rule.contains(&format!("Service {target} "))).unwrap_or(false) {
+        if hits
+            .first()
+            .map(|h| h.rule.contains(&format!("Service {target} ")))
+            .unwrap_or(false)
+        {
             top1_correct += 1;
         }
-        let rendered = hits.iter().map(|h| h.rule.as_str()).collect::<Vec<_>>().join("\n");
+        let rendered = hits
+            .iter()
+            .map(|h| h.rule.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         injected_toks.push(rendered.len().div_ceil(4));
     }
     for idx in 0..10 {
@@ -218,15 +238,25 @@ fn bench_recall(tmp: &Path) -> Value {
         )
         .unwrap();
         latencies.push(ms);
-        if hits.first().map(|h| h.rule.contains(&format!("客户 {target} "))).unwrap_or(false) {
+        if hits
+            .first()
+            .map(|h| h.rule.contains(&format!("客户 {target} ")))
+            .unwrap_or(false)
+        {
             top1_correct += 1;
         }
-        let rendered = hits.iter().map(|h| h.rule.as_str()).collect::<Vec<_>>().join("\n");
+        let rendered = hits
+            .iter()
+            .map(|h| h.rule.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         injected_toks.push(rendered.len().div_ceil(4));
     }
 
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let avg_tok = (injected_toks.iter().sum::<usize>() as f64 / injected_toks.len() as f64 * 10.0).round() / 10.0;
+    let avg_tok = (injected_toks.iter().sum::<usize>() as f64 / injected_toks.len() as f64 * 10.0)
+        .round()
+        / 10.0;
     json!({
         "vault_rules": 200,
         "monolithic_agents_md_tokens": monolith_tokens,
@@ -240,7 +270,16 @@ fn bench_recall(tmp: &Path) -> Value {
 fn bench_atlas_probe_splice(tmp: &Path) -> (Value, Value, Value) {
     // 1. Atlas: 64-module Rust & Python SDK corpus
     let pkg_root = tmp.join("sdk_corpus");
-    let subpkgs = ["core", "exporter", "propagator", "metrics", "trace", "resources", "internal", "config"];
+    let subpkgs = [
+        "core",
+        "exporter",
+        "propagator",
+        "metrics",
+        "trace",
+        "resources",
+        "internal",
+        "config",
+    ];
     for sp in subpkgs {
         let d = pkg_root.join(sp);
         let _ = fs::create_dir_all(&d);
@@ -296,10 +335,15 @@ fn bench_atlas_probe_splice(tmp: &Path) -> (Value, Value, Value) {
             format!("{imp}export function step{k}(v: number): number {{\n  return v + {k};\n}}\n"),
         );
     }
-    let _ = fs::write(ts_repo.join("src").join("index.ts"), "export { step0 } from \"./mod_0.ts\";\n");
+    let _ = fs::write(
+        ts_repo.join("src").join("index.ts"),
+        "export { step0 } from \"./mod_0.ts\";\n",
+    );
     for d in 0..15usize {
         let _ = fs::write(
-            ts_repo.join("src").join(format!("dead_distractor_{d:02}.ts")),
+            ts_repo
+                .join("src")
+                .join(format!("dead_distractor_{d:02}.ts")),
             format!("export function deadFn{d}(x: number): number {{\n  return x * {d};\n}}\n"),
         );
     }
@@ -315,10 +359,17 @@ fn bench_atlas_probe_splice(tmp: &Path) -> (Value, Value, Value) {
     // 3. Splice: Tree-sitter symbol view + zero-escaping CRLF-preserving atomic apply + check
     let sp_repo = tmp.join("splice_corpus");
     let _ = fs::create_dir_all(sp_repo.join("src"));
-    let mut rs_lines = vec!["pub struct BillingService;".to_string(), "impl BillingService {".to_string()];
+    let mut rs_lines = vec![
+        "pub struct BillingService;".to_string(),
+        "impl BillingService {".to_string(),
+    ];
     for idx in 0..28usize {
-        rs_lines.push(format!("    pub fn helper_step_{idx:02}(&self, cents: i64) -> i64 {{"));
-        rs_lines.push(format!("        // UTF-8 accounting invariant #{idx:02}: 账单校验_{idx:02}"));
+        rs_lines.push(format!(
+            "    pub fn helper_step_{idx:02}(&self, cents: i64) -> i64 {{"
+        ));
+        rs_lines.push(format!(
+            "        // UTF-8 accounting invariant #{idx:02}: 账单校验_{idx:02}"
+        ));
         rs_lines.push(format!("        cents + {idx}"));
         rs_lines.push("    }".to_string());
     }

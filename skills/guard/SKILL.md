@@ -1,25 +1,24 @@
 ---
 name: guard
-description: Enforce sub-2ms `exit 2` completion gates, break repetitive failure loops (3x identical error/command), and block secret leaks or high-blast-radius destructive actions across Coding and Personal Agents.
+description: Enforce sub-2ms `exit 2` anti-slop code rules (`rule`/`verify`), completion Stop-gates (`stop-gate`), 3x loop breakers (`run`), and secret/blast-radius shields (`shield`).
 ---
 
-# Guard — Sub-2ms Exit-2 Truth Gate, Loop Breaker & Blast-Radius Shield
+# Guard — Sub-2ms Exit-2 Anti-Slop Rules, Verification Gate & Blast Shield
 
-In Claude Code, Codex, Grok Build, and modern agent harnesses, **`exit 1` is non-blocking** on Stop/PreToolUse hooks—only **`exit 2` + `stderr` feedback** deterministically stops premature completion, halts repetition loops, or blocks unsafe external actions.
+Prose rules in `AGENTS.md` get ignored; deterministic **`exit 2`** code gates cannot be bypassed. `guard` enforces anti-slop code hygiene (`0` `any`/`@ts-ignore`/empty `catch {}`), project tests, `.agents/smoke.ap` live smoke gates, 3x loop breaking, and secret shields.
 
 ## Usage
 
 ```bash
-# 1. Pre-execution shield: blocks leaked secrets & destructive blast-radius commands (exit 2)
+# 1. Run full anti-slop rules + auto-detected tests + .agents/smoke.ap (exit 2 on any violation)
+ap guard verify
+
+# 2. Turn any past agent mistake into a permanent deterministic rule in .agents/guard.json
+ap guard rule init
+ap guard rule add --id no-legacy-import --glob "src/*.ts" --forbid "old_csv_dump" --msg "Use RFC4180 src/csv.ts"
+
+# 3. Pre-execution shield, 3x loop breaker & Stop-hook gate
 ap guard shield --text "git push --force origin main"
-
-# 2. Loop breaker: tracks command + failure fingerprints; trips exit 2 on 3rd repeat
-ap guard run --max-repeats 3 -- cargo test
-
-# 3. Stop-hook truth gate: blocks false "Done!" claims until checks + conflict markers pass (exit 2)
-ap guard stop-gate --check "cargo test --quiet"
+ap guard run --max-repeats 3 -- npm test
+ap guard stop-gate
 ```
-
-## Hook Wiring (`ap init --with-hooks`)
-
-`ap guard` runs natively in `<2ms` and auto-detects both **Claude Code / Codex** snake_case hooks (`exit 2` + `stderr`) and **Google Antigravity** camelCase protojson hooks (`{"decision": "deny"|"allow"}` and `{"decision": "continue"|"stop"}` with `continuationActive` loop protection).

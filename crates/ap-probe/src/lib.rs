@@ -1,15 +1,22 @@
+pub mod cdp;
 pub mod runtime;
 pub mod slice;
+pub mod smoke;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use runtime::{detect_lang, run_diff_dispatch, run_trace_dispatch};
 use slice::run_slice;
+use smoke::run_smoke;
+use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "probe", about = "Tree-sitter reachability slicer, runtime microscope & differential oracle")]
+#[command(
+    name = "probe",
+    about = "Tree-sitter reachability slicer, runtime microscope & differential oracle"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: SubCmd,
@@ -74,6 +81,29 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Interactive headless CDP browser (OPEN/FILL/SELECT/CLICK/EVAL) + HTTP E2E server runner.
+    /// Stdin DSL steps: OPEN / | FILL #id val | SELECT #id val | CLICK #id or text=Btn | EVAL <js>
+    /// | GET/POST/PUT/PATCH/DELETE /api/... | BODY {...} | EXPECT STATUS 200 | EXPECT CONTAINS txt | EXPECT JSON a.b == 1
+    Smoke {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value = "/")]
+        ready_path: String,
+        #[arg(long, default_value_t = 12000)]
+        timeout_ms: u64,
+        #[arg(long = "env")]
+        envs: Vec<String>,
+        #[arg(long)]
+        spec: Option<PathBuf>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -122,7 +152,9 @@ pub fn run_cli(args: &[String]) -> i32 {
                 code
             };
             if snippet.is_none() && script.is_none() && unittest.is_none() {
-                eprintln!("[probe run] pass one of --code, --stdin, --b64, --script, or --unittest");
+                eprintln!(
+                    "[probe run] pass one of --code, --stdin, --b64, --script, or --unittest"
+                );
                 return 2;
             }
             let plang = detect_lang(&cwd, &lang, &focus, snippet.as_deref(), script.as_deref());
@@ -151,6 +183,55 @@ pub fn run_cli(args: &[String]) -> i32 {
             let combined = format!("{setup}\n{fn_a}");
             let plang = detect_lang(&cwd, &lang, "", Some(&combined), None);
             run_diff_dispatch(&cwd, plang, &setup, &fn_a, &fn_b, &vars, &inputs, json)
+        }
+        SubCmd::Smoke {
+            cwd,
+            start,
+            url,
+            ready_path,
+            timeout_ms,
+            envs,
+            spec,
+            stdin,
+            json,
+        } => {
+            let spec_text = if stdin {
+                let mut s = String::new();
+                let _ = std::io::stdin().read_to_string(&mut s);
+                s
+            } else if let Some(sp) = spec {
+                match fs::read_to_string(&sp) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[probe smoke] failed to read {}: {e}", sp.display());
+                        return 2;
+                    }
+                }
+            } else {
+                let default_p = cwd.join(".agents").join("smoke.ap");
+                if default_p.is_file() {
+                    fs::read_to_string(default_p).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            };
+            let parsed_envs: Vec<(String, String)> = envs
+                .into_iter()
+                .filter_map(|kv| {
+                    kv.split_once('=')
+                        .map(|(k, v)| (k.trim().to_string(), v.to_string()))
+                })
+                .collect();
+            run_smoke(
+                &cwd,
+                start.as_deref(),
+                url.as_deref(),
+                &ready_path,
+                timeout_ms,
+                &parsed_envs,
+                &spec_text,
+                json,
+            )
         }
     }
 }

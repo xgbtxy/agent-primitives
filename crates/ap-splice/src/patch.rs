@@ -22,7 +22,9 @@ pub struct EditOp {
 fn patch_regexes() -> &'static (Regex, Regex, Regex, Regex) {
     static RE: OnceLock<(Regex, Regex, Regex, Regex)> = OnceLock::new();
     RE.get_or_init(|| {
-        let hdr = Regex::new(r"(?i)^@@\s*(FILE_ALL|FILE|EDIT|REPLACE|SYMBOL|WRITE)\s*:\s*(.+?)\s*$").unwrap();
+        let hdr =
+            Regex::new(r"(?i)^@@\s*(FILE_ALL|FILE|EDIT|REPLACE|SYMBOL|WRITE)\s*:\s*(.+?)\s*$")
+                .unwrap();
         let open = Regex::new(r"(?i)^<<<(?:\s*(?:OLD|SEARCH|EOF))?\s*$").unwrap();
         let mid = Regex::new(r"(?i)^===(?:\s*(?:NEW|REPLACE))?\s*$").unwrap();
         let close = Regex::new(r"(?i)^>>>(?:\s*(?:END|REPLACE|EOF))?\s*$").unwrap();
@@ -81,7 +83,9 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                         i += 1;
                     }
                     if i >= n {
-                        return Err(format!("Unclosed `<<<` block in `{rest}`: missing `===` separator."));
+                        return Err(format!(
+                            "Unclosed `<<<` block in `{rest}`: missing `===` separator."
+                        ));
                     }
                     i += 1;
                     let mut new_buf = Vec::new();
@@ -90,7 +94,9 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                         i += 1;
                     }
                     if i >= n {
-                        return Err(format!("Unclosed `===` block in `{rest}`: missing `>>>` terminator."));
+                        return Err(format!(
+                            "Unclosed `===` block in `{rest}`: missing `>>>` terminator."
+                        ));
                     }
                     i += 1;
                     ops.push(EditOp {
@@ -105,12 +111,16 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                     hunks += 1;
                 }
                 if hunks == 0 {
-                    return Err(format!("`@@ {kind}: {rest}` had no `<<< ... === ... >>>` edit blocks."));
+                    return Err(format!(
+                        "`@@ {kind}: {rest}` had no `<<< ... === ... >>>` edit blocks."
+                    ));
                 }
             }
             "SYMBOL" => {
                 let Some((p_raw, s_raw)) = rest.split_once("::") else {
-                    return Err(format!("`@@ SYMBOL: {rest}` must use `@@ SYMBOL: <path> :: <SymbolName>`."));
+                    return Err(format!(
+                        "`@@ SYMBOL: {rest}` must use `@@ SYMBOL: <path> :: <SymbolName>`."
+                    ));
                 };
                 let path = p_raw.trim().to_string();
                 let sym = s_raw.trim().to_string();
@@ -125,7 +135,9 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                         i += 1;
                     }
                     if i >= n {
-                        return Err(format!("Unclosed `@@ SYMBOL: {path} :: {sym}` block: missing `>>>`."));
+                        return Err(format!(
+                            "Unclosed `@@ SYMBOL: {path} :: {sym}` block: missing `>>>`."
+                        ));
                     }
                     i += 1;
                 } else {
@@ -259,6 +271,83 @@ pub fn replace_crlf_tolerant(
             "`old` matched {} locations via rstrip alignment; add context lines.",
             hits.len()
         ));
+    }
+
+    // Tier 3 (Aider-style uniform indentation-delta fallback when unambiguous)
+    let min_space = |ls: &[&str]| -> usize {
+        ls.iter()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.bytes().take_while(|b| *b == b' ').count())
+            .min()
+            .unwrap_or(0)
+    };
+    fn strip_n(l: &str, n: usize) -> &str {
+        let take = l.bytes().take_while(|b| *b == b' ').count().min(n);
+        &l[take..]
+    }
+
+    let has_substance = n_old >= 2
+        || old_stripped
+            .first()
+            .map(|l| l.trim().len() >= 12)
+            .unwrap_or(false);
+    if has_substance && !replace_all {
+        let old_ind = min_space(&old_stripped);
+        let old_dedent: Vec<&str> = old_stripped.iter().map(|l| strip_n(l, old_ind)).collect();
+        let mut indent_hits: Vec<(usize, usize)> = Vec::new();
+        for i in 0..=(src_stripped.len() - n_old) {
+            let win = &src_stripped[i..i + n_old];
+            let win_ind = min_space(win);
+            if win
+                .iter()
+                .zip(&old_dedent)
+                .all(|(w, o)| strip_n(w, win_ind) == *o)
+            {
+                indent_hits.push((i, win_ind));
+            }
+        }
+        if indent_hits.len() == 1 {
+            let (idx, win_ind) = indent_hits[0];
+            let delta = (win_ind as isize) - (old_ind as isize);
+            let shifted_new: Vec<String> = new_lf
+                .split('\n')
+                .map(|l| {
+                    if l.trim().is_empty() {
+                        String::new()
+                    } else {
+                        let cur = l.bytes().take_while(|b| *b == b' ').count();
+                        let next_ind = ((cur as isize) + delta).max(0) as usize;
+                        format!("{}{}", " ".repeat(next_ind), &l[cur..])
+                    }
+                })
+                .collect();
+            let mut updated: Vec<String> = Vec::with_capacity(src_lines.len() + shifted_new.len());
+            updated.extend(src_lines[..idx].iter().map(|s| (*s).to_string()));
+            updated.extend(shifted_new);
+            updated.extend(src_lines[idx + n_old..].iter().map(|s| (*s).to_string()));
+            return Ok((updated.join("\n"), 1));
+        }
+        if indent_hits.len() > 1 {
+            return Err(format!(
+                "`old` matched {} locations after indentation normalization; add surrounding lines.",
+                indent_hits.len()
+            ));
+        }
+    }
+
+    // SWE-agent ACI diagnostic hint: surface closest matching first line so the LLM fixes without re-reading
+    if let Some(first_anchor) = old_stripped.iter().map(|l| l.trim()).find(|l| l.len() >= 6) {
+        if let Some((ln_idx, actual)) = src_lines
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.contains(first_anchor))
+        {
+            return Err(format!(
+                "`old` target block not found (closest anchor at L{}: `{}`).",
+                ln_idx + 1,
+                actual.trim()
+            ));
+        }
     }
     Err("`old` target block not found in file.".to_string())
 }

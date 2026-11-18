@@ -13,7 +13,12 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn run_ap(cwd: &Path, args: &[&str], stdin_data: Option<&str>, extra_env: &[(&str, &Path)]) -> Output {
+fn run_ap(
+    cwd: &Path,
+    args: &[&str],
+    stdin_data: Option<&str>,
+    extra_env: &[(&str, &Path)],
+) -> Output {
     let mut cmd = Command::new(ap_bin());
     cmd.args(args)
         .current_dir(cwd)
@@ -28,20 +33,26 @@ fn run_ap(cwd: &Path, args: &[&str], stdin_data: Option<&str>, extra_env: &[(&st
     let mut child = cmd.spawn().expect("failed to spawn ap binary");
     if let Some(input) = stdin_data {
         if let Some(mut sin) = child.stdin.take() {
-            sin.write_all(input.as_bytes()).expect("failed to write stdin");
+            sin.write_all(input.as_bytes())
+                .expect("failed to write stdin");
         }
     }
-    child.wait_with_output().expect("failed to wait on ap binary")
+    child
+        .wait_with_output()
+        .expect("failed to wait on ap binary")
 }
 
 #[test]
 fn test_crate_physical_isolation_and_frontmatter_budget() {
     let root = repo_root();
     let crates_dir = root.join("crates");
-    let prims = ["sieve", "baton", "recall", "guard", "atlas", "probe", "splice"];
+    let prims = [
+        "sieve", "baton", "recall", "guard", "atlas", "probe", "splice",
+    ];
 
     for name in prims {
-        let cargo_toml = fs::read_to_string(crates_dir.join(format!("ap-{name}")).join("Cargo.toml")).unwrap();
+        let cargo_toml =
+            fs::read_to_string(crates_dir.join(format!("ap-{name}")).join("Cargo.toml")).unwrap();
         for other in prims {
             if other != name {
                 assert!(
@@ -52,7 +63,10 @@ fn test_crate_physical_isolation_and_frontmatter_budget() {
         }
         let skill_md = fs::read_to_string(root.join("skills").join(name).join("SKILL.md")).unwrap();
         let parts: Vec<&str> = skill_md.split("---").collect();
-        assert!(parts.len() >= 3, "SKILL.md for {name} missing YAML frontmatter");
+        assert!(
+            parts.len() >= 3,
+            "SKILL.md for {name} missing YAML frontmatter"
+        );
         let fm_tokens = parts[1].trim().len().div_ceil(4);
         assert!(
             fm_tokens < 85,
@@ -81,9 +95,13 @@ fn test_sieve_log_json_jsonl_html_csv_fts5_and_negative_control() {
     let mut jl = String::new();
     for i in 0..80 {
         if i == 42 {
-            jl.push_str("{\"seq\":42,\"type\":\"rpc\",\"status\":503,\"error\":\"shard_quorum_lost\"}\n");
+            jl.push_str(
+                "{\"seq\":42,\"type\":\"rpc\",\"status\":503,\"error\":\"shard_quorum_lost\"}\n",
+            );
         } else {
-            jl.push_str(&format!("{{\"seq\":{i},\"type\":\"ping\",\"status\":200,\"host\":\"node-east\"}}\n"));
+            jl.push_str(&format!(
+                "{{\"seq\":{i},\"type\":\"ping\",\"status\":200,\"host\":\"node-east\"}}\n"
+            ));
         }
     }
     let out_jl = run_ap(
@@ -95,7 +113,10 @@ fn test_sieve_log_json_jsonl_html_csv_fts5_and_negative_control() {
     assert!(out_jl.status.success());
     let j_jl: Value = serde_json::from_slice(&out_jl.stdout).unwrap();
     assert_eq!(j_jl["mode"], "jsonl");
-    assert!(j_jl["rendered"].as_str().unwrap().contains("shard_quorum_lost"));
+    assert!(j_jl["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("shard_quorum_lost"));
     let jl_id = j_jl["id"].as_str().unwrap().to_string();
 
     let out_peek = run_ap(
@@ -130,7 +151,10 @@ fn test_sieve_log_json_jsonl_html_csv_fts5_and_negative_control() {
     );
     let j_csv: Value = serde_json::from_slice(&out_csv.stdout).unwrap();
     assert_eq!(j_csv["mode"], "csv");
-    assert!(j_csv["rendered"].as_str().unwrap().contains("| id | service |"));
+    assert!(j_csv["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("| id | service |"));
 }
 
 #[test]
@@ -141,24 +165,56 @@ fn test_baton_and_recall_hybrid_cjk_fts5() {
 
     assert!(run_ap(
         tmp.path(),
-        &["baton", "set", "--goal", "Migrate core to Rust", "--constraint", "Zero Python runtime", "--next", "Run cargo test"],
+        &[
+            "baton",
+            "set",
+            "--goal",
+            "Migrate core to Rust",
+            "--constraint",
+            "Zero Python runtime",
+            "--next",
+            "Run cargo test"
+        ],
         None,
         &[("BATON_HOME", &baton_home)]
-    ).status.success());
+    )
+    .status
+    .success());
     assert!(run_ap(
         tmp.path(),
-        &["baton", "fact", "Tree-sitter 0.27 supports all 6 grammars", "--ref", "Cargo.toml:25"],
+        &[
+            "baton",
+            "fact",
+            "Tree-sitter 0.27 supports all 6 grammars",
+            "--ref",
+            "Cargo.toml:25"
+        ],
         None,
         &[("BATON_HOME", &baton_home)]
-    ).status.success());
+    )
+    .status
+    .success());
     assert!(run_ap(
         tmp.path(),
-        &["baton", "deadend", "Regex brace matching failed on raw strings", "--reason", "Unbalanced { inside r#\"{\""],
+        &[
+            "baton",
+            "deadend",
+            "Regex brace matching failed on raw strings",
+            "--reason",
+            "Unbalanced { inside r#\"{\""
+        ],
         None,
         &[("BATON_HOME", &baton_home)]
-    ).status.success());
+    )
+    .status
+    .success());
 
-    let res_out = run_ap(tmp.path(), &["baton", "resume"], None, &[("BATON_HOME", &baton_home)]);
+    let res_out = run_ap(
+        tmp.path(),
+        &["baton", "resume"],
+        None,
+        &[("BATON_HOME", &baton_home)],
+    );
     let resume_md = String::from_utf8_lossy(&res_out.stdout);
     assert!(resume_md.contains("Migrate core to Rust"));
     assert!(resume_md.contains("DO NOT RETRY"));
@@ -167,34 +223,76 @@ fn test_baton_and_recall_hybrid_cjk_fts5() {
     // Recall: English glob + Chinese CJK bigram recall
     assert!(run_ap(
         tmp.path(),
-        &["recall", "add", "--triggers", "crates/ap-splice/*,crlf", "--rule", "Preserve original CRLF line endings on atomic apply.", "--kind", "gotcha"],
+        &[
+            "recall",
+            "add",
+            "--triggers",
+            "crates/ap-splice/*,crlf",
+            "--rule",
+            "Preserve original CRLF line endings on atomic apply.",
+            "--kind",
+            "gotcha"
+        ],
         None,
         &[("RECALL_HOME", &recall_home)]
-    ).status.success());
+    )
+    .status
+    .success());
     assert!(run_ap(
         tmp.path(),
-        &["recall", "add", "--triggers", "报销,发票,财务", "--rule", "差旅发票抬头统一填写独立研究工作室并归档 PDF。", "--kind", "workflow"],
+        &[
+            "recall",
+            "add",
+            "--triggers",
+            "报销,发票,财务",
+            "--rule",
+            "差旅发票抬头统一填写独立研究工作室并归档 PDF。",
+            "--kind",
+            "workflow"
+        ],
         None,
         &[("RECALL_HOME", &recall_home)]
-    ).status.success());
+    )
+    .status
+    .success());
 
     let m_en = run_ap(
         tmp.path(),
-        &["recall", "match", "--query", "fix line endings", "--files", "crates/ap-splice/src/lib.rs", "--json"],
+        &[
+            "recall",
+            "match",
+            "--query",
+            "fix line endings",
+            "--files",
+            "crates/ap-splice/src/lib.rs",
+            "--json",
+        ],
         None,
         &[("RECALL_HOME", &recall_home)],
     );
     let j_en: Value = serde_json::from_slice(&m_en.stdout).unwrap();
-    assert!(j_en["matches"][0]["rule"].as_str().unwrap().contains("CRLF"));
+    assert!(j_en["matches"][0]["rule"]
+        .as_str()
+        .unwrap()
+        .contains("CRLF"));
 
     let m_zh = run_ap(
         tmp.path(),
-        &["recall", "match", "--query", "整理本月差旅报销发票", "--json"],
+        &[
+            "recall",
+            "match",
+            "--query",
+            "整理本月差旅报销发票",
+            "--json",
+        ],
         None,
         &[("RECALL_HOME", &recall_home)],
     );
     let j_zh: Value = serde_json::from_slice(&m_zh.stdout).unwrap();
-    assert!(j_zh["matches"][0]["rule"].as_str().unwrap().contains("独立研究"));
+    assert!(j_zh["matches"][0]["rule"]
+        .as_str()
+        .unwrap()
+        .contains("独立研究"));
 }
 
 #[test]
@@ -224,7 +322,9 @@ fn test_guard_shield_loop_breaker_and_dual_hooks() {
     let agy_blk = run_ap(
         tmp.path(),
         &["guard", "shield"],
-        Some(r#"{"hookEventName":"PreToolUse","toolCall":{"command":"echo sk-proj-1234567890abcdefghijklmnop"}}"#),
+        Some(
+            r#"{"hookEventName":"PreToolUse","toolCall":{"command":"echo sk-proj-1234567890abcdefghijklmnop"}}"#,
+        ),
         &[("GUARD_HOME", &guard_home)],
     );
     assert_eq!(agy_blk.status.code(), Some(0));
@@ -235,7 +335,9 @@ fn test_guard_shield_loop_breaker_and_dual_hooks() {
     let agy_stop = run_ap(
         tmp.path(),
         &["guard", "stop-gate"],
-        Some(r#"{"hookEventName":"Stop","continuationActive":true,"terminationReason":"NO_TOOL_CALL"}"#),
+        Some(
+            r#"{"hookEventName":"Stop","continuationActive":true,"terminationReason":"NO_TOOL_CALL"}"#,
+        ),
         &[("GUARD_HOME", &guard_home)],
     );
     let j_stop: Value = serde_json::from_slice(&agy_stop.stdout).unwrap();
@@ -247,20 +349,37 @@ fn test_atlas_and_probe_slice_polyglot_rust_ts_and_c() {
     let tmp = TempDir::new().unwrap();
     let rs_repo = tmp.path().join("rs_proj");
     fs::create_dir_all(rs_repo.join("src")).unwrap();
-    fs::write(rs_repo.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
-    fs::write(rs_repo.join("src/lib.rs"), "pub mod engine;\npub fn boot() -> i64 { engine::Engine::new().tick() }\n").unwrap();
+    fs::write(
+        rs_repo.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        rs_repo.join("src/lib.rs"),
+        "pub mod engine;\npub fn boot() -> i64 { engine::Engine::new().tick() }\n",
+    )
+    .unwrap();
     fs::write(
         rs_repo.join("src/engine.rs"),
         "pub struct Engine { n: i64 }\nimpl Engine {\n    pub fn new() -> Self { Self { n: 1 } }\n    pub fn tick(&self) -> i64 { let _raw = r#\"{\"#; self.n + 1 }\n}\n",
     ).unwrap();
-    fs::write(rs_repo.join("src/dead_legacy.rs"), "pub fn unused_fn() -> i64 { 42 }\n").unwrap();
+    fs::write(
+        rs_repo.join("src/dead_legacy.rs"),
+        "pub fn unused_fn() -> i64 { 42 }\n",
+    )
+    .unwrap();
 
     let atlas_out = run_ap(&rs_repo, &["atlas", "map", ".", "--json"], None, &[]);
     assert!(atlas_out.status.success());
     let j_atlas: Value = serde_json::from_slice(&atlas_out.stdout).unwrap();
     assert_eq!(j_atlas["scanned_files"], 4);
 
-    let slice_out = run_ap(&rs_repo, &["probe", "slice", ".", "--entry", "src/lib.rs", "--bundle"], None, &[]);
+    let slice_out = run_ap(
+        &rs_repo,
+        &["probe", "slice", ".", "--entry", "src/lib.rs", "--bundle"],
+        None,
+        &[],
+    );
     assert!(slice_out.status.success());
     let slice_txt = String::from_utf8_lossy(&slice_out.stdout);
     assert!(slice_txt.contains("2/3 reachable files (1 dead/unreferenced files pruned)"));
@@ -270,12 +389,33 @@ fn test_atlas_and_probe_slice_polyglot_rust_ts_and_c() {
     // C header + translation unit reachability slice
     let c_repo = tmp.path().join("c_proj");
     fs::create_dir_all(&c_repo).unwrap();
-    fs::write(c_repo.join("ring.h"), "typedef struct Ring { int cap; } Ring;\nint ring_push(Ring *r, int v);\n").unwrap();
-    fs::write(c_repo.join("ring.c"), "#include \"ring.h\"\nint ring_push(Ring *r, int v) { return r->cap + v; }\n").unwrap();
-    fs::write(c_repo.join("main.c"), "#include \"ring.h\"\nint main(void) { Ring r = {8}; return ring_push(&r, 1); }\n").unwrap();
-    fs::write(c_repo.join("dead_util.c"), "int dead_fn(void) { return 0; }\n").unwrap();
+    fs::write(
+        c_repo.join("ring.h"),
+        "typedef struct Ring { int cap; } Ring;\nint ring_push(Ring *r, int v);\n",
+    )
+    .unwrap();
+    fs::write(
+        c_repo.join("ring.c"),
+        "#include \"ring.h\"\nint ring_push(Ring *r, int v) { return r->cap + v; }\n",
+    )
+    .unwrap();
+    fs::write(
+        c_repo.join("main.c"),
+        "#include \"ring.h\"\nint main(void) { Ring r = {8}; return ring_push(&r, 1); }\n",
+    )
+    .unwrap();
+    fs::write(
+        c_repo.join("dead_util.c"),
+        "int dead_fn(void) { return 0; }\n",
+    )
+    .unwrap();
 
-    let c_slice = run_ap(&c_repo, &["probe", "slice", ".", "--entry", "main.c", "--json"], None, &[]);
+    let c_slice = run_ap(
+        &c_repo,
+        &["probe", "slice", ".", "--entry", "main.c", "--json"],
+        None,
+        &[],
+    );
     assert!(c_slice.status.success());
     let j_cs: Value = serde_json::from_slice(&c_slice.stdout).unwrap();
     assert_eq!(j_cs["reachable_count"], 3);
@@ -293,26 +433,47 @@ fn test_splice_treesitter_view_zero_escaping_apply_and_syntax_rollback() {
     let lib_p = repo.join("src/lib.rs");
     fs::write(&lib_p, orig_rs.as_bytes()).unwrap();
 
-    let view_out = run_ap(&repo, &["splice", "view", "src/lib.rs", "--symbol", "Engine.calc"], None, &[]);
+    let view_out = run_ap(
+        &repo,
+        &["splice", "view", "src/lib.rs", "--symbol", "Engine.calc"],
+        None,
+        &[],
+    );
     assert!(view_out.status.success());
     let view_s = String::from_utf8_lossy(&view_out.stdout);
     assert!(view_s.contains("L3-L6"));
 
     // 1. Broken Rust syntax in transaction MUST abort & roll back ALL files atomically!
     let bad_patch = "@@ SYMBOL: src/lib.rs :: Engine.calc\n<<<\npub fn calc(&self, x: i64) -> i64 {\n    x +\n}\n>>>\n@@ WRITE: src/extra.rs\n<<<\npub fn ok() {}\n>>>\n";
-    let bad_out = run_ap(&repo, &["splice", "apply", "--cwd", ".", "--stdin", "--json"], Some(bad_patch), &[]);
+    let bad_out = run_ap(
+        &repo,
+        &["splice", "apply", "--cwd", ".", "--stdin", "--json"],
+        Some(bad_patch),
+        &[],
+    );
     assert!(!bad_out.status.success());
     let j_bad: Value = serde_json::from_slice(&bad_out.stdout).unwrap();
     assert_eq!(j_bad["rolled_back"], true);
-    assert!(!repo.join("src/extra.rs").exists(), "newly staged file must be unlinked on rollback");
+    assert!(
+        !repo.join("src/extra.rs").exists(),
+        "newly staged file must be unlinked on rollback"
+    );
     assert_eq!(fs::read(&lib_p).unwrap(), orig_rs.as_bytes());
 
     // 2. Valid zero-escaping multi-op transaction preserves CRLF and passes Tree-sitter check
     let good_patch = "@@ SYMBOL: src/lib.rs :: Engine.calc\n<<<\npub fn calc(&self, x: i64) -> i64 {\n    x * 2\n}\n>>>\n@@ WRITE: src/helper.c\n<<<\nint add_one(int v) {\n    return v + 1;\n}\n>>>\n";
-    let good_out = run_ap(&repo, &["splice", "apply", "--cwd", ".", "--stdin", "--json"], Some(good_patch), &[]);
+    let good_out = run_ap(
+        &repo,
+        &["splice", "apply", "--cwd", ".", "--stdin", "--json"],
+        Some(good_patch),
+        &[],
+    );
     assert!(good_out.status.success());
     let updated_bytes = fs::read(&lib_p).unwrap();
-    assert!(updated_bytes.windows(2).any(|w| w == b"\r\n"), "CRLF must be preserved");
+    assert!(
+        updated_bytes.windows(2).any(|w| w == b"\r\n"),
+        "CRLF must be preserved"
+    );
     assert!(String::from_utf8_lossy(&updated_bytes).contains("x * 2"));
 
     let chk = run_ap(&repo, &["splice", "check", ".", "--json"], None, &[]);
@@ -366,7 +527,13 @@ fn test_ap_init_here_global_hooks_uninstall_doctor_and_audit() {
     // 2. Repo-local `ap init --here --with-hooks`
     let init_here = run_ap(
         &proj,
-        &["init", "--here", "--home", fake_home.to_str().unwrap(), "--with-hooks"],
+        &[
+            "init",
+            "--here",
+            "--home",
+            fake_home.to_str().unwrap(),
+            "--with-hooks",
+        ],
         None,
         &[],
     );
@@ -404,10 +571,20 @@ fn test_ap_init_here_global_hooks_uninstall_doctor_and_audit() {
     assert!(fake_home.join(".gemini/config/hooks.json").is_file());
     assert!(fake_home.join(".claude/settings.json").is_file());
 
-    let st = run_ap(tmp.path(), &["status", "--home", fake_home.to_str().unwrap()], None, &[]);
+    let st = run_ap(
+        tmp.path(),
+        &["status", "--home", fake_home.to_str().unwrap()],
+        None,
+        &[],
+    );
     assert!(st.status.success());
 
-    let un_glob = run_ap(tmp.path(), &["uninstall", "--home", fake_home.to_str().unwrap()], None, &[]);
+    let un_glob = run_ap(
+        tmp.path(),
+        &["uninstall", "--home", fake_home.to_str().unwrap()],
+        None,
+        &[],
+    );
     assert!(un_glob.status.success());
     assert!(!fake_home.join(".gemini/config/hooks.json").exists());
 
@@ -428,7 +605,13 @@ fn test_ap_init_here_global_hooks_uninstall_doctor_and_audit() {
 
     let aud = run_ap(
         tmp.path(),
-        &["audit", "--home", fake_home.to_str().unwrap(), "--compare", "--json"],
+        &[
+            "audit",
+            "--home",
+            fake_home.to_str().unwrap(),
+            "--compare",
+            "--json",
+        ],
         None,
         &[],
     );
@@ -436,7 +619,10 @@ fn test_ap_init_here_global_hooks_uninstall_doctor_and_audit() {
     let j_aud: Value = serde_json::from_slice(&aud.stdout).unwrap();
     assert_eq!(j_aud["harnesses_detected"]["pi_cli"]["sessions"], 2);
     assert_eq!(j_aud["aggregate_friction_counts"]["adhoc_inline_python"], 1);
-    assert_eq!(j_aud["aggregate_friction_counts"]["redundant_same_file_rereads"], 1);
+    assert_eq!(
+        j_aud["aggregate_friction_counts"]["redundant_same_file_rereads"],
+        1
+    );
 }
 
 #[test]
@@ -548,7 +734,9 @@ fn test_splice_apply_with_test_and_rollback_on_test_fail() {
     let j: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(j["rolled_back"], true);
     assert!(!repo.join("extra.json").exists());
-    assert!(fs::read_to_string(&src_p).unwrap().contains("\"version\": 1"));
+    assert!(fs::read_to_string(&src_p)
+        .unwrap()
+        .contains("\"version\": 1"));
 }
 
 #[test]
@@ -557,7 +745,9 @@ fn test_guard_loop_breaker_and_busybox_argv0() {
     let guard_home = tmp.path().join("guard_loop");
 
     // Busybox argv[0] dispatch: copy/hardlink `ap` as `baton`
-    let baton_bin = tmp.path().join(if cfg!(windows) { "baton.exe" } else { "baton" });
+    let baton_bin = tmp
+        .path()
+        .join(if cfg!(windows) { "baton.exe" } else { "baton" });
     if fs::hard_link(ap_bin(), &baton_bin).is_err() {
         fs::copy(ap_bin(), &baton_bin).unwrap();
     }
@@ -570,14 +760,298 @@ fn test_guard_loop_breaker_and_busybox_argv0() {
 
     // Guard repetition loop breaker trips exit 2 on 3rd identical failure
     let fail_args: &[&str] = if cfg!(windows) {
-        &["guard", "run", "--max-repeats", "3", "--", "cmd", "/C", "echo boom && exit /b 1"]
+        &[
+            "guard",
+            "run",
+            "--max-repeats",
+            "3",
+            "--",
+            "cmd",
+            "/C",
+            "echo boom && exit /b 1",
+        ]
     } else {
-        &["guard", "run", "--max-repeats", "3", "--", "sh", "-c", "echo boom && exit 1"]
+        &[
+            "guard",
+            "run",
+            "--max-repeats",
+            "3",
+            "--",
+            "sh",
+            "-c",
+            "echo boom && exit 1",
+        ]
     };
     let r1 = run_ap(tmp.path(), fail_args, None, &[("GUARD_HOME", &guard_home)]);
     let r2 = run_ap(tmp.path(), fail_args, None, &[("GUARD_HOME", &guard_home)]);
     let r3 = run_ap(tmp.path(), fail_args, None, &[("GUARD_HOME", &guard_home)]);
     assert_eq!(r1.status.code(), Some(1));
     assert_eq!(r2.status.code(), Some(1));
-    assert_eq!(r3.status.code(), Some(2), "3rd identical failure must trip exit-2 loop breaker");
+    assert_eq!(
+        r3.status.code(),
+        Some(2),
+        "3rd identical failure must trip exit-2 loop breaker"
+    );
+}
+
+#[test]
+fn test_atlas_product_probe_smoke_and_guard_rules() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("public")).unwrap();
+
+    fs::write(
+        root.join("public/index.html"),
+        r#"<!doctype html><html><head><title>Demo Board</title></head>
+<body><input id="q-input" placeholder="Search..." /><button id="btn-save">Save</button></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("public/app.js"),
+        r#"async function save() {
+  try { await fetch('/api/items/wrong-route', { method: 'POST' }); } catch (e) {}
+}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/routes.ts"),
+        r#"export function handle(method: string, pathname: string, payload: any) {
+  if (method === 'GET' && pathname === '/api/items') return payload;
+  if (method === 'POST' && pathname === '/api/items/save') return payload;
+}"#,
+    )
+    .unwrap();
+
+    // 1. `atlas product` detects HTML controls, backend routes, broken link & slop smells
+    let p_out = run_ap(
+        root,
+        &[
+            "atlas",
+            "product",
+            ".",
+            "--write",
+            "PRODUCT_MAP.md",
+            "--json",
+        ],
+        None,
+        &[],
+    );
+    assert!(
+        p_out.status.success(),
+        "atlas product failed: {}",
+        String::from_utf8_lossy(&p_out.stderr)
+    );
+    assert!(root.join("PRODUCT_MAP.md").is_file());
+    let pj: Value = serde_json::from_slice(&p_out.stdout).unwrap();
+    let mismatches = pj["contract_mismatches"].as_array().unwrap();
+    assert_eq!(mismatches.len(), 1);
+    assert!(mismatches[0]
+        .as_str()
+        .unwrap()
+        .contains("/api/items/wrong-route"));
+    assert!(!pj["slop_smells"].as_array().unwrap().is_empty());
+
+    // 2. `guard rule init/add` + `guard verify --all` blocks `: any` and empty `catch {}` with exit 2
+    assert!(
+        run_ap(root, &["guard", "rule", "init", "--cwd", "."], None, &[])
+            .status
+            .success()
+    );
+    assert!(run_ap(
+        root,
+        &[
+            "guard",
+            "rule",
+            "add",
+            "--cwd",
+            ".",
+            "--id",
+            "no-wrong-route",
+            "--glob",
+            "*.js",
+            "--forbid",
+            "wrong-route",
+            "--msg",
+            "Use /api/items/save",
+        ],
+        None,
+        &[]
+    )
+    .status
+    .success());
+    let v_fail = run_ap(root, &["guard", "verify", "--cwd", ".", "--all"], None, &[]);
+    assert_eq!(
+        v_fail.status.code(),
+        Some(2),
+        "guard verify must return exit 2 on slop/rule violation"
+    );
+
+    // Clean the slop & broken route -> `guard verify --all` passes
+    fs::write(
+        root.join("public/app.js"),
+        "async function save() { const r = await fetch('/api/items/save', { method: 'POST' }); return r.ok; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/routes.ts"),
+        "export function handle(method: string, pathname: string, payload: Record<string, string>) {\n  if (method === 'POST' && pathname === '/api/items/save') return payload;\n  return null;\n}\n",
+    )
+    .unwrap();
+    let v_ok = run_ap(root, &["guard", "verify", "--cwd", ".", "--all"], None, &[]);
+    assert!(
+        v_ok.status.success(),
+        "guard verify should pass once slop is cleaned: {}",
+        String::from_utf8_lossy(&v_ok.stderr)
+    );
+
+    // 3. `probe smoke` spawns ephemeral Node HTTP server, tests UTF-8 Chinese query + JSON dot-path & cleans tree
+    if Command::new("node").arg("--version").output().is_ok() {
+        fs::write(
+            root.join("mini_srv.mjs"),
+            r#"import http from 'node:http';
+const port = Number(process.env.PORT || 0);
+http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://127.0.0.1');
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ ok: true, q: u.searchParams.get('q') || '', items: [1, 2, 3] }));
+}).listen(port, '127.0.0.1');
+"#,
+        )
+        .unwrap();
+        let smoke_spec = "GET /api/search?q=支付\nEXPECT STATUS 200\nEXPECT CONTAINS 支付\nEXPECT JSON items.length == 3\n";
+        let s_out = run_ap(
+            root,
+            &[
+                "probe",
+                "smoke",
+                "--cwd",
+                ".",
+                "--start",
+                "node mini_srv.mjs",
+                "--stdin",
+                "--json",
+            ],
+            Some(smoke_spec),
+            &[],
+        );
+        assert!(
+            s_out.status.success(),
+            "probe smoke failed: {}{}",
+            String::from_utf8_lossy(&s_out.stdout),
+            String::from_utf8_lossy(&s_out.stderr)
+        );
+        let sj: Value = serde_json::from_slice(&s_out.stdout).unwrap();
+        assert_eq!(sj["ok"], true);
+    }
+}
+
+#[test]
+fn test_mcp_stdio_jsonrpc_server_and_opencode_wiring() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // 1. Verify `ap init --here -a opencode` writes valid opencode.json MCP config
+    let init_oc = run_ap(root, &["init", "--here", "-a", "opencode"], None, &[]);
+    assert!(init_oc.status.success());
+    assert!(root.join("opencode.json").is_file());
+    let oc_val: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("opencode.json")).unwrap()).unwrap();
+    assert_eq!(oc_val["mcp"]["agent-primitives"]["enabled"], true);
+
+    // 2. Test `ap mcp` newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call` ap_edit + ap_verify)
+    let target_py = root.join("calc.py");
+    let requests = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05" }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "ap_edit",
+                "arguments": {
+                    "cwd": root.to_string_lossy(),
+                    "writes": [{ "path": "calc.py", "content": "def add(a: int, b: int) -> int:\n    return a + b\n" }]
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n")
+        + "\n";
+
+    let mcp_out = run_ap(root, &["mcp"], Some(&requests), &[]);
+    assert!(mcp_out.status.success());
+    let lines: Vec<&str> = std::str::from_utf8(&mcp_out.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    let r2: Value = serde_json::from_str(lines[1]).unwrap();
+    assert!(r2["result"]["tools"].as_array().unwrap().len() >= 5);
+    let r3: Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(r3["result"]["isError"], false);
+    assert!(target_py.is_file());
+
+    // 3. Clean uninstall removes opencode.json
+    let un_oc = run_ap(root, &["uninstall", "--here"], None, &[]);
+    assert!(un_oc.status.success());
+    assert!(!root.join("opencode.json").exists());
+}
+
+#[test]
+fn test_aider_indentation_patch_fallback_and_rtk_pretooluse_rewrite() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // 1. Aider Tier-3 uniform indentation-delta match (file has 4-space indent, LLM emits 0-space `old` & `new`)
+    let py_f = root.join("service.py");
+    fs::write(
+        &py_f,
+        "class OrderService:\n    def total(self, a: int, b: int) -> int:\n        tax = 2\n        return a + b + tax\n",
+    )
+    .unwrap();
+    let patch_0_indent = "@@ FILE: service.py\n<<<\ndef total(self, a: int, b: int) -> int:\n    tax = 2\n    return a + b + tax\n===\ndef total(self, a: int, b: int) -> int:\n    tax = 5\n    return a + b + tax\n>>>\n";
+    let p_out = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(patch_0_indent),
+        &[],
+    );
+    assert!(
+        p_out.status.success(),
+        "Tier-3 indentation fallback failed: {}",
+        String::from_utf8_lossy(&p_out.stderr)
+    );
+    let updated = fs::read_to_string(&py_f).unwrap();
+    assert!(updated.contains("    def total(self, a: int, b: int) -> int:\n        tax = 5\n"));
+
+    // 2. RTK-style PreToolUse `updatedInput` auto-sieve rewrite for Claude Code Bash hook
+    let hook_in = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test --workspace" }
+    })
+    .to_string();
+    let g_out = run_ap(root, &["guard", "shield"], Some(&hook_in), &[]);
+    assert!(g_out.status.success());
+    let gj: Value = serde_json::from_slice(&g_out.stdout).unwrap();
+    let rewritten = gj["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap();
+    assert!(rewritten.contains("sieve run -- cargo test --workspace"));
 }

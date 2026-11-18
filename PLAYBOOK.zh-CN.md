@@ -1,94 +1,56 @@
-# 真实提效实战指南：纯 Rust 单二进制 1 条命令接入全主流 Harness
+# 实战提效手册：免费与主流编程智能体的一行纯 Rust 接入指南
 
-[English](./PLAYBOOK.md) | [简体中文](./PLAYBOOK.zh-CN.md) · [总纲手册](./HANDBOOK.zh-CN.md) · [抗淘汰底层架构设计](./DESIGN.zh-CN.md)
+[English](./PLAYBOOK.md) | [简体中文](./PLAYBOOK.zh-CN.md) · [演进总手册](./HANDBOOK.zh-CN.md) · [架构深潜](./DESIGN.zh-CN.md)
 
-再强的工具，如果还要折腾 Python/Node 环境版本、配半小时 JSON 或频繁撞上终端引号转义，用户用一次就会放弃。在 **`v1.0`** 中，`agent-primitives` 全面升级为**单文件纯 Rust 原生二进制（`ap` / `ap.exe`）**，将 6 语言官方 **Tree-sitter C 语法树**、`ripgrep` 并行遍历器、**静态编译 SQLite FTS5/BM25** 与全部 7 个 `SKILL.md` 打包进同一个可执行文件——**用户电脑无需安装 Python、Node 甚至无需安装 Rust 编译器**，一行命令秒级下载即用。
+`agent-primitives`（`v1.2`）交付为**单个零依赖原生 Rust 可执行文件（`ap` / `ap.exe`）**，静态内嵌 **6 语言 Tree-sitter 语法器**、**内置 SQLite FTS5/BM25**、**纯 Rust 交互式无头 Edge/Chrome CDP 引擎**以及**标准 `ap mcp` JSON-RPC 服务**——用户电脑**无需安装 Python、Node 或 Rust 编译器**。
 
 ---
 
-## 零、第 0 步：先用 `ap audit` 测出你本机 Agent 到底在浪费什么
+## 1. 零配置一行命令接入（小白开箱即用）
 
-100% 本地离线扫描 `~/.codex`、`~/.pi`、`~/.claude`、`~/.grok`、`~/.gemini/antigravity-cli` 历史轨迹（零联网、不上传任何内容）：
+```bash
+# macOS / Linux（自动识别并接线 OpenCode、Qwen、Gemini CLI、Goose、Pi、Codex、Antigravity、Claude、Grok）：
+curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
+```
+
+```powershell
+# Windows PowerShell：
+irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
+```
+
+```bash
+# 仅接入当前项目目录（指定 opencode/qwen/gemini-cli 时自动生成项目级 MCP 配置）：
+ap init --here -a opencode
+ap init --here --with-hooks --with-mcp
+
+# 随时一行无损卸载（完整保留你原有的个人配置）：
+ap uninstall          # 或卸载当前项目：ap uninstall --here
+```
+
+### 原生支持的免费开源与商业智能体矩阵（$0 零 Key 直接提效）
+- **OpenCode（`opencode`，MIT 开源含免费模型）**：自动写入 `~/.config/opencode/opencode.json`（或项目 `opencode.json`）启用 `ap mcp`。哪怕使用 `$0` 免费模型（`opencode/big-pickle`、`glm-5.3-flash-free`、`deepseek-v4.1-flash-free`），也能直接调用结构化工具 `ap_orient`、`ap_edit`、`ap_smoke`、`ap_verify`，彻底告别 Windows 命令引号报错！
+- **Qwen Code（`qwen`）与 Google Gemini CLI（`gemini`）**：自动向 `~/.qwen/settings.json` 与 `~/.gemini/settings.json` 注入 `"trust": true` 的 `ap mcp` 配置，免除每次弹窗确认。
+- **Pi（`pi`）与 Goose（`goose`）**：自动同步 `~/.pi/agent/skills/`、`~/.pi/agent/AGENTS.md` 与 `package.json` 插件声明。
+- **Claude Code（`claude`）、Codex（`codex`）、Antigravity（`agy`）与 Grok（`grok`）**：同步技能、`~130 Token` 极简路由及 `<2ms` 原生 `exit 2` / JSON Hook（并在 Claude `Bash` 下启用 `rtk` 式测试输出自动脱水）。
+
+---
+
+## 2. 5 大原生 MCP 工具（`ap mcp`）与 CLI 原语协同机制
+
+| MCP 工具 / CLI 命令 | 直接消除的大模型思考与系统卡点 | 原生延迟 |
+| :--- | :--- | ---: |
+| **`ap_orient`** / `ap atlas map` + `atlas product` + `probe slice --bundle` | 消除空仓环境盲猜、误读历史废文件，静态抓出 HTML `#id` ↔ JS 选择器及 `fetch()` ↔ 后端路由断链（Personalized PageRank 排序） | `6–18 ms` |
+| **`ap_edit`** / `ap splice apply --cwd . --stdin --test` | 消除多文件串行编辑瀑布、2 空格缩进偏差（Aider 三级容错匹配）、PowerShell 转义崩溃，落盘前强制过 Tree-sitter 语法树 | `2.3 ms` |
+| **`ap_smoke`** / `ap probe smoke --cwd . --stdin` | **砍掉 Windows 70% 手工验证税**：自动绑空闲 `PORT`、驱动本机无头 Edge/Chrome 真实点击输入（`OPEN`/`FILL`/`SELECT`/`CLICK`/`EVAL`）、查 `0` 页面/服务端报错并 `taskkill /T /F` 杀净进程树 | `2.5–4.5 s` |
+| **`ap_verify`** / `ap guard verify` + `guard rule add` | 根治 `AGENTS.md` 叮嘱失灵与 AI Slop（拦截 `: any`、`@ts-ignore`、空 `catch {}`），自动调用 `tsc`/`biome`/`cargo`/测试（`exit 2` 硬门禁） | `<2 ms` (+测试) |
+| **`ap_probe`** / `ap probe run` · `ap sieve` · `ap recall` · `ap baton` | 消除内存别名脑补、`200 KB` 测试日志刷屏（`-98.8%`）、长规则库膨胀（`3.4ms` SQLite FTS5）与上下文压缩失忆 | `3–29 ms` |
+
+---
+
+## 3. 本地过程损耗体检（`ap audit`）
+
+一键扫描本机 `~/.codex`、`~/.pi`、`~/.claude`、`~/.grok`、`~/.gemini/antigravity-cli` 日志（`0` 字节外传）：
 
 ```bash
 ap audit --compare
 ```
-
-几秒内即可量化本机真实发生的**同文件重复重读、手工终端切行、`python -c`/`node -e` 引号崩溃与 `ImportError`、补丁失配、UTF-8 编码报错、`>8 KB` 巨型输出刷屏与死循环重试**，并对比前后半段会话的摩擦变化趋势。
-
----
-
-## 一、免环境一行命令接入全主流 Harness（`install.sh` / `install.ps1` / `ap init`）
-
-无需 `git clone`、无需 `python`、无需 `pip`/`npm`、无需手写 JSON：
-
-```bash
-# 通用一行预编译单二进制安装 + 自动接入（macOS / Linux）：
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
-
-# 通用一行预编译单二进制安装 + 自动接入（Windows PowerShell）：
-irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
-
-# 已安装 Rust 工具链的开发者也可直接通过 Cargo 源码编译安装：
-cargo install --git https://github.com/xgbtxy/agent-primitives --locked && ap init
-
-# 仅接入当前项目仓库（自动植入自包含 .agents/bin/ap、.agents/skills 并幂等写入 AGENTS.md）：
-ap init --here
-
-# 按需指定 Harness + 挂载 <2ms 原生 Rust 门禁 Hook（Claude Code、Codex、Antigravity）：
-ap init -a codex,pi,agy,claude --with-hooks
-
-# 随时一行干净卸载（100% 保留你原有的个人规则与配置）：
-ap uninstall          # 或：ap uninstall --here
-```
-
-### 各大 Harness 底层发现机制精确适配细节
-- **OpenAI Codex CLI (`codex`)**：同步 `~/.codex/skills/` + `~/.agents/skills/`，向 `~/.codex/AGENTS.md` 注入自包含 `<10 行` 围栏路由块，`--with-hooks` 自动合并 `<2ms` 原生 `ap guard` 至 `~/.codex/hooks.json`。
-- **Pi (`pi` / `pi-coding-agent`)**：同步 `~/.pi/agent/skills/`（项目模式 `-a pi` 同步 `.pi/skills/`）与 `~/.pi/agent/AGENTS.md`，并提供 `package.json` `"pi"` 清单。
-- **Google Antigravity (`agy` / IDE)**：同步 `~/.gemini/config/skills/` + `~/.agents/skills/` 与 `~/.gemini/config/GEMINI.md`；`--with-hooks` 按 Antigravity 专属命名组写入 `"agent-primitives-guard"`（`"matcher": "run_command"`），原生兼容 camelCase `deny`/`allow`/`continue`/`stop` JSON 协议。
-- **Anthropic Claude Code (`claude`)**：同步 `~/.claude/skills/` 与 `~/.claude/CLAUDE.md`，自动备份 `.bak` 并合并 `PreToolUse`、`PreCompact`（`ap baton`）与 `Stop`（`exit 2`）至 `~/.claude/settings.json`。
-- **xAI Grok Build (`grok`)**：同步 `~/.grok/skills/` 与 `~/.grok/AGENTS.md`。
-
----
-
-## 二、核心闭环：全部 7 个原语待机仅占 `412 Tokens`，卡住 5 个物理咽喉点
-
-```text
-[阶段 1：认路与精准唤起] --> ap atlas  (16ms 6 语言 Tree-sitter 结构地图 + >90 天陈旧 TODO 预警)
-                         --> ap recall (3.3ms 静态 SQLite FTS5 + 中英双栖检索，仅注入 ~47 tok)
-[阶段 2：切片与因果诊断] --> ap probe  (7ms slice --bundle 剪除 Py/TS/JS/Go/Rust/C 死文件并打包活跃源码；
-                                        run 抓堆别名/原地篡改/空操作/-0；diff 跨 Py/TS/JS/Rust 差分验证)
-[阶段 3：外科手术式落盘] --> ap splice (0.8ms Tree-sitter 符号精读 [-95.4% tok]；
-                                        3.1ms 零转义 apply --stdin --test + 6 语言语法树预检原子回滚)
-[阶段 4：观测流无损降噪] --> ap sieve  (>1.2 KB 日志/JSON/JSONL/HTML表/CSV 压减 97-99% + FTS5 跨归档搜索)
-[阶段 5：门禁与跨轮接力] --> ap guard  (<2ms 原生 exit-2 密钥/高危拦截、3 次同错熔断、完工门禁)
-                         --> ap baton  (<400 tok 保存已核验事实 + DO NOT RETRY 死胡同，抗压缩秒接续)
-```
-
----
-
-## 三、场景一：Coding Agent 怎么用才能立竿见影？
-
-1. **1 次调用完成 6 语言死代码剪枝 + 清单与活跃源码打包（`ap probe slice . --bundle`）**：
-   - 面对 **Python、TypeScript/JS、Go、Rust、C** 多文件仓库，首条命令直接跑 `ap probe slice . --bundle`（`~7 ms`），剪除未引用死模块并一次性输出项目清单与带行号活跃源码，直接省掉 10~16 次串行读文件往返。
-2. **用毫秒级因果与差分探针替代 20 分钟文字空想（`ap probe run` / `diff`）**：
-   - 自动检出 `[ALIAS HAZARD]`、`[IN-PLACE MUTATION]`、`[STATE NO-OP]`、`-0`/`NaN`、`True == 1` 缓存碰撞及 Rust `i64` 负数整除舍入偏差（`ap probe diff --lang rust`）。
-3. **零转义跨文件原子补丁 + 6 语言真 Tree-sitter 语法守门 + 自动跑测（`ap splice`）**：
-   - 直接通过管道将 `@@ FILE:`、`@@ SYMBOL:`、`@@ WRITE:` 喂给 `ap splice apply --cwd . --stdin --test --rollback-on-test-fail`（PowerShell 用 `@'...'@ |`，Bash 用 `<<'EOF'`）。**落盘前自动对 Py/TS/JS/Go/Rust/C 全部修改文件执行真 Tree-sitter 语法树校验**，1 轮完成改代码 + 写单测 + 跑测试闭环！
-
----
-
-## 四、场景二：个人助手 Agent 怎么用才能真实提效？
-
-1. **大型笔记库导航与章节级精准读写（`ap atlas` + `ap splice view --heading`）**：`<20ms` 扫出数百篇 Markdown 提纲并按章节原子读写。
-2. **零云端中英双栖个人 SOP 记忆（`ap recall`）**：`3.3 ms` 中英混合检索（200 条规则 Top-1 准确率 **100%**）。
-3. **JSONL 流、HTML 表格与 CSV/TSV 降噪（`ap sieve`）**：自动提取网页/CSV 管道表并支持 `ap sieve search` 秒搜历史原文。
-4. **跨天不断片与 `<2ms` 安全防线（`ap baton` + `ap guard`）**：压缩后 `<400 Tokens` 恢复现场，物理拦截密钥外泄与高危命令。
-
----
-
-## 五、诚实边界：什么时候**不要**用？
-
-- **已知极短命令不要套 `sieve`**：如 `pwd`、`git status -s`（`<1.2 KB` 原样直通）。
-- **单行已知拼写修复不要跑 `probe`**：改完直接跑 `ap splice check . --test` 最快。
-- **全局身份红线留 `AGENTS.md`，低频条件经验放 `recall`**。

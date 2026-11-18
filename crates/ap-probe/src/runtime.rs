@@ -83,7 +83,13 @@ fn node_supports_strip_types() -> bool {
     major >= 22
 }
 
-pub fn detect_lang(cwd: &Path, lang_flag: &str, focus: &str, code: Option<&str>, script: Option<&str>) -> ProbeLang {
+pub fn detect_lang(
+    cwd: &Path,
+    lang_flag: &str,
+    focus: &str,
+    code: Option<&str>,
+    script: Option<&str>,
+) -> ProbeLang {
     match lang_flag.trim().to_ascii_lowercase().as_str() {
         "py" | "python" => return ProbeLang::Python,
         "ts" | "typescript" => return ProbeLang::TypeScript,
@@ -124,7 +130,13 @@ pub fn detect_lang(cwd: &Path, lang_flag: &str, focus: &str, code: Option<&str>,
             || cwd.join("tsconfig.json").is_file()
             || fs::read_dir(cwd.join("src"))
                 .ok()
-                .map(|mut rd| rd.any(|e| e.ok().and_then(|x| x.path().extension().map(|ext| ext == "ts")).unwrap_or(false)))
+                .map(|mut rd| {
+                    rd.any(|e| {
+                        e.ok()
+                            .and_then(|x| x.path().extension().map(|ext| ext == "ts"))
+                            .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false);
         return if has_ts {
             ProbeLang::TypeScript
@@ -314,13 +326,20 @@ pub fn run_trace_dispatch(
             Ok(data) => {
                 let has_err = !data["exec_error"].is_null();
                 if as_json {
-                    println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).unwrap_or_default()
+                    );
                     return if has_err { 1 } else { 0 };
                 }
                 let arr_str = |k: &str| -> Vec<String> {
                     data[k]
                         .as_array()
-                        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default()
                 };
                 let alias = arr_str("alias_hazards");
@@ -346,13 +365,17 @@ pub fn run_trace_dispatch(
                     }
                 }
                 if !muts.is_empty() {
-                    println!("\n## !! [IN-PLACE MUTATION] Caller Argument / Shared State Mutations");
+                    println!(
+                        "\n## !! [IN-PLACE MUTATION] Caller Argument / Shared State Mutations"
+                    );
                     for m in muts {
                         println!("- {m}");
                     }
                 }
                 if !noops.is_empty() {
-                    println!("\n## !! [STATE NO-OP] Void Mutator Methods That Left `self` Unchanged");
+                    println!(
+                        "\n## !! [STATE NO-OP] Void Mutator Methods That Left `self` Unchanged"
+                    );
                     for n in noops {
                         println!("- {n}");
                     }
@@ -372,7 +395,11 @@ pub fn run_trace_dispatch(
                 if let Some(so) = data["stdout"].as_str().filter(|s| !s.trim().is_empty()) {
                     println!("\n## Program Output\n{}", so.trim());
                 }
-                if has_err { 1 } else { 0 }
+                if has_err {
+                    1
+                } else {
+                    0
+                }
             }
             Err(e) => {
                 eprintln!("[probe run] {e}");
@@ -406,7 +433,10 @@ pub fn run_trace_dispatch(
             node_args.push("--experimental-strip-types".to_string());
         }
         node_args.push(tmp_runner.to_string_lossy().to_string());
-        let out = Command::new("node").args(&node_args).current_dir(&cwd_canon).output();
+        let out = Command::new("node")
+            .args(&node_args)
+            .current_dir(&cwd_canon)
+            .output();
         let _ = fs::remove_file(&tmp_runner);
 
         let Ok(proc_out) = out else {
@@ -427,7 +457,11 @@ pub fn run_trace_dispatch(
             return 1;
         };
         let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
-        let mode_str = if lang == ProbeLang::TypeScript { "ts" } else { "js" };
+        let mode_str = if lang == ProbeLang::TypeScript {
+            "ts"
+        } else {
+            "js"
+        };
         let has_uncaught = !data["uncaught"].is_null();
         let payload = json!({
             "language": mode_str,
@@ -441,7 +475,10 @@ pub fn run_trace_dispatch(
             "stdout": user_stdout.trim(),
         });
         if as_json {
-            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
             return if has_uncaught { 1 } else { 0 };
         }
         let ev_n = data["events"].as_array().map(|a| a.len()).unwrap_or(0);
@@ -465,12 +502,19 @@ pub fn run_trace_dispatch(
             }
         }
         if let Some(u) = data["uncaught"].as_str() {
-            println!("\n## !! Uncaught Exception\n{}", u.lines().next().unwrap_or(u));
+            println!(
+                "\n## !! Uncaught Exception\n{}",
+                u.lines().next().unwrap_or(u)
+            );
         }
         if !user_stdout.trim().is_empty() {
             println!("\n## Captured Stdout\n{}", user_stdout.trim());
         }
-        if has_uncaught { 1 } else { 0 }
+        if has_uncaught {
+            1
+        } else {
+            0
+        }
     } else {
         // Native Rust snippet runner (`rustc`)
         if !which_ok("rustc") {
@@ -487,7 +531,11 @@ pub fn run_trace_dispatch(
         let tmp_dir = std::env::temp_dir().join(format!("ap_probe_rs_{}", std::process::id()));
         let _ = fs::create_dir_all(&tmp_dir);
         let src_p = tmp_dir.join("probe_snip.rs");
-        let bin_p = tmp_dir.join(if cfg!(windows) { "probe_snip.exe" } else { "probe_snip" });
+        let bin_p = tmp_dir.join(if cfg!(windows) {
+            "probe_snip.exe"
+        } else {
+            "probe_snip"
+        });
         let _ = fs::write(&src_p, wrapped);
         let comp = Command::new("rustc")
             .arg(&src_p)
@@ -499,7 +547,10 @@ pub fn run_trace_dispatch(
             return 1;
         };
         if !c_out.status.success() {
-            eprintln!("[probe run (RUST)] compile error:\n{}", String::from_utf8_lossy(&c_out.stderr));
+            eprintln!(
+                "[probe run (RUST)] compile error:\n{}",
+                String::from_utf8_lossy(&c_out.stderr)
+            );
             let _ = fs::remove_dir_all(&tmp_dir);
             return 1;
         }
@@ -523,7 +574,10 @@ pub fn run_trace_dispatch(
                 .unwrap_or_default()
             );
         } else {
-            println!("[probe run (RUST)] exit={} in {elapsed_ms} ms", ro.status.code().unwrap_or(1));
+            println!(
+                "[probe run (RUST)] exit={} in {elapsed_ms} ms",
+                ro.status.code().unwrap_or(1)
+            );
             if !so.is_empty() {
                 println!("{so}");
             }
@@ -531,7 +585,11 @@ pub fn run_trace_dispatch(
                 eprintln!("{se}");
             }
         }
-        if ok { 0 } else { 1 }
+        if ok {
+            0
+        } else {
+            1
+        }
     }
 }
 
@@ -564,15 +622,26 @@ pub fn run_diff_dispatch(
         let tmp_dir = std::env::temp_dir().join(format!("ap_diff_rs_{}", std::process::id()));
         let _ = fs::create_dir_all(&tmp_dir);
         let src_p = tmp_dir.join("diff_probe.rs");
-        let bin_p = tmp_dir.join(if cfg!(windows) { "diff_probe.exe" } else { "diff_probe" });
+        let bin_p = tmp_dir.join(if cfg!(windows) {
+            "diff_probe.exe"
+        } else {
+            "diff_probe"
+        });
         let _ = fs::write(&src_p, rs_src);
-        let comp = Command::new("rustc").arg(&src_p).arg("-o").arg(&bin_p).output();
+        let comp = Command::new("rustc")
+            .arg(&src_p)
+            .arg("-o")
+            .arg(&bin_p)
+            .output();
         let Ok(c_out) = comp else {
             let _ = fs::remove_dir_all(&tmp_dir);
             return 2;
         };
         if !c_out.status.success() {
-            eprintln!("[probe diff (RUST)] compile error:\n{}", String::from_utf8_lossy(&c_out.stderr));
+            eprintln!(
+                "[probe diff (RUST)] compile error:\n{}",
+                String::from_utf8_lossy(&c_out.stderr)
+            );
             let _ = fs::remove_dir_all(&tmp_dir);
             return 2;
         }
@@ -606,7 +675,11 @@ pub fn run_diff_dispatch(
         } else {
             println!(
                 "[probe diff (RUST)] {} across {cases} inputs in {elapsed_ms} ms (divergences={})",
-                if clean { "EQUIVALENT (0 counterexamples)" } else { "DIVERGENCE DETECTED" },
+                if clean {
+                    "EQUIVALENT (0 counterexamples)"
+                } else {
+                    "DIVERGENCE DETECTED"
+                },
                 divs.len()
             );
             for d in &divs {
@@ -697,21 +770,33 @@ console.log(JSON.stringify({{ cases: __corpus.length, divs: __divs, muts: __muts
             node_args.push("--experimental-strip-types".to_string());
         }
         node_args.push(tmp_runner.to_string_lossy().to_string());
-        let out = Command::new("node").args(&node_args).current_dir(&cwd_canon).output();
+        let out = Command::new("node")
+            .args(&node_args)
+            .current_dir(&cwd_canon)
+            .output();
         let _ = fs::remove_file(&tmp_runner);
         let Ok(proc_out) = out else { return 2 };
         let stdout_s = String::from_utf8_lossy(&proc_out.stdout);
         let Some((_, jpart)) = stdout_s.split_once("__PROBE_DIFF_JSON__") else {
-            eprintln!("[probe diff] Execution failed:\n{}", String::from_utf8_lossy(&proc_out.stderr));
+            eprintln!(
+                "[probe diff] Execution failed:\n{}",
+                String::from_utf8_lossy(&proc_out.stderr)
+            );
             return 2;
         };
-        let Ok(res) = serde_json::from_str::<Value>(jpart.trim()) else { return 2 };
+        let Ok(res) = serde_json::from_str::<Value>(jpart.trim()) else {
+            return 2;
+        };
         let divs = res["divs"].as_array().cloned().unwrap_or_default();
         let drifts = res["drifts"].as_array().cloned().unwrap_or_default();
         let muts = res["muts"].as_array().cloned().unwrap_or_default();
         let clean = divs.is_empty() && drifts.is_empty() && muts.is_empty();
         let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
-        let mode_str = if lang == ProbeLang::TypeScript { "ts" } else { "js" };
+        let mode_str = if lang == ProbeLang::TypeScript {
+            "ts"
+        } else {
+            "js"
+        };
         let payload = json!({
             "language": mode_str,
             "elapsed_ms": elapsed_ms,
@@ -722,7 +807,10 @@ console.log(JSON.stringify({{ cases: __corpus.length, divs: __divs, muts: __muts
             "caller_input_mutations": muts,
         });
         if as_json {
-            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
         } else {
             println!(
                 "[probe diff ({})] {} across {} boundary inputs in {elapsed_ms} ms (divergences={}, stateful_drifts={}, input_mutations={})",
@@ -734,7 +822,10 @@ console.log(JSON.stringify({{ cases: __corpus.length, divs: __divs, muts: __muts
                 muts.len()
             );
             for d in divs.iter().take(8) {
-                println!("- DIVERGENCE input={} => fn_a={} != fn_b={}", d["input"], d["a"], d["b"]);
+                println!(
+                    "- DIVERGENCE input={} => fn_a={} != fn_b={}",
+                    d["input"], d["a"], d["b"]
+                );
             }
         }
         return if clean { 0 } else { 1 };
@@ -754,12 +845,21 @@ console.log(JSON.stringify({{ cases: __corpus.length, divs: __divs, muts: __muts
         Ok(data) => {
             let clean = data["equivalent"].as_bool().unwrap_or(false);
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data).unwrap_or_default()
+                );
                 return if clean { 0 } else { 1 };
             }
             let divs = data["divergences"].as_array().cloned().unwrap_or_default();
-            let drifts = data["stateful_cache_drifts"].as_array().cloned().unwrap_or_default();
-            let muts = data["caller_input_mutations"].as_array().cloned().unwrap_or_default();
+            let drifts = data["stateful_cache_drifts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let muts = data["caller_input_mutations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             println!(
                 "[probe diff] {} across {} boundary/sequence inputs in {} ms (divergences={}, stateful_drifts={}, input_mutations={})",
                 if clean { "EQUIVALENT (0 counterexamples)" } else { "DIVERGENCE DETECTED" },
@@ -786,7 +886,11 @@ console.log(JSON.stringify({{ cases: __corpus.length, divs: __divs, muts: __muts
                     s["sequential"].as_str().unwrap_or("")
                 );
             }
-            if clean { 0 } else { 1 }
+            if clean {
+                0
+            } else {
+                1
+            }
         }
         Err(e) => {
             eprintln!("[probe diff] {e}");

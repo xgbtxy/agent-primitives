@@ -67,7 +67,10 @@ impl Default for BatonState {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "baton", about = "Compaction-proof state & cross-agent handoff capsule (<500 tokens)")]
+#[command(
+    name = "baton",
+    about = "Compaction-proof state & cross-agent handoff capsule (<500 tokens)"
+)]
 struct Cli {
     #[command(subcommand)]
     subcmd: SubCmd,
@@ -246,7 +249,10 @@ pub fn render_markdown(state: &BatonState) -> String {
     }
     if !state.constraints.is_empty() {
         let start = state.constraints.len().saturating_sub(6);
-        lines.push(format!("**Constraints**: {}", state.constraints[start..].join(" | ")));
+        lines.push(format!(
+            "**Constraints**: {}",
+            state.constraints[start..].join(" | ")
+        ));
     }
     if !state.next_step.is_empty() {
         lines.push(format!("**Next Immediate Step**: {}", state.next_step));
@@ -263,7 +269,9 @@ pub fn render_markdown(state: &BatonState) -> String {
                 format!(": {}", d[..take_n].join(", "))
             })
             .unwrap_or_default();
-        lines.push(format!("**Git**: `{branch}` ({cnt} modified{dirty_preview})"));
+        lines.push(format!(
+            "**Git**: `{branch}` ({cnt} modified{dirty_preview})"
+        ));
     } else if let Some(recent) = &state.workspace.recent_files {
         if !recent.is_empty() {
             let take_n = recent.len().min(6);
@@ -300,7 +308,12 @@ pub fn render_markdown(state: &BatonState) -> String {
     format!("{}\n", lines.join("\n").trim())
 }
 
-pub fn save_state(base: &Path, cwd: &Path, state: &mut BatonState, snapshot_history: bool) -> String {
+pub fn save_state(
+    base: &Path,
+    cwd: &Path,
+    state: &mut BatonState,
+    snapshot_history: bool,
+) -> String {
     state.updated_at = now_iso_utc();
     state.workspace = probe_workspace(cwd);
     if let Ok(js) = serde_json::to_string_pretty(state) {
@@ -308,7 +321,10 @@ pub fn save_state(base: &Path, cwd: &Path, state: &mut BatonState, snapshot_hist
         if snapshot_history {
             let hist_dir = base.join("history");
             let _ = fs::create_dir_all(&hist_dir);
-            let _ = fs::write(hist_dir.join(format!("baton-{}.json", now_compact_stamp())), &js);
+            let _ = fs::write(
+                hist_dir.join(format!("baton-{}.json", now_compact_stamp())),
+                &js,
+            );
             if let Ok(rd) = fs::read_dir(&hist_dir) {
                 let mut snaps: Vec<PathBuf> = rd
                     .flatten()
@@ -397,7 +413,10 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             let md = save_state(&base, &cwd, &mut state, false);
             let tok = md.len().div_ceil(4).max(1);
-            println!("[baton] recorded fact ({} active, ~{tok} tok)", state.facts.len());
+            println!(
+                "[baton] recorded fact ({} active, ~{tok} tok)",
+                state.facts.len()
+            );
             0
         }
         SubCmd::Deadend { text, reason } => {

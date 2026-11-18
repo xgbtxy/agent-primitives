@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod bench;
 pub mod install;
+pub mod mcp;
 
 use clap::{Parser, Subcommand};
 
@@ -32,8 +33,12 @@ enum TopCmd {
         #[arg(long)]
         with_hooks: bool,
         #[arg(long)]
+        with_mcp: bool,
+        #[arg(long)]
         no_rules: bool,
     },
+    /// Start zero-dependency Model Context Protocol (MCP) stdio JSON-RPC server
+    Mcp,
     /// Cleanly remove installed skills, binary shims, hooks, and fenced rule blocks
     Uninstall {
         #[arg(long)]
@@ -80,7 +85,10 @@ fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let msg = info.to_string();
-        if msg.contains("failed printing to stdout") || msg.contains("Broken pipe") || msg.contains("os error 232") {
+        if msg.contains("failed printing to stdout")
+            || msg.contains("Broken pipe")
+            || msg.contains("os error 232")
+        {
             std::process::exit(0);
         }
         default_hook(info);
@@ -131,6 +139,7 @@ fn main() {
             dir,
             home,
             with_hooks,
+            with_mcp,
             no_rules,
         } => install::cmd_init(
             &agent,
@@ -139,8 +148,10 @@ fn main() {
             dir.as_deref(),
             home.as_deref(),
             with_hooks,
+            with_mcp,
             no_rules,
         ),
+        TopCmd::Mcp => mcp::run_mcp_stdio(),
         TopCmd::Uninstall { here, dir, home } => {
             install::cmd_uninstall(here, dir.as_deref(), home.as_deref())
         }

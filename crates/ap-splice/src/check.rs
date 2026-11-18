@@ -132,7 +132,11 @@ fn resolve_ts_rel(from_file: &Path, spec: &str, all_code_set: &HashSet<PathBuf>)
     })
 }
 
-fn detect_test_command(root: &Path, py_files: &[PathBuf], ts_js_files: &[PathBuf]) -> Option<Vec<String>> {
+fn detect_test_command(
+    root: &Path,
+    py_files: &[PathBuf],
+    ts_js_files: &[PathBuf],
+) -> Option<Vec<String>> {
     if root.join("Cargo.toml").is_file() && which_exists("cargo") {
         return Some(vec!["cargo".into(), "test".into(), "--quiet".into()]);
     }
@@ -150,7 +154,9 @@ fn detect_test_command(root: &Path, py_files: &[PathBuf], ts_js_files: &[PathBuf
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .unwrap_or_default();
             let nm = f.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            matches!(top.as_str(), "tests" | "test") || nm.starts_with("test_") || nm.ends_with("_test.py")
+            matches!(top.as_str(), "tests" | "test")
+                || nm.starts_with("test_")
+                || nm.ends_with("_test.py")
         })
         .collect();
     if !py_tests.is_empty() {
@@ -217,7 +223,9 @@ fn detect_test_command(root: &Path, py_files: &[PathBuf], ts_js_files: &[PathBuf
         })
         .collect();
     if !ts_test_files.is_empty() && which_exists("node") {
-        let has_ts = ts_test_files.iter().any(|p| p.ends_with(".ts") || p.ends_with(".tsx"))
+        let has_ts = ts_test_files
+            .iter()
+            .any(|p| p.ends_with(".ts") || p.ends_with(".tsx"))
             || ts_js_files
                 .iter()
                 .any(|f| matches!(f.extension().and_then(|e| e.to_str()), Some("ts" | "tsx")));
@@ -252,7 +260,11 @@ fn bound_test_output(raw: &str, max_lines: usize) -> String {
     s.trim().to_string()
 }
 
-pub fn collect_check_payload(root: &Path, run_tests: bool, test_cmd_override: &str) -> CheckPayload {
+pub fn collect_check_payload(
+    root: &Path,
+    run_tests: bool,
+    test_cmd_override: &str,
+) -> CheckPayload {
     let t0 = Instant::now();
     let (conflict_re, ts_rel_re, py_from_re) = check_regexes();
     let raw_canon = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -304,7 +316,21 @@ pub fn collect_check_payload(root: &Path, run_tests: bool, test_cmd_override: &s
             .to_ascii_lowercase();
         if !matches!(
             ext.as_str(),
-            "py" | "json" | "toml" | "md" | "yml" | "yaml" | "go" | "rs" | "c" | "h" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
+            "py" | "json"
+                | "toml"
+                | "md"
+                | "yml"
+                | "yaml"
+                | "go"
+                | "rs"
+                | "c"
+                | "h"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
         ) {
             continue;
         }
@@ -385,7 +411,9 @@ pub fn collect_check_payload(root: &Path, run_tests: bool, test_cmd_override: &s
             .unwrap_or(pf)
             .to_string_lossy()
             .replace('\\', "/");
-        let Ok(txt) = fs::read_to_string(pf) else { continue };
+        let Ok(txt) = fs::read_to_string(pf) else {
+            continue;
+        };
         let parts: Vec<String> = pf
             .strip_prefix(&root_canon)
             .unwrap_or(pf)
@@ -400,11 +428,17 @@ pub fn collect_check_payload(root: &Path, run_tests: bool, test_cmd_override: &s
         for cap in py_from_re.captures_iter(&txt) {
             let dots = cap.get(1).map(|m| m.as_str()).unwrap_or("");
             let base = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            let lineno = txt[..cap.get(0).unwrap().start()].bytes().filter(|&b| b == b'\n').count() + 1;
+            let lineno = txt[..cap.get(0).unwrap().start()]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count()
+                + 1;
             let full_m = if !dots.is_empty() {
                 let level = dots.len();
                 if level - 1 > pkg_parts.len() {
-                    issues.push(format!("{rel_s}:L{lineno}: Relative import beyond top-level package"));
+                    issues.push(format!(
+                        "{rel_s}:L{lineno}: Relative import beyond top-level package"
+                    ));
                     continue;
                 }
                 let cut = pkg_parts.len() - (level - 1);
@@ -429,12 +463,24 @@ pub fn collect_check_payload(root: &Path, run_tests: bool, test_cmd_override: &s
             .unwrap_or(tf)
             .to_string_lossy()
             .replace('\\', "/");
-        let Ok(txt) = fs::read_to_string(tf) else { continue };
+        let Ok(txt) = fs::read_to_string(tf) else {
+            continue;
+        };
         for cap in ts_rel_re.captures_iter(&txt) {
-            let spec = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()).unwrap_or("");
+            let spec = cap
+                .get(1)
+                .or_else(|| cap.get(2))
+                .map(|m| m.as_str())
+                .unwrap_or("");
             if !spec.is_empty() && !resolve_ts_rel(tf, spec, &all_code_files) {
-                let lineno = txt[..cap.get(0).unwrap().start()].bytes().filter(|&b| b == b'\n').count() + 1;
-                issues.push(format!("{rel_s}:L{lineno}: Broken relative import `{spec}`"));
+                let lineno = txt[..cap.get(0).unwrap().start()]
+                    .bytes()
+                    .filter(|&b| b == b'\n')
+                    .count()
+                    + 1;
+                issues.push(format!(
+                    "{rel_s}:L{lineno}: Broken relative import `{spec}`"
+                ));
             }
         }
     }

@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALL_PRIMITIVES: [&str; 7] = ["sieve", "baton", "recall", "guard", "atlas", "probe", "splice"];
+pub const ALL_PRIMITIVES: [&str; 7] = [
+    "sieve", "baton", "recall", "guard", "atlas", "probe", "splice",
+];
 pub const FENCE_START: &str = "<!-- agent-primitives:start -->";
 pub const FENCE_END: &str = "<!-- agent-primitives:end -->";
 
@@ -46,7 +48,11 @@ const HARNESS_SPECS: &[HarnessSpec] = &[
     HarnessSpec {
         id: "antigravity",
         cli_bin: "agy",
-        probe_dirs: &[".gemini/antigravity-cli", ".gemini/antigravity", ".gemini/config"],
+        probe_dirs: &[
+            ".gemini/antigravity-cli",
+            ".gemini/antigravity",
+            ".gemini/config",
+        ],
         skill_dirs: &[".gemini/config/skills", ".agents/skills"],
         rule_file: ".gemini/config/GEMINI.md",
     },
@@ -65,6 +71,34 @@ const HARNESS_SPECS: &[HarnessSpec] = &[
         rule_file: ".grok/AGENTS.md",
     },
     HarnessSpec {
+        id: "opencode",
+        cli_bin: "opencode",
+        probe_dirs: &[".config/opencode", ".local/share/opencode"],
+        skill_dirs: &[".config/opencode/skills", ".agents/skills"],
+        rule_file: ".config/opencode/AGENTS.md",
+    },
+    HarnessSpec {
+        id: "qwen",
+        cli_bin: "qwen",
+        probe_dirs: &[".qwen"],
+        skill_dirs: &[".qwen/skills", ".agents/skills"],
+        rule_file: ".qwen/QWEN.md",
+    },
+    HarnessSpec {
+        id: "gemini-cli",
+        cli_bin: "gemini",
+        probe_dirs: &[".gemini"],
+        skill_dirs: &[".gemini/skills", ".agents/skills"],
+        rule_file: ".gemini/GEMINI.md",
+    },
+    HarnessSpec {
+        id: "goose",
+        cli_bin: "goose",
+        probe_dirs: &[".config/goose"],
+        skill_dirs: &[".agents/skills"],
+        rule_file: ".config/goose/AGENTS.md",
+    },
+    HarnessSpec {
         id: "openclaw",
         cli_bin: "openclaw",
         probe_dirs: &[".openclaw"],
@@ -81,7 +115,10 @@ const HARNESS_SPECS: &[HarnessSpec] = &[
 ];
 
 pub fn embedded_skill_md(name: &str) -> Option<&'static str> {
-    EMBEDDED_SKILLS.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+    EMBEDDED_SKILLS
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| *v)
 }
 
 pub fn all_embedded_skills() -> &'static [(&'static str, &'static str); 7] {
@@ -103,7 +140,7 @@ fn which_exists(bin: &str) -> bool {
             return true;
         }
         #[cfg(windows)]
-        for ext in ["exe", "cmd", "bat"] {
+        for ext in ["exe", "cmd", "bat", "ps1"] {
             if dir.join(format!("{bin}.{ext}")).is_file() {
                 return true;
             }
@@ -114,7 +151,11 @@ fn which_exists(bin: &str) -> bool {
 
 fn normalize_harness_alias(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "agy" | "antigravity" | "gemini" => Some("antigravity"),
+        "agy" | "antigravity" => Some("antigravity"),
+        "gemini" | "gemini-cli" => Some("gemini-cli"),
+        "opencode" | "open-code" => Some("opencode"),
+        "qwen" | "qwen-code" => Some("qwen"),
+        "goose" => Some("goose"),
         "codex" => Some("codex"),
         "pi" | "pi-coding-agent" => Some("pi"),
         "claude" | "claude-code" => Some("claude"),
@@ -126,7 +167,11 @@ fn normalize_harness_alias(raw: &str) -> Option<&'static str> {
     }
 }
 
-fn resolve_requested_harnesses(agent_arg: &str, home: &Path, check_path_bins: bool) -> Result<Vec<&'static str>, String> {
+fn resolve_requested_harnesses(
+    agent_arg: &str,
+    home: &Path,
+    check_path_bins: bool,
+) -> Result<Vec<&'static str>, String> {
     let items: Vec<String> = agent_arg
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
@@ -163,29 +208,31 @@ fn resolve_requested_harnesses(agent_arg: &str, home: &Path, check_path_bins: bo
 pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     let sel: HashSet<&str> = selected.iter().copied().collect();
     let mut bullets = Vec::new();
-    if sel.contains("probe") {
+    if sel.contains("probe") || sel.contains("atlas") {
         bullets.push(format!(
-            "1. **Orient & Bundle Active Slice in 1 Call (`probe`)**: Start unfamiliar multi-file tasks with `{ap_cmd} probe slice . --bundle` (Tree-sitter prunes dead distractor files + emits manifest & numbered source of active reachable Py/TS/JS/Go/Rust/C modules in 1 bounded output — do NOT pipe to `head` or re-read bundled files)."
-        ));
-        bullets.push(format!(
-            "2. **Runtime & Differential Microscope (`probe`)**: Never simulate aliasing, partial exception mutations, `-0`/`NaN`, or cache/rounding drift in prose. Run `{ap_cmd} probe run --cwd . --code \"<Py/TS/JS/Rust repro>\"` (stdin: PowerShell `@' ... '@ | {ap_cmd} probe run --cwd . --stdin`; bash `<<'EOF'`) and `{ap_cmd} probe diff`."
+            "1. **Orient (`atlas` / `probe`)**: Empty/new dir -> `{ap_cmd} atlas map .` (host runtimes). Existing repo -> `{ap_cmd} probe slice . --bundle` + `{ap_cmd} atlas product .` (UI/API/DOM `#id` contracts & `[SLOP RADAR]`). Skip unreferenced files."
         ));
     }
     if sel.contains("splice") {
         bullets.push(format!(
-            "3. **Zero-Escaping Atomic Multi-File Patch + Auto-Test in 1 Turn (`splice`)**: Read symbols via `{ap_cmd} splice view <files...> --symbol <Sym>`. Batch ALL edits + new test files & run the test suite in **1 single call** via `{ap_cmd} splice apply --cwd . --stdin --test` (PowerShell `@' ... '@ |`, bash `<<'EOF'`) using zero-escaping blocks:\n   `@@ FILE: path` (`<<<` old `===` new `>>>`), `@@ SYMBOL: path :: Class.method` (`<<<` new `>>>`), `@@ WRITE: path` (`<<<` content `>>>`)."
+            "2. **Edit (`splice`)**: `{ap_cmd} splice view <file> --symbol <Sym>`. Batch writes/edits + unit tests in 1 call via `{ap_cmd} splice apply --cwd . --stdin --test` (`@@ WRITE: p` `<<<`...`>>>`, `@@ FILE: p` `<<<` old `===` new `>>>`, `@@ SYMBOL: p :: S` `<<<`...`>>>`)."
         ));
     }
-    if ["atlas", "sieve", "recall", "guard", "baton"]
+    if sel.contains("probe") || sel.contains("guard") {
+        bullets.push(format!(
+            "3. **Verify (`probe smoke` + `guard verify`)**: Test web/API apps in 1 call via `{ap_cmd} probe smoke --cwd . --stdin` (`OPEN /`, `FILL #id v`, `SELECT #id v`, `CLICK #id`|`text=Btn`, `EVAL <js>`, `GET/POST /api/...`, `BODY {{...}}`, `EXPECT STATUS/CONTAINS/JSON` — auto-starts `PORT`, checks 0 JS/stderr errors & kills process tree). Finish with `{ap_cmd} guard verify`."
+        ));
+    }
+    if ["probe", "sieve", "recall", "guard", "baton"]
         .iter()
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Vault Map, Sieve, Memory, Guard & Handoff**: Map repos/vaults via `{ap_cmd} atlas map .`; compress noisy logs/JSONL/HTML tables via `{ap_cmd} sieve run -- <cmd>` (search: `{ap_cmd} sieve search <q>`); query gotchas via `{ap_cmd} recall`; break retry loops via `{ap_cmd} guard`; save state via `{ap_cmd} baton`."
+            "4. **Extras**: `{ap_cmd} probe run --cwd . --stdin` / `probe diff`; `{ap_cmd} sieve run -- <cmd>`; `{ap_cmd} guard rule add`; `{ap_cmd} recall`; `{ap_cmd} baton`."
         ));
     }
     format!(
-        "{FENCE_START}\n## Agent Primitives (`{ap_cmd} <tool>` — self-contained syntax, skip reading SKILL.md)\n{}\n{FENCE_END}\n",
+        "{FENCE_START}\n## Agent Primitives (`{ap_cmd} <tool>` — self-contained, skip reading SKILL.md)\n{}\n{FENCE_END}\n",
         bullets.join("\n")
     )
 }
@@ -262,7 +309,8 @@ fn install_self_binary(dest_dir: &Path) -> Result<PathBuf, String> {
             let _ = fs::remove_file(&dst);
         }
         if fs::hard_link(&src, &dst).is_err() {
-            fs::copy(&src, &dst).map_err(|e| format!("Failed to install binary to {}: {e}", dst.display()))?;
+            fs::copy(&src, &dst)
+                .map_err(|e| format!("Failed to install binary to {}: {e}", dst.display()))?;
         }
         #[cfg(unix)]
         {
@@ -273,7 +321,11 @@ fn install_self_binary(dest_dir: &Path) -> Result<PathBuf, String> {
     Ok(dst)
 }
 
-fn write_skill_folders(dest_skills_dir: &Path, selected: &[&str], ap_cmd_rewrite: Option<&str>) -> Result<usize, String> {
+fn write_skill_folders(
+    dest_skills_dir: &Path,
+    selected: &[&str],
+    ap_cmd_rewrite: Option<&str>,
+) -> Result<usize, String> {
     fs::create_dir_all(dest_skills_dir).map_err(|e| e.to_string())?;
     let rewrite_re = Regex::new(r"\bap (sieve|baton|recall|guard|atlas|probe|splice)\b").unwrap();
     let mut count = 0usize;
@@ -288,7 +340,9 @@ fn write_skill_folders(dest_skills_dir: &Path, selected: &[&str], ap_cmd_rewrite
         fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let final_md = if let Some(cmd_p) = ap_cmd_rewrite {
             rewrite_re
-                .replace_all(raw_md, |caps: &regex::Captures| format!("{cmd_p} {}", &caps[1]))
+                .replace_all(raw_md, |caps: &regex::Captures| {
+                    format!("{cmd_p} {}", &caps[1])
+                })
                 .to_string()
         } else {
             raw_md.to_string()
@@ -299,7 +353,12 @@ fn write_skill_folders(dest_skills_dir: &Path, selected: &[&str], ap_cmd_rewrite
     Ok(count)
 }
 
-fn merge_claude_or_codex_hooks(settings_path: &Path, ap_bin_posix: &str, selected: &[&str], include_precompact: bool) -> String {
+fn merge_claude_or_codex_hooks(
+    settings_path: &Path,
+    ap_bin_posix: &str,
+    selected: &[&str],
+    include_precompact: bool,
+) -> String {
     let sel: HashSet<&str> = selected.iter().copied().collect();
     let mut data: Value = if settings_path.exists() {
         let _ = fs::copy(settings_path, settings_path.with_extension("json.bak"));
@@ -347,7 +406,11 @@ fn merge_claude_or_codex_hooks(settings_path: &Path, ap_bin_posix: &str, selecte
     };
 
     if sel.contains("guard") {
-        ensure_hook("PreToolUse", format!("\"{ap_bin_posix}\" guard shield"), Some("Bash"));
+        ensure_hook(
+            "PreToolUse",
+            format!("\"{ap_bin_posix}\" guard shield"),
+            Some("Bash"),
+        );
         ensure_hook("Stop", format!("\"{ap_bin_posix}\" guard stop-gate"), None);
     }
     if include_precompact && sel.contains("baton") {
@@ -363,7 +426,10 @@ fn merge_claude_or_codex_hooks(settings_path: &Path, ap_bin_posix: &str, selecte
     }
     let _ = fs::write(
         settings_path,
-        format!("{}\n", serde_json::to_string_pretty(&data).unwrap_or_default()),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        ),
     );
     posix(settings_path)
 }
@@ -412,13 +478,20 @@ fn remove_claude_or_codex_hooks(settings_path: &Path) -> bool {
     } else {
         let _ = fs::write(
             settings_path,
-            format!("{}\n", serde_json::to_string_pretty(&data).unwrap_or_default()),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&data).unwrap_or_default()
+            ),
         );
     }
     true
 }
 
-fn merge_antigravity_hooks(hooks_path: &Path, ap_bin_posix: &str, selected: &[&str]) -> Option<String> {
+fn merge_antigravity_hooks(
+    hooks_path: &Path,
+    ap_bin_posix: &str,
+    selected: &[&str],
+) -> Option<String> {
     if !selected.contains(&"guard") {
         return None;
     }
@@ -455,7 +528,10 @@ fn merge_antigravity_hooks(hooks_path: &Path, ap_bin_posix: &str, selected: &[&s
     }
     let _ = fs::write(
         hooks_path,
-        format!("{}\n", serde_json::to_string_pretty(&data).unwrap_or_default()),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        ),
     );
     Some(posix(hooks_path))
 }
@@ -486,10 +562,156 @@ fn remove_antigravity_hooks(hooks_path: &Path) -> bool {
     } else {
         let _ = fs::write(
             hooks_path,
-            format!("{}\n", serde_json::to_string_pretty(&data).unwrap_or_default()),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&data).unwrap_or_default()
+            ),
         );
     }
     true
+}
+
+fn merge_opencode_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
+    let mut data: Value = if cfg_path.exists() {
+        fs::read_to_string(cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    if !data.is_object() {
+        data = json!({});
+    }
+    let obj = data.as_object_mut().unwrap();
+    obj.entry("$schema")
+        .or_insert_with(|| json!("https://opencode.ai/config.json"));
+    let mcp = obj.entry("mcp").or_insert_with(|| json!({}));
+    if !mcp.is_object() {
+        *mcp = json!({});
+    }
+    mcp.as_object_mut().unwrap().insert(
+        "agent-primitives".to_string(),
+        json!({
+            "type": "local",
+            "command": [ap_bin_posix, "mcp"],
+            "enabled": true
+        }),
+    );
+    if let Some(p) = cfg_path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let _ = fs::write(
+        cfg_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        ),
+    );
+    posix(cfg_path)
+}
+
+fn remove_opencode_mcp(cfg_path: &Path) {
+    let Ok(txt) = fs::read_to_string(cfg_path) else {
+        return;
+    };
+    let Ok(mut data) = serde_json::from_str::<Value>(&txt) else {
+        return;
+    };
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+    if let Some(mcp) = obj.get_mut("mcp").and_then(Value::as_object_mut) {
+        mcp.remove("agent-primitives");
+        if mcp.is_empty() {
+            obj.remove("mcp");
+        }
+    }
+    let only_schema = obj.is_empty() || (obj.len() == 1 && obj.contains_key("$schema"));
+    if only_schema {
+        let _ = fs::remove_file(cfg_path);
+    } else {
+        let _ = fs::write(
+            cfg_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&data).unwrap_or_default()
+            ),
+        );
+    }
+}
+
+fn merge_mcp_servers_json(cfg_path: &Path, ap_bin_posix: &str, include_trust: bool) -> String {
+    let mut data: Value = if cfg_path.exists() {
+        fs::read_to_string(cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    if !data.is_object() {
+        data = json!({});
+    }
+    let servers = data
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}));
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+    let mut entry = json!({
+        "command": ap_bin_posix,
+        "args": ["mcp"]
+    });
+    if include_trust {
+        entry["trust"] = json!(true);
+    }
+    servers
+        .as_object_mut()
+        .unwrap()
+        .insert("agent-primitives".to_string(), entry);
+    if let Some(p) = cfg_path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let _ = fs::write(
+        cfg_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        ),
+    );
+    posix(cfg_path)
+}
+
+fn remove_mcp_servers_json(cfg_path: &Path) {
+    let Ok(txt) = fs::read_to_string(cfg_path) else {
+        return;
+    };
+    let Ok(mut data) = serde_json::from_str::<Value>(&txt) else {
+        return;
+    };
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+    if let Some(srvs) = obj.get_mut("mcpServers").and_then(Value::as_object_mut) {
+        srvs.remove("agent-primitives");
+        if srvs.is_empty() {
+            obj.remove("mcpServers");
+        }
+    }
+    if obj.is_empty() {
+        let _ = fs::remove_file(cfg_path);
+    } else {
+        let _ = fs::write(
+            cfg_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&data).unwrap_or_default()
+            ),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -500,6 +722,7 @@ pub fn cmd_init(
     dir_opt: Option<&str>,
     home_opt: Option<&str>,
     with_hooks: bool,
+    with_mcp: bool,
     no_rules: bool,
 ) -> i32 {
     let home = home_opt
@@ -538,7 +761,8 @@ pub fn cmd_init(
     let explicit_agents = !matches!(agent_arg.trim().to_ascii_lowercase().as_str(), "" | "auto");
 
     if here || dir_opt.is_some() {
-        let repo_dir = fs::canonicalize(dir_opt.unwrap_or(".")).unwrap_or_else(|_| PathBuf::from(dir_opt.unwrap_or(".")));
+        let repo_dir = fs::canonicalize(dir_opt.unwrap_or("."))
+            .unwrap_or_else(|_| PathBuf::from(dir_opt.unwrap_or(".")));
         let agents_root = repo_dir.join(".agents");
         let bin_dst = match install_self_binary(&agents_root.join("bin")) {
             Ok(p) => p,
@@ -559,7 +783,11 @@ pub fn cmd_init(
         }
 
         let mut extra_dirs = Vec::new();
-        for (hid, rel_d) in [("pi", ".pi/skills"), ("claude", ".claude/skills"), ("grok", ".grok/skills")] {
+        for (hid, rel_d) in [
+            ("pi", ".pi/skills"),
+            ("claude", ".claude/skills"),
+            ("grok", ".grok/skills"),
+        ] {
             let dot_root = repo_dir.join(rel_d.split('/').next().unwrap());
             if (harnesses.contains(&hid) && explicit_agents) || dot_root.is_dir() {
                 let _ = write_skill_folders(&repo_dir.join(rel_d), &selected, Some(rel_ap_cmd));
@@ -572,9 +800,19 @@ pub fn cmd_init(
             let block = render_fenced_agents_block(rel_ap_cmd, &selected);
             let st_a = upsert_fenced_block(&repo_dir.join("AGENTS.md"), &block);
             rule_notes.push(format!("AGENTS.md ({st_a})"));
-            if (harnesses.contains(&"claude") && explicit_agents) || repo_dir.join("CLAUDE.md").exists() {
+            if (harnesses.contains(&"claude") && explicit_agents)
+                || repo_dir.join("CLAUDE.md").exists()
+            {
                 let st_c = upsert_fenced_block(&repo_dir.join("CLAUDE.md"), &block);
                 rule_notes.push(format!("CLAUDE.md ({st_c})"));
+            }
+        }
+
+        if selected.contains(&"guard") {
+            let gcfg_path = repo_dir.join(".agents").join("guard.json");
+            if !gcfg_path.exists() {
+                let cfg = ap_guard::rules::default_guard_config(&repo_dir);
+                let _ = ap_guard::rules::save_config(&repo_dir, &cfg);
             }
         }
 
@@ -589,7 +827,7 @@ pub fn cmd_init(
                     true,
                 ));
             }
-            if explicit_agents && harnesses.contains(&"codex") {
+            if !explicit_agents || harnesses.contains(&"codex") {
                 hook_paths.push(merge_claude_or_codex_hooks(
                     &repo_dir.join(".codex").join("hooks.json"),
                     &ap_abs,
@@ -598,10 +836,47 @@ pub fn cmd_init(
                 ));
             }
             if !explicit_agents || harnesses.contains(&"antigravity") {
-                if let Some(hp) = merge_antigravity_hooks(&repo_dir.join(".agents").join("hooks.json"), &ap_abs, &selected) {
+                if let Some(hp) = merge_antigravity_hooks(
+                    &repo_dir.join(".agents").join("hooks.json"),
+                    &ap_abs,
+                    &selected,
+                ) {
                     hook_paths.push(hp);
                 }
             }
+        }
+
+        let mut mcp_paths = Vec::new();
+        let ap_abs_here = posix(&bin_dst);
+        if with_mcp
+            || (explicit_agents && harnesses.contains(&"opencode"))
+            || repo_dir.join("opencode.json").exists()
+        {
+            mcp_paths.push(merge_opencode_mcp(
+                &repo_dir.join("opencode.json"),
+                &ap_abs_here,
+            ));
+        }
+        if with_mcp || (explicit_agents && harnesses.contains(&"qwen")) {
+            mcp_paths.push(merge_mcp_servers_json(
+                &repo_dir.join(".qwen").join("settings.json"),
+                &ap_abs_here,
+                true,
+            ));
+        }
+        if with_mcp || (explicit_agents && harnesses.contains(&"gemini-cli")) {
+            mcp_paths.push(merge_mcp_servers_json(
+                &repo_dir.join(".gemini").join("settings.json"),
+                &ap_abs_here,
+                true,
+            ));
+        }
+        if with_mcp {
+            mcp_paths.push(merge_mcp_servers_json(
+                &repo_dir.join(".mcp.json"),
+                &ap_abs_here,
+                false,
+            ));
         }
 
         let extras_s = if extra_dirs.is_empty() {
@@ -615,12 +890,24 @@ pub fn cmd_init(
             selected.len(),
             selected.join(",")
         );
-        println!("  - Self-contained native binary -> {rel_ap_cmd} <{}>", selected.join("|"));
+        println!(
+            "  - Self-contained native binary -> {rel_ap_cmd} <{}>",
+            selected.join("|")
+        );
         if !rule_notes.is_empty() {
             println!("  - Routing rules wired -> {}", rule_notes.join(", "));
         }
+        if !mcp_paths.is_empty() {
+            println!(
+                "  - Native stdio MCP (`ap mcp`) wired -> {}",
+                mcp_paths.join(", ")
+            );
+        }
         if !hook_paths.is_empty() {
-            println!("  - Native <2ms hooks merged (with .bak) -> {}", hook_paths.join(", "));
+            println!(
+                "  - Native <2ms hooks merged (with .bak) -> {}",
+                hook_paths.join(", ")
+            );
         }
         return 0;
     }
@@ -650,7 +937,11 @@ pub fn cmd_init(
     } else {
         global_bin_posix.clone()
     };
-    let skill_cmd_rewrite = if ap_on_path { None } else { Some(ap_cmd_str.as_str()) };
+    let skill_cmd_rewrite = if ap_on_path {
+        None
+    } else {
+        Some(ap_cmd_str.as_str())
+    };
 
     let mut skill_targets: Vec<PathBuf> = vec![home.join(".agents").join("skills")];
     let mut rule_targets: Vec<PathBuf> = Vec::new();
@@ -720,6 +1011,29 @@ pub fn cmd_init(
         }
     }
 
+    // Zero-flag automatic MCP registration for free/open coding agents (OpenCode, Qwen Code, Gemini CLI)
+    let mut mcp_paths = Vec::new();
+    if harnesses.contains(&"opencode") {
+        mcp_paths.push(merge_opencode_mcp(
+            &home.join(".config").join("opencode").join("opencode.json"),
+            &global_bin_posix,
+        ));
+    }
+    if harnesses.contains(&"qwen") {
+        mcp_paths.push(merge_mcp_servers_json(
+            &home.join(".qwen").join("settings.json"),
+            &global_bin_posix,
+            true,
+        ));
+    }
+    if harnesses.contains(&"gemini-cli") {
+        mcp_paths.push(merge_mcp_servers_json(
+            &home.join(".gemini").join("settings.json"),
+            &global_bin_posix,
+            true,
+        ));
+    }
+
     println!("[ap init] Global native Rust onboarding complete!");
     println!(
         "  - Harnesses configured: {}",
@@ -733,23 +1047,45 @@ pub fn cmd_init(
         "  - Synced {} primitives into {} skill directory(s): {}",
         selected.len(),
         skill_targets.len(),
-        skill_targets.iter().map(|t| posix(t)).collect::<Vec<_>>().join(", ")
+        skill_targets
+            .iter()
+            .map(|t| posix(t))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     println!("  - Installed native single binary: {global_bin_posix}");
     if !wired_rules.is_empty() {
-        println!("  - Global routing blocks wired: {}", wired_rules.join(", "));
+        println!(
+            "  - Global routing blocks wired: {}",
+            wired_rules.join(", ")
+        );
+    }
+    if !mcp_paths.is_empty() {
+        println!(
+            "  - Native stdio MCP (`ap mcp`) auto-wired: {}",
+            mcp_paths.join(", ")
+        );
     }
     if !hook_paths.is_empty() {
-        println!("  - Native <2ms hooks merged (with .bak): {}", hook_paths.join(", "));
+        println!(
+            "  - Native <2ms hooks merged (with .bak): {}",
+            hook_paths.join(", ")
+        );
     }
     0
 }
 
 pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) -> i32 {
     if here || dir_opt.is_some() {
-        let repo_dir = fs::canonicalize(dir_opt.unwrap_or(".")).unwrap_or_else(|_| PathBuf::from(dir_opt.unwrap_or(".")));
+        let repo_dir = fs::canonicalize(dir_opt.unwrap_or("."))
+            .unwrap_or_else(|_| PathBuf::from(dir_opt.unwrap_or(".")));
         let mut removed: HashSet<&str> = HashSet::new();
-        for sub in [".agents/skills", ".pi/skills", ".claude/skills", ".grok/skills"] {
+        for sub in [
+            ".agents/skills",
+            ".pi/skills",
+            ".claude/skills",
+            ".grok/skills",
+        ] {
             let sr = repo_dir.join(sub);
             for &nm in &ALL_PRIMITIVES {
                 let p = sr.join(nm);
@@ -758,19 +1094,34 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
                     removed.insert(nm);
                 }
             }
-            if sr.is_dir() && fs::read_dir(&sr).map(|mut r| r.next().is_none()).unwrap_or(false) {
+            if sr.is_dir()
+                && fs::read_dir(&sr)
+                    .map(|mut r| r.next().is_none())
+                    .unwrap_or(false)
+            {
                 let _ = fs::remove_dir(&sr);
             }
         }
         let _ = fs::remove_dir_all(repo_dir.join(".agents").join("bin"));
         let _ = fs::remove_file(repo_dir.join(".agents").join("ap.py"));
+        let _ = fs::remove_file(repo_dir.join(".agents").join("guard.json"));
         remove_antigravity_hooks(&repo_dir.join(".agents").join("hooks.json"));
         remove_claude_or_codex_hooks(&repo_dir.join(".claude").join("settings.json"));
         remove_claude_or_codex_hooks(&repo_dir.join(".codex").join("hooks.json"));
+        remove_opencode_mcp(&repo_dir.join("opencode.json"));
+        remove_mcp_servers_json(&repo_dir.join(".mcp.json"));
+        remove_mcp_servers_json(&repo_dir.join(".qwen").join("settings.json"));
+        remove_mcp_servers_json(&repo_dir.join(".gemini").join("settings.json"));
 
-        for dot in [".agents", ".pi", ".claude", ".codex", ".grok"] {
+        for dot in [
+            ".agents", ".pi", ".claude", ".codex", ".grok", ".qwen", ".gemini",
+        ] {
             let dp = repo_dir.join(dot);
-            if dp.is_dir() && fs::read_dir(&dp).map(|mut r| r.next().is_none()).unwrap_or(false) {
+            if dp.is_dir()
+                && fs::read_dir(&dp)
+                    .map(|mut r| r.next().is_none())
+                    .unwrap_or(false)
+            {
                 let _ = fs::remove_dir(&dp);
             }
         }
@@ -822,8 +1173,13 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
     remove_claude_or_codex_hooks(&home.join(".claude").join("settings.json"));
     remove_claude_or_codex_hooks(&home.join(".codex").join("hooks.json"));
     remove_antigravity_hooks(&home.join(".gemini").join("config").join("hooks.json"));
+    remove_opencode_mcp(&home.join(".config").join("opencode").join("opencode.json"));
+    remove_mcp_servers_json(&home.join(".qwen").join("settings.json"));
+    remove_mcp_servers_json(&home.join(".gemini").join("settings.json"));
 
-    let cur_exe = std::env::current_exe().ok().and_then(|p| fs::canonicalize(p).ok());
+    let cur_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| fs::canonicalize(p).ok());
     for f in [
         home.join(".agents").join("ap.py"),
         home.join(".agents").join("audit").join("audit_sessions.py"),
@@ -871,7 +1227,11 @@ pub fn cmd_doctor() -> i32 {
             if has_md { "OK" } else { "MISSING" }
         );
     }
-    if ok { 0 } else { 1 }
+    if ok {
+        0
+    } else {
+        1
+    }
 }
 
 pub fn cmd_status(dir_opt: Option<&str>, home_opt: Option<&str>) -> i32 {
@@ -883,7 +1243,14 @@ pub fn cmd_status(dir_opt: Option<&str>, home_opt: Option<&str>) -> i32 {
     let local_skills: Vec<&str> = ALL_PRIMITIVES
         .iter()
         .copied()
-        .filter(|nm| repo_dir.join(".agents").join("skills").join(nm).join("SKILL.md").is_file())
+        .filter(|nm| {
+            repo_dir
+                .join(".agents")
+                .join("skills")
+                .join(nm)
+                .join("SKILL.md")
+                .is_file()
+        })
         .collect();
     let has_fence = fs::read_to_string(repo_dir.join("AGENTS.md"))
         .map(|s| s.contains(FENCE_START))

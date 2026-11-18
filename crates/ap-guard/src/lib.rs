@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+pub mod rules;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -21,7 +22,10 @@ pub struct LedgerEntry {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "guard", about = "Sub-2ms exit-2 truth gate, loop breaker & blast-radius shield")]
+#[command(
+    name = "guard",
+    about = "Sub-2ms exit-2 truth gate, loop breaker & blast-radius shield"
+)]
 struct Cli {
     #[command(subcommand)]
     subcmd: SubCmd,
@@ -46,8 +50,49 @@ enum SubCmd {
         #[arg(long = "check")]
         checks: Vec<String>,
     },
+    /// Run full anti-slop code rules + project checks + .agents/smoke.ap (exit 2 on failure)
+    Verify {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "check")]
+        checks: Vec<String>,
+    },
+    /// Manage persistent deterministic code rules (.agents/guard.json)
+    Rule {
+        #[command(subcommand)]
+        action: RuleCmd,
+    },
     /// Clear loop ledger
     Reset,
+}
+
+#[derive(Subcommand, Debug)]
+enum RuleCmd {
+    /// Initialize .agents/guard.json with anti-slop rules & auto-detected test suite
+    Init {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+    },
+    /// Add a permanent deterministic forbidden-pattern rule (turns past agent mistakes into exit-2 gates)
+    Add {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value = "*")]
+        glob: String,
+        #[arg(long)]
+        forbid: String,
+        #[arg(long)]
+        msg: String,
+    },
+    /// List active rules & checks in .agents/guard.json
+    List {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+    },
 }
 
 struct SafetyPatterns {
@@ -63,7 +108,10 @@ fn safety_patterns() -> &'static SafetyPatterns {
         let destructive = vec![
             (
                 "recursive root/home delete",
-                Regex::new(r#"rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:/|~|\$HOME|\.\.)(?:[\s"';&|]|$)"#).unwrap(),
+                Regex::new(
+                    r#"rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:/|~|\$HOME|\.\.)(?:[\s"';&|]|$)"#,
+                )
+                .unwrap(),
             ),
             (
                 "forced git history overwrite",
@@ -85,7 +133,8 @@ fn safety_patterns() -> &'static SafetyPatterns {
         let secrets = vec![
             (
                 "OpenAI/Anthropic/xAI API key",
-                Regex::new(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,})\b").unwrap(),
+                Regex::new(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,})\b")
+                    .unwrap(),
             ),
             (
                 "GitHub Personal/App token",
@@ -122,6 +171,33 @@ pub fn guard_dir(cwd: &Path) -> PathBuf {
         let _ = fs::write(&gi, "*\n");
     }
     base
+}
+
+fn should_auto_sieve(cmd: &str) -> bool {
+    let t = cmd.trim();
+    if t.is_empty()
+        || t.contains("sieve")
+        || t.chars()
+            .any(|c| matches!(c, '|' | '>' | '<' | ';' | '\n' | '`'))
+        || t.contains("&&")
+        || t.contains("||")
+    {
+        return false;
+    }
+    const PREFIXES: &[&str] = &[
+        "pytest",
+        "python -m pytest",
+        "cargo test",
+        "cargo clippy",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "vitest run",
+        "go test",
+    ];
+    PREFIXES
+        .iter()
+        .any(|p| t == *p || t.starts_with(&format!("{p} ")))
 }
 
 pub fn inspect_text_safety(text: &str) -> Vec<String> {
@@ -181,7 +257,13 @@ fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn record_attempt(base: &Path, cmd_str: &str, exit_code: i32, output: &str, max_repeats: usize) -> (bool, usize, String) {
+pub fn record_attempt(
+    base: &Path,
+    cmd_str: &str,
+    exit_code: i32,
+    output: &str,
+    max_repeats: usize,
+) -> (bool, usize, String) {
     let mut entries = load_ledger(base);
     let cmd_trunc: String = cmd_str.chars().take(160).collect();
     if exit_code == 0 {
@@ -238,7 +320,12 @@ fn scan_conflict_and_secret_markers(root: &Path) -> Vec<String> {
                 for entry in rd.flatten() {
                     let p = entry.path();
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules" | "dist" | "build" | "__pycache__") {
+                    if name.starts_with('.')
+                        || matches!(
+                            name.as_str(),
+                            "target" | "node_modules" | "dist" | "build" | "__pycache__"
+                        )
+                    {
                         continue;
                     }
                     if p.is_dir() {
@@ -283,7 +370,11 @@ fn scan_conflict_and_secret_markers(root: &Path) -> Vec<String> {
 }
 
 fn spawn_command_list(cmd: &[String], cwd: &Path) -> Result<std::process::Output, std::io::Error> {
-    match Command::new(&cmd[0]).args(&cmd[1..]).current_dir(cwd).output() {
+    match Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .current_dir(cwd)
+        .output()
+    {
         Ok(o) => Ok(o),
         #[cfg(windows)]
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Command::new("cmd")
@@ -298,12 +389,96 @@ fn spawn_command_list(cmd: &[String], cwd: &Path) -> Result<std::process::Output
 fn spawn_shell_string(shell_cmd: &str, cwd: &Path) -> Result<std::process::Output, std::io::Error> {
     #[cfg(windows)]
     {
-        Command::new("cmd").args(["/C", shell_cmd]).current_dir(cwd).output()
+        Command::new("cmd")
+            .args(["/C", shell_cmd])
+            .current_dir(cwd)
+            .output()
     }
     #[cfg(not(windows))]
     {
-        Command::new("sh").args(["-c", shell_cmd]).current_dir(cwd).output()
+        Command::new("sh")
+            .args(["-c", shell_cmd])
+            .current_dir(cwd)
+            .output()
     }
+}
+
+fn collect_verification_issues(
+    scan_root: &Path,
+    explicit_checks: &[String],
+    scan_all_files: bool,
+    force_default_rules: bool,
+) -> Vec<String> {
+    let mut issues = scan_conflict_and_secret_markers(scan_root);
+    let cfg_opt = rules::load_config(scan_root);
+    let active_cfg = if let Some(c) = cfg_opt {
+        Some(c)
+    } else if force_default_rules {
+        Some(rules::default_guard_config(scan_root))
+    } else {
+        None
+    };
+
+    let mut all_checks: Vec<String> = explicit_checks.to_vec();
+    if let Some(cfg) = &active_cfg {
+        issues.extend(rules::evaluate_code_rules(scan_root, cfg, scan_all_files));
+        for c in &cfg.checks {
+            if !all_checks.contains(c) {
+                all_checks.push(c.clone());
+            }
+        }
+    }
+
+    for chk in all_checks {
+        match spawn_shell_string(&chk, scan_root) {
+            Ok(o) if !o.status.success() => {
+                let code = o.status.code().unwrap_or(1);
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                let lines: Vec<&str> = combined.lines().collect();
+                let start = lines.len().saturating_sub(12);
+                let tail = lines[start..].join("\n");
+                issues.push(format!("Check failed (`{chk}`, exit {code}):\n{tail}"));
+            }
+            Err(e) => {
+                issues.push(format!("Check failed (`{chk}`): {e}"));
+            }
+            _ => {}
+        }
+    }
+
+    let smoke_spec = scan_root.join(".agents").join("smoke.ap");
+    if smoke_spec.is_file() {
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if exe_stem.eq_ignore_ascii_case("ap") {
+                if let Ok(o) = Command::new(&exe)
+                    .args(["probe", "smoke", "--cwd"])
+                    .arg(scan_root)
+                    .arg("--spec")
+                    .arg(&smoke_spec)
+                    .output()
+                {
+                    if !o.status.success() {
+                        let out_s = format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                        issues.push(format!(
+                            "Live smoke gate failed (`.agents/smoke.ap`):\n{}",
+                            out_s.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    issues
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -365,7 +540,17 @@ pub fn run_cli(args: &[String]) -> i32 {
                     }
                     // Claude Code / Codex snake_case hook contract (`hook_event_name` / `tool_input`)
                     if map.contains_key("hook_event_name") || map.contains_key("tool_input") {
-                        let target_val = map.get("tool_input").cloned().unwrap_or(Value::Object(map));
+                        let is_claude_bash = map.get("hook_event_name").and_then(Value::as_str)
+                            == Some("PreToolUse")
+                            && map.get("tool_name").and_then(Value::as_str) == Some("Bash");
+                        let raw_cmd = map
+                            .get("tool_input")
+                            .and_then(|ti| ti.get("command"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let target_val =
+                            map.get("tool_input").cloned().unwrap_or(Value::Object(map));
                         let target_text = serde_json::to_string(&target_val).unwrap_or_default();
                         let findings = inspect_text_safety(&target_text);
                         if !findings.is_empty() {
@@ -374,6 +559,31 @@ pub fn run_cli(args: &[String]) -> i32 {
                             }
                             eprintln!("Action halted. Request explicit human confirmation or sanitize secrets first.");
                             return EXIT_BLOCK;
+                        }
+                        // RTK-style transparent command rewrite for noisy standalone test/lint commands in Claude Code
+                        if is_claude_bash && should_auto_sieve(&raw_cmd) {
+                            if let Ok(exe) = std::env::current_exe() {
+                                if exe
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("")
+                                    .eq_ignore_ascii_case("ap")
+                                {
+                                    let ap_p = exe.to_string_lossy().replace('\\', "/");
+                                    println!(
+                                        "{}",
+                                        json!({
+                                            "hookSpecificOutput": {
+                                                "hookEventName": "PreToolUse",
+                                                "permissionDecision": "allow",
+                                                "updatedInput": {
+                                                    "command": format!("\"{ap_p}\" sieve run -- {}", raw_cmd.trim())
+                                                }
+                                            }
+                                        })
+                                    );
+                                }
+                            }
                         }
                         return 0;
                     }
@@ -385,7 +595,9 @@ pub fn run_cli(args: &[String]) -> i32 {
                 for f in findings {
                     eprintln!("[GUARD BLOCKED | exit 2] {f}");
                 }
-                eprintln!("Action halted. Request explicit human confirmation or sanitize secrets first.");
+                eprintln!(
+                    "Action halted. Request explicit human confirmation or sanitize secrets first."
+                );
                 return EXIT_BLOCK;
             }
             println!("[guard] shield passed.");
@@ -431,7 +643,8 @@ pub fn run_cli(args: &[String]) -> i32 {
                 Err(err) => {
                     let msg = format!("Failed to spawn `{cmd_str}`: {err}\n");
                     eprint!("{msg}");
-                    let (tripped, count, sig) = record_attempt(&base, &cmd_str, 127, &msg, max_repeats);
+                    let (tripped, count, sig) =
+                        record_attempt(&base, &cmd_str, 127, &msg, max_repeats);
                     if tripped {
                         eprintln!(
                             "\n[GUARD LOOP BREAKER | exit 2] Failure signature {sig} repeated {count}x.\n\
@@ -455,7 +668,8 @@ pub fn run_cli(args: &[String]) -> i32 {
                 print!("{combined}");
             }
             let code = out.status.code().unwrap_or(1);
-            let (tripped, count, sig) = record_attempt(&base, &cmd_str, code, &combined, max_repeats);
+            let (tripped, count, sig) =
+                record_attempt(&base, &cmd_str, code, &combined, max_repeats);
             if tripped {
                 eprintln!(
                     "\n[GUARD LOOP BREAKER | exit 2] Failure signature {sig} repeated {count}x.\n\
@@ -489,7 +703,10 @@ pub fn run_cli(args: &[String]) -> i32 {
 
             if is_agy {
                 if let Some(m) = &hook_obj {
-                    let cont = m.get("continuationActive").and_then(Value::as_bool).unwrap_or(false);
+                    let cont = m
+                        .get("continuationActive")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
                     let reason = m
                         .get("terminationReason")
                         .and_then(Value::as_str)
@@ -502,7 +719,10 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             if is_claude {
                 if let Some(m) = &hook_obj {
-                    if m.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false) {
+                    if m.get("stop_hook_active")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         return 0;
                     }
                 }
@@ -516,27 +736,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 .map(PathBuf::from)
                 .unwrap_or(cwd);
 
-            let mut issues = scan_conflict_and_secret_markers(&scan_root);
-            for chk in checks {
-                match spawn_shell_string(&chk, &scan_root) {
-                    Ok(o) if !o.status.success() => {
-                        let code = o.status.code().unwrap_or(1);
-                        let combined = format!(
-                            "{}{}",
-                            String::from_utf8_lossy(&o.stdout),
-                            String::from_utf8_lossy(&o.stderr)
-                        );
-                        let lines: Vec<&str> = combined.lines().collect();
-                        let start = lines.len().saturating_sub(12);
-                        let tail = lines[start..].join("\n");
-                        issues.push(format!("Check failed (`{chk}`, exit {code}):\n{tail}"));
-                    }
-                    Err(e) => {
-                        issues.push(format!("Check failed (`{chk}`): {e}"));
-                    }
-                    _ => {}
-                }
-            }
+            let issues = collect_verification_issues(&scan_root, &checks, false, false);
 
             if is_agy {
                 if !issues.is_empty() {
@@ -565,5 +765,77 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             0
         }
+        SubCmd::Verify { cwd, all, checks } => {
+            let issues = collect_verification_issues(&cwd, &checks, all, true);
+            if !issues.is_empty() {
+                eprintln!(
+                    "[GUARD VERIFY BLOCKED | exit 2] {} verification failure(s):",
+                    issues.len()
+                );
+                for item in issues {
+                    eprintln!("- {item}");
+                }
+                return EXIT_BLOCK;
+            }
+            println!("[guard verify] PASS — 0 secret/conflict leaks, 0 code-rule/slop violations, all checks green.");
+            0
+        }
+        SubCmd::Rule { action } => match action {
+            RuleCmd::Init { cwd } => {
+                let cfg = rules::default_guard_config(&cwd);
+                match rules::save_config(&cwd, &cfg) {
+                    Ok(p) => {
+                        println!(
+                            "[guard rule init] Wrote {} rule(s) & {} check(s) -> {}",
+                            cfg.rules.len(),
+                            cfg.checks.len(),
+                            p.display()
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("[guard rule init] {e}");
+                        1
+                    }
+                }
+            }
+            RuleCmd::Add {
+                cwd,
+                id,
+                glob,
+                forbid,
+                msg,
+            } => {
+                if let Err(e) = Regex::new(&forbid) {
+                    eprintln!("[guard rule add] invalid regex `{forbid}`: {e}");
+                    return EXIT_BLOCK;
+                }
+                let mut cfg =
+                    rules::load_config(&cwd).unwrap_or_else(|| rules::default_guard_config(&cwd));
+                cfg.rules.retain(|r| r.id != id);
+                cfg.rules.push(rules::CodeRule {
+                    id: id.clone(),
+                    glob,
+                    forbid,
+                    message: msg,
+                });
+                match rules::save_config(&cwd, &cfg) {
+                    Ok(p) => {
+                        println!("[guard rule add] Saved rule `{id}` -> {}", p.display());
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("[guard rule add] {e}");
+                        1
+                    }
+                }
+            }
+            RuleCmd::List { cwd } => {
+                let cfg =
+                    rules::load_config(&cwd).unwrap_or_else(|| rules::default_guard_config(&cwd));
+                println!("{}", serde_json::to_string_pretty(&cfg).unwrap_or_default());
+                0
+            }
+        },
     }
 }

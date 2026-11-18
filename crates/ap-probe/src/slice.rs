@@ -102,7 +102,13 @@ fn end_ln(n: Node) -> usize {
 
 fn first_line_header(n: Node, src: &[u8]) -> String {
     let txt = n.utf8_text(src).unwrap_or("");
-    let hdr = txt.lines().next().unwrap_or("").trim().trim_end_matches('{').trim();
+    let hdr = txt
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('{')
+        .trim();
     let capped: String = hdr.chars().take(92).collect();
     if hdr.chars().count() > 92 {
         format!("{capped}...")
@@ -138,7 +144,10 @@ pub fn extract_signatures(ext: &str, text: &str) -> Vec<String> {
         let e1 = end_ln(child);
 
         match target.kind() {
-            "class_definition" | "class_declaration" | "abstract_class_declaration" | "impl_item" => {
+            "class_definition"
+            | "class_declaration"
+            | "abstract_class_declaration"
+            | "impl_item" => {
                 let hdr = first_line_header(target, src);
                 let mut m_sigs = Vec::new();
                 if let Some(body) = target.child_by_field_name("body") {
@@ -190,7 +199,10 @@ pub fn extract_signatures(ext: &str, text: &str) -> Vec<String> {
                     if vd.kind() == "variable_declarator" {
                         if let Some(vn) = vd.child_by_field_name("value") {
                             if matches!(vn.kind(), "arrow_function" | "function_expression") {
-                                sigs.push(format!("{} [L{s1}-{e1}]", first_line_header(child, src)));
+                                sigs.push(format!(
+                                    "{} [L{s1}-{e1}]",
+                                    first_line_header(child, src)
+                                ));
                             }
                         }
                     }
@@ -232,14 +244,25 @@ fn is_test_rel(rel_s: &str) -> bool {
         || low.rsplit('/').next().unwrap_or("").starts_with("test_")
 }
 
-fn render_bundle_section(root: &Path, reachable: &[PathBuf], max_bundle_kb: usize) -> (Vec<String>, HashSet<String>) {
+fn render_bundle_section(
+    root: &Path,
+    reachable: &[PathBuf],
+    max_bundle_kb: usize,
+) -> (Vec<String>, HashSet<String>) {
     let budget = max_bundle_kb.max(1) * 1024;
     let mut used = 0usize;
-    let mut sec = vec!["\n## Active Reachable Source Bundle (Skip Separate `read_file` Calls)".to_string()];
+    let mut sec =
+        vec!["\n## Active Reachable Source Bundle (Skip Separate `read_file` Calls)".to_string()];
     let mut bundled: HashSet<String> = HashSet::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    for mf_name in ["Cargo.toml", "package.json", "pyproject.toml", "go.mod", "Makefile"] {
+    for mf_name in [
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "Makefile",
+    ] {
         let mf = root.join(mf_name);
         if mf.is_file() {
             if let Ok(txt) = fs::read_to_string(&mf) {
@@ -248,7 +271,9 @@ fn render_bundle_section(root: &Path, reachable: &[PathBuf], max_bundle_kb: usiz
                     if used + numbered.len() <= budget {
                         used += numbered.len();
                         bundled.insert(mf_name.to_string());
-                        sec.push(format!("\n### {mf_name} ({n_ln} lines)\n```\n{numbered}\n```"));
+                        sec.push(format!(
+                            "\n### {mf_name} ({n_ln} lines)\n```\n{numbered}\n```"
+                        ));
                     }
                 }
             }
@@ -288,11 +313,18 @@ fn render_bundle_section(root: &Path, reachable: &[PathBuf], max_bundle_kb: usiz
         }
         used += numbered.len();
         bundled.insert(rel_s.clone());
-        sec.push(format!("\n### {rel_s} ({n_ln} lines)\n```\n{numbered}\n```"));
+        sec.push(format!(
+            "\n### {rel_s} ({n_ln} lines)\n```\n{numbered}\n```"
+        ));
     }
 
     if !skipped.is_empty() {
-        let preview = skipped.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+        let preview = skipped
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         sec.push(format!(
             "\n[bundle budget {max_bundle_kb} KB reached — {} unbundled file(s): {preview}; use `ap splice view <file> --symbol <Sym>` on demand]",
             skipped.len()
@@ -302,7 +334,10 @@ fn render_bundle_section(root: &Path, reachable: &[PathBuf], max_bundle_kb: usiz
 }
 
 fn resolve_ts_import(from_file: &Path, spec: &str, all_set: &HashSet<PathBuf>) -> Option<PathBuf> {
-    let base = from_file.parent().unwrap_or_else(|| Path::new(".")).join(spec);
+    let base = from_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(spec);
     let mut cands = vec![base.clone()];
     if let Some(ext) = base.extension().and_then(|e| e.to_str()) {
         if matches!(ext, "js" | "mjs" | "cjs") {
@@ -349,7 +384,8 @@ fn run_slice_inner(
     emit_stdout: bool,
 ) -> (SlicePayload, i32) {
     let t0 = Instant::now();
-    let (ts_imp_re, py_from_re, py_imp_re, go_mod_re, rs_mod_re, rs_use_re, c_inc_re) = slice_regexes();
+    let (ts_imp_re, py_from_re, py_imp_re, go_mod_re, rs_mod_re, rs_use_re, c_inc_re) =
+        slice_regexes();
     let root_canon = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     let mut files: Vec<PathBuf> = Vec::new();
@@ -426,7 +462,12 @@ fn run_slice_inner(
 
     let go_mod_name = fs::read_to_string(root_canon.join("go.mod"))
         .ok()
-        .and_then(|s| go_mod_re.captures(&s).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()))
+        .and_then(|s| {
+            go_mod_re
+                .captures(&s)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string())
+        })
         .unwrap_or_default();
 
     let mut imports_graph: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -450,12 +491,13 @@ fn run_slice_inner(
         match ext.as_str() {
             "py" => {
                 let cur_mod = file_to_py_mod.get(f).cloned().unwrap_or_default();
-                let pkg_parts: Vec<&str> = if f.file_name().and_then(|s| s.to_str()) == Some("__init__.py") {
-                    cur_mod.split('.').filter(|s| !s.is_empty()).collect()
-                } else {
-                    let v: Vec<&str> = cur_mod.split('.').filter(|s| !s.is_empty()).collect();
-                    v[..v.len().saturating_sub(1)].to_vec()
-                };
+                let pkg_parts: Vec<&str> =
+                    if f.file_name().and_then(|s| s.to_str()) == Some("__init__.py") {
+                        cur_mod.split('.').filter(|s| !s.is_empty()).collect()
+                    } else {
+                        let v: Vec<&str> = cur_mod.split('.').filter(|s| !s.is_empty()).collect();
+                        v[..v.len().saturating_sub(1)].to_vec()
+                    };
                 for cap in py_from_re.captures_iter(&txt) {
                     let dots = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                     let base = cap.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -572,7 +614,11 @@ fn run_slice_inner(
                 let parent = f.parent().unwrap_or(&root_canon);
                 for cap in c_inc_re.captures_iter(&txt) {
                     let inc = &cap[1];
-                    for base_dir in [parent, root_canon.as_path(), root_canon.join("include").as_path()] {
+                    for base_dir in [
+                        parent,
+                        root_canon.as_path(),
+                        root_canon.join("include").as_path(),
+                    ] {
                         let hp = base_dir.join(inc);
                         if let Ok(rc_h) = fs::canonicalize(&hp) {
                             if all_set.contains(&rc_h) {
@@ -640,7 +686,11 @@ fn run_slice_inner(
             continue;
         }
         for f in &files {
-            let rel_s = f.strip_prefix(&root_canon).unwrap_or(f).to_string_lossy().replace('\\', "/");
+            let rel_s = f
+                .strip_prefix(&root_canon)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .replace('\\', "/");
             if rel_s.contains(e) {
                 seeds.push(f.clone());
             }
@@ -649,12 +699,25 @@ fn run_slice_inner(
 
     if seeds.is_empty() {
         for f in &files {
-            let rel_s = f.strip_prefix(&root_canon).unwrap_or(f).to_string_lossy().replace('\\', "/");
+            let rel_s = f
+                .strip_prefix(&root_canon)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .replace('\\', "/");
             let fname = f.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if is_test_rel(&rel_s)
                 || matches!(
                     fname,
-                    "main.py" | "app.py" | "index.ts" | "index.js" | "main.ts" | "server.ts" | "main.go" | "lib.rs" | "main.rs" | "main.c"
+                    "main.py"
+                        | "app.py"
+                        | "index.ts"
+                        | "index.js"
+                        | "main.ts"
+                        | "server.ts"
+                        | "main.go"
+                        | "lib.rs"
+                        | "main.rs"
+                        | "main.c"
                 )
             {
                 seeds.push(f.clone());
@@ -684,10 +747,18 @@ fn run_slice_inner(
         }
     }
 
-    let pruned: Vec<PathBuf> = files.iter().filter(|f| !visited.contains(*f)).cloned().collect();
+    let pruned: Vec<PathBuf> = files
+        .iter()
+        .filter(|f| !visited.contains(*f))
+        .cloned()
+        .collect();
     let mut ext_counts: HashMap<String, usize> = HashMap::new();
     for f in &files {
-        let e = f.extension().and_then(|s| s.to_str()).unwrap_or("code").to_string();
+        let e = f
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("code")
+            .to_string();
         *ext_counts.entry(e).or_insert(0) += 1;
     }
     let dom_ext = ext_counts
@@ -699,13 +770,22 @@ fn run_slice_inner(
     let reach_mods: Vec<ReachableModule> = reachable
         .iter()
         .map(|f| {
-            let rel_s = f.strip_prefix(&root_canon).unwrap_or(f).to_string_lossy().replace('\\', "/");
+            let rel_s = f
+                .strip_prefix(&root_canon)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .replace('\\', "/");
             let imps = imports_graph
                 .get(f)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|t| t.strip_prefix(&root_canon).unwrap_or(&t).to_string_lossy().replace('\\', "/"))
+                .map(|t| {
+                    t.strip_prefix(&root_canon)
+                        .unwrap_or(&t)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
                 .collect();
             ReachableModule {
                 path: rel_s,
@@ -717,7 +797,12 @@ fn run_slice_inner(
 
     let pruned_rel: Vec<String> = pruned
         .iter()
-        .map(|f| f.strip_prefix(&root_canon).unwrap_or(f).to_string_lossy().replace('\\', "/"))
+        .map(|f| {
+            f.strip_prefix(&root_canon)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect();
     let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
 
@@ -736,7 +821,10 @@ fn run_slice_inner(
         return (payload, 0);
     }
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return (payload, 0);
     }
 
@@ -748,7 +836,12 @@ fn run_slice_inner(
         pruned.len()
     )];
     if !pruned_rel.is_empty() {
-        let preview = pruned_rel.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
+        let preview = pruned_rel
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         let ell = if pruned_rel.len() > 12 { ", ..." } else { "" };
         out_lines.push(format!("Pruned (skip reading): {preview}{ell}"));
     }

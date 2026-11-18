@@ -4,17 +4,17 @@
     "atlas_map_tokens_est": 438,
     "orientation_reduction_pct": 99.0,
     "raw_corpus_tokens_est": 42338,
-    "scan_latency_ms": 16.3,
+    "scan_latency_ms": 17.2,
     "scanned_files": 64,
     "scanned_target": "sdk_corpus (64 Rust modules via Tree-sitter)"
   },
-  "engine": "agent-primitives v1.0.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
-  "generated_at": "2026-11-18T03:29:44Z",
+  "engine": "agent-primitives v1.2.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
+  "generated_at": "2026-11-18T06:10:04Z",
   "idle_frontmatter_tokens_per_folder": {
-    "atlas": 58,
+    "atlas": 48,
     "baton": 60,
-    "guard": 57,
-    "probe": 59,
+    "guard": 49,
+    "probe": 55,
     "recall": 58,
     "sieve": 59,
     "splice": 61
@@ -24,12 +24,12 @@
     "dead_code_pruned_pct": 62.5,
     "pruned_dead_files": 15,
     "reachable_files": 9,
-    "slice_latency_ms": 6.32,
+    "slice_latency_ms": 6.35,
     "total_code_files": 24
   },
   "recall_benchmark_200_rules": {
     "avg_injected_tokens_top2": 47.0,
-    "median_query_latency_ms": 3.37,
+    "median_query_latency_ms": 3.36,
     "monolithic_agents_md_tokens": 6880,
     "token_reduction_pct": 99.3,
     "top1_recall_accuracy": "20/20 (100%)",
@@ -37,9 +37,9 @@
   },
   "sieve_benchmarks": [
     {
-      "latency_ms": 61.4,
-      "out_bytes": 2073,
-      "out_tokens_est": 519,
+      "latency_ms": 28.7,
+      "out_bytes": 2072,
+      "out_tokens_est": 518,
       "raw_bytes": 172075,
       "raw_tokens_est": 43019,
       "reduction_pct": 98.8,
@@ -47,7 +47,7 @@
       "workload": "sieve: 2,500-line CI/pytest log (Coding Agent)"
     },
     {
-      "latency_ms": 13.49,
+      "latency_ms": 12.41,
       "out_bytes": 417,
       "out_tokens_est": 105,
       "raw_bytes": 107906,
@@ -57,8 +57,8 @@
       "workload": "sieve: 400-record JSON API dump (Personal/Coding Agent)"
     },
     {
-      "fts5_search_latency_ms": 5.65,
-      "latency_ms": 10.32,
+      "fts5_search_latency_ms": 5.25,
+      "latency_ms": 11.43,
       "out_bytes": 582,
       "out_tokens_est": 146,
       "raw_bytes": 19100,
@@ -68,7 +68,7 @@
       "workload": "sieve: 300-record JSONL stream + bundled FTS5 search"
     },
     {
-      "latency_ms": 46.61,
+      "latency_ms": 11.42,
       "out_bytes": 792,
       "out_tokens_est": 198,
       "raw_bytes": 48174,
@@ -78,7 +78,7 @@
       "workload": "sieve: Noisy HTML page w/ JS+CSS + <table> (Personal Agent)"
     },
     {
-      "latency_ms": 9.37,
+      "latency_ms": 9.1,
       "out_bytes": 118,
       "out_tokens_est": 30,
       "raw_bytes": 70,
@@ -89,13 +89,13 @@
     }
   ],
   "splice_surgeon_benchmark": {
-    "atomic_apply_latency_ms": 2.46,
+    "atomic_apply_latency_ms": 2.33,
     "crlf_preserved": true,
     "full_module_tokens_est": 1048,
-    "repo_ast_check_latency_ms": 2.71,
+    "repo_ast_check_latency_ms": 2.83,
     "symbol_read_reduction_pct": 95.4,
     "symbol_view_tokens_est": 48,
-    "view_latency_ms": 0.68,
+    "view_latency_ms": 0.71,
     "zero_escaping_atomic_apply_ok": true
   }
 }
