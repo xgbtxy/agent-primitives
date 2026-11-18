@@ -260,11 +260,20 @@ fn spawn_detached_logged_server(
 }
 
 fn kill_process_tree(child: &mut Child) {
-    let pid = child.id();
+    let pid_s = child.id().to_string();
     #[cfg(windows)]
     {
         let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .args(["/PID", &pid_s, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("pkill")
+            .args(["-KILL", "-P", &pid_s])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
