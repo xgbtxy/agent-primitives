@@ -147,29 +147,27 @@ pub fn run_cli(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("[ap stats] Local Token & Windows Execution Ledger (100% offline)");
-    println!("----------------------------------------------------------------");
+    println!("[ap stats] Coding-Agent Efficiency & Thinking-Flow Ledger (100% offline)");
+    println!("------------------------------------------------------------------------");
     if total_calls == 0 {
-        println!("  No recorded runs yet. Use your coding agent normally (after `ap init`)");
-        println!("  or run `ap exec -c \"...\"` / `ap mcp`, then check `ap stats` again!");
+        println!("  No recorded runs yet. Use your coding agent normally (after `ap init`),");
+        println!("  then run `ap stats` anytime to see prevented derailments & speedups!");
         return 0;
     }
-    println!("  Accelerated Agent Actions : {total_calls} calls");
+    println!("  Accelerated Agent Steps      : {total_calls} actions");
     println!(
-        "  Context & Log Diet        : {:.1} KB -> {:.1} KB (-{compression_pct:.1}%)",
+        "  Thinking Derailments Healed  : {total_win_heals} Windows/shell crashes prevented before retry loops"
+    );
+    println!(
+        "  1-Shot Edits & Browser Gates : {total_guards} verified (Tree-sitter AST + Headless Edge/Chrome + 0-slop)"
+    );
+    println!(
+        "  Working-Memory Noise Filtered: {:.1} KB -> {:.1} KB (-{compression_pct:.1}% log/context clutter)",
         total_raw as f64 / 1024.0,
         total_out as f64 / 1024.0
     );
-    println!("  Windows Pitfalls Healed   : {total_win_heals} auto-fixes (UTF-8/GBK, PS `&&`/`curl`, PATH, locks)");
-    println!("  AST Edits & Smoke Gates   : {total_guards} verified checks (Tree-sitter + Edge CDP + 0-slop)");
     println!(
-        "  Direct Compression Saved  : ~{} tokens",
-        direct_tokens_saved
+        "  Byproduct Token Savings      : ~{net_tokens_saved} wasted tokens avoided (~{direct_tokens_saved} diet + ~{retry_tokens_avoided} retry)"
     );
-    println!(
-        "  Retry-Loop Tokens Avoided : ~{} tokens ({} failed turns prevented)",
-        retry_tokens_avoided, total_win_heals
-    );
-    println!("  Total Value Delivered     : ~{net_tokens_saved} tokens saved");
     0
 }

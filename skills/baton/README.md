@@ -16,7 +16,7 @@ Two failures plague long agent work:
 
 ```bash
 # Single-binary full install (macOS / Linux / Windows):
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.sh | sh
 # Or install ONLY baton into current repo:
 ap init --here --only baton
 ```

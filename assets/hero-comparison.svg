@@ -1,22 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 276" width="920" height="276" role="img" aria-label="Without ap vs With ap on Windows and macOS">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 276" width="920" height="276" role="img" aria-label="How ap solves LLM thinking bottlenecks on Windows and macOS">
   <rect width="920" height="276" rx="16" fill="#0b1120"/>
   <!-- Left Card: Raw Coding Agent -->
   <rect x="20" y="20" width="430" height="236" rx="12" fill="#131c31" stroke="#ef4444" stroke-opacity="0.45" stroke-width="1.5"/>
-  <text x="42" y="52" fill="#f87171" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="16" font-weight="700">WITHOUT ap (Raw Agent on Windows / Mac)</text>
-  <text x="42" y="86" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x UnicodeEncodeError: 'gbk' codec / UTF-8 BOM (235x)</text>
-  <text x="42" y="114" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x PowerShell ParserError: &amp;&amp;, &lt;&lt;EOF, curl alias (138x)</text>
-  <text x="42" y="142" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x EADDRINUSE port locks &amp; hung stdout pipes (155x)</text>
-  <text x="42" y="170" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x 50 KB build logs &amp; silent catch {} AI slop</text>
+  <text x="42" y="52" fill="#f87171" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="15.5" font-weight="700">WITHOUT ap · Why AI &lt;thinking&gt; Gets Stuck &amp; Sloppy</text>
+  <text x="42" y="86" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x Starts blind: reads dead files, guesses routes &amp; OS</text>
+  <text x="42" y="114" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x Flow derailed by Windows GBK/BOM &amp; PS &amp;&amp;/curl crashes</text>
+  <text x="42" y="142" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x Memory flooded by 50KB logs; hung servers block UI check</text>
+  <text x="42" y="170" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">x Gives up early: leaves broken links &amp; silent catch {}</text>
   <rect x="42" y="196" width="386" height="40" rx="8" fill="#2a141d"/>
-  <text x="235" y="221" text-anchor="middle" fill="#fca5a5" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="13.5" font-weight="700">430s  ·  60 tool calls  ·  1,613,689 tokens burned</text>
+  <text x="235" y="221" text-anchor="middle" fill="#fca5a5" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="13.5" font-weight="700">430s spiral · 60 chaotic steps · 7/8 (leaves AI slop)</text>
 
   <!-- Right Card: With ap -->
   <rect x="470" y="20" width="430" height="236" rx="12" fill="#0f2229" stroke="#22c55e" stroke-opacity="0.65" stroke-width="1.5"/>
-  <text x="492" y="52" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="16" font-weight="700">WITH ap (1-Line Install · Zero Workflow Change)</text>
-  <text x="492" y="86" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Locks UTF-8 + auto-heals PS &amp;&amp;, curl.exe &amp; POSIX</text>
-  <text x="492" y="114" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ PageRank map + BOM-free AST edits (&lt;3ms, 0 quotes)</text>
-  <text x="492" y="142" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Native Headless Edge/Chrome UI smoke (&lt;4.5s, 0 MB)</text>
-  <text x="492" y="170" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Auto-compresses logs -95% &amp; blocks AI slop</text>
+  <text x="492" y="52" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="15.5" font-weight="700">WITH ap · Smooth &lt;thinking&gt; → Edit → Verify Loop</text>
+  <text x="492" y="86" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Instant clarity: &lt;30ms PageRank map + UI↔API radar</text>
+  <text x="492" y="114" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Unbroken focus: auto-heals UTF-8, BOM, PS &amp;&amp; &amp; AST edits</text>
+  <text x="492" y="142" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Real-user eyes: &lt;4.5s Headless Edge/Chrome UI click smoke</text>
+  <text x="492" y="170" fill="#e2e8f0" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12.5">✓ Self-corrects: &lt;2ms exit-2 gate enforces 0-slop delivery</text>
   <rect x="492" y="196" width="386" height="40" rx="8" fill="#113325"/>
-  <text x="685" y="221" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="13.5" font-weight="700">182s (2.36x faster)  ·  401,930 tok (-75.1%)  ·  0 slop</text>
+  <text x="685" y="221" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="13.5" font-weight="700">182s (2.36x faster) · 23 focused steps · 8/8 (0 slop)</text>
 </svg>

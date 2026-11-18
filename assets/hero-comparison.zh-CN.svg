@@ -1,22 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 276" width="920" height="276" role="img" aria-label="未安装 ap vs 安装 ap 后的真实体验对比">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 276" width="920" height="276" role="img" aria-label="ap 如何顺着 AI 思考过程解决卡点并提效">
   <rect width="920" height="276" rx="16" fill="#0b1120"/>
   <!-- Left Card -->
   <rect x="20" y="20" width="430" height="236" rx="12" fill="#131c31" stroke="#ef4444" stroke-opacity="0.45" stroke-width="1.5"/>
-  <text x="42" y="52" fill="#f87171" font-family="ui-sans-serif, system-ui, -apple-system, Microsoft YaHei, PingFang SC, sans-serif" font-size="16" font-weight="700">未安装 ap（Windows / Mac 原生跑 Agent）</text>
-  <text x="42" y="86" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x GBK / UTF-8 BOM 中文与符号编码崩溃（本机实测 235 次）</text>
-  <text x="42" y="114" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x PowerShell 敲 &amp;&amp; / &lt;&lt;EOF / curl 语法报错（138 次）</text>
-  <text x="42" y="142" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x EADDRINUSE 端口锁死、后台起服务管道假死（155 次）</text>
-  <text x="42" y="170" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x 几万字编译日志灌爆上下文，留下空 catch {} 烂代码</text>
+  <text x="42" y="52" fill="#f87171" font-family="ui-sans-serif, system-ui, -apple-system, Microsoft YaHei, PingFang SC, sans-serif" font-size="15.5" font-weight="700">未装 ap · 大模型 &lt;thinking&gt; 为什么越干越乱？</text>
+  <text x="42" y="86" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x 起点盲猜：连读十几个废弃旧文件，摸不清主干与前后端契约</text>
+  <text x="42" y="114" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x 思路被打断：Windows 报 GBK 乱码 / PS &amp;&amp; 语法错，被迫空转排错</text>
+  <text x="42" y="142" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x 记忆被污染：几万行日志冲刷上下文，起服务锁死端口没法验页面</text>
+  <text x="42" y="170" fill="#cbd5e1" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">x 烂尾交差：缺少硬反馈，留下断链接口与空 catch {} 吞错代码</text>
   <rect x="42" y="196" width="386" height="40" rx="8" fill="#2a141d"/>
-  <text x="235" y="221" text-anchor="middle" fill="#fca5a5" font-family="ui-sans-serif, system-ui, Microsoft YaHei, sans-serif" font-size="13.5" font-weight="700">耗时 430 秒 · 折腾 60 轮 · 狂烧 1,613,689 Tokens</text>
+  <text x="235" y="221" text-anchor="middle" fill="#fca5a5" font-family="ui-sans-serif, system-ui, Microsoft YaHei, sans-serif" font-size="13.5" font-weight="700">耗时 430 秒 · 乱撞 60 轮 · 7/8 未全通（留 AI Slop）</text>
 
   <!-- Right Card -->
   <rect x="470" y="20" width="430" height="236" rx="12" fill="#0f2229" stroke="#22c55e" stroke-opacity="0.65" stroke-width="1.5"/>
-  <text x="492" y="52" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Microsoft YaHei, PingFang SC, sans-serif" font-size="16" font-weight="700">安装 ap 后（一行安装 · 平时怎么聊还怎么聊）</text>
-  <text x="492" y="86" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 自动锁死无 BOM UTF-8，无感自愈 PS &amp;&amp; / curl / 管道</text>
-  <text x="492" y="114" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 30ms 看清全局骨架，自动净化 BOM + 语法树安全改码</text>
-  <text x="492" y="142" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 直连系统自带无头 Edge 真机点页面验功能（0 MB 依赖）</text>
-  <text x="492" y="170" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 超长日志自动脱水 -95%，交卷前秒级拦截 AI Slop</text>
+  <text x="492" y="52" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Microsoft YaHei, PingFang SC, sans-serif" font-size="15.5" font-weight="700">安装 ap 后 · 顺着 AI 思考与验证全链路铺平道路</text>
+  <text x="492" y="86" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 开局看清全局：30ms 给准核心骨架、UI #id 与后端路由契约</text>
+  <text x="492" y="114" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 思路绝不中断：无感治愈 UTF-8/BOM/PS 语法坑 + 语法树安全改码</text>
+  <text x="492" y="142" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 像真人点页面：4.5s 直连系统自带无头 Edge 真机点击验收</text>
+  <text x="492" y="170" fill="#e2e8f0" font-family="ui-monospace, Consolas, Microsoft YaHei, monospace" font-size="12.5">✓ 自动发现自改：2ms 硬门禁拦住一切断链与 Slop，一次交出好代码</text>
   <rect x="492" y="196" width="386" height="40" rx="8" fill="#113325"/>
-  <text x="685" y="221" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, Microsoft YaHei, sans-serif" font-size="13.5" font-weight="700">耗时 182 秒（快 2.36 倍）· 仅 401,930 Tok（省 75.1%）· 0 Slop</text>
+  <text x="685" y="221" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, Microsoft YaHei, sans-serif" font-size="13.5" font-weight="700">耗时 182 秒（快 2.36 倍）· 仅 23 步直达 · 8/8 零 Slop</text>
 </svg>

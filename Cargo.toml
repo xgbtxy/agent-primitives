@@ -12,12 +12,12 @@ members = [
 ]
 
 [workspace.package]
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
 authors = ["xgbtxy <115146404+xgbtxy@users.noreply.github.com>"]
-repository = "https://github.com/xgbtxy/agent-primitives"
+repository = "https://github.com/xgbtxy/ap"
 
 [workspace.dependencies]
 base64 = "0.22"
@@ -45,7 +45,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Zero-config Windows & macOS execution engine for AI coding agents — heals shell/UTF-8 crashes, prevents hung servers & cuts token waste by 50-80%"
+description = "Execution engine built from real LLM <thinking> bottlenecks — eliminates blind reads, edit misses, Windows/macOS shell crashes & hung browser checks so coding agents finish 2x faster with zero slop"
 default-run = "ap"
 
 [[bin]]

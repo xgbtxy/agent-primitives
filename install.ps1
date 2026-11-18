@@ -1,11 +1,11 @@
 # 1-Line Zero-Config Windows Installer for `ap` (agent-primitives)
 # Usage:
-#   irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo = if ($env:AP_REPO) { $env:AP_REPO } else { "xgbtxy/agent-primitives" }
+$Repo = if ($env:AP_REPO) { $env:AP_REPO } else { "xgbtxy/ap" }
 $Version = if ($env:AP_VERSION) { $env:AP_VERSION } else { "latest" }
 $BinDir = if ($env:AP_INSTALL_DIR) { $env:AP_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null

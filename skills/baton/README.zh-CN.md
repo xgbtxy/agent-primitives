@@ -15,7 +15,7 @@
 
 ```bash
 # Windows PowerShell 一行安装：
-irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
 # 或仅在当前项目启用 baton：
 ap init --here --only baton
 ```

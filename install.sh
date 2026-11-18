@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 # 1-Line Zero-Config macOS / Linux Installer for `ap` (agent-primitives)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.sh | sh
 set -eu
 
-REPO="${AP_REPO:-xgbtxy/agent-primitives}"
+REPO="${AP_REPO:-xgbtxy/ap}"
 VERSION="${AP_VERSION:-latest}"
 BIN_DIR="${AP_INSTALL_DIR:-$HOME/.local/bin}"
 

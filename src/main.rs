@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "ap",
     version,
-    about = "Zero-config Windows & macOS execution engine for AI coding agents — heals shell/UTF-8 crashes, prevents hung servers & cuts token waste by 50-80%"
+    about = "Elevate AI coding efficiency on Windows & macOS by solving where LLM <thinking> gets derailed — instant repo clarity, BOM/AST-safe edits, crash-free shell exec & headless browser verification"
 )]
 struct TopCli {
     #[command(subcommand)]
@@ -39,7 +39,7 @@ enum TopCmd {
         #[arg(long)]
         no_rules: bool,
     },
-    /// View saved tokens, compressed logs & prevented Windows crashes
+    /// View prevented thinking derailments, browser verifications & efficiency gains
     #[command(visible_alias = "gain")]
     Stats {
         #[arg(long)]
@@ -140,8 +140,9 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             let code = if e.use_stderr() { 2 } else { 0 };
+            let is_help = e.kind() == clap::error::ErrorKind::DisplayHelp;
             let _ = e.print();
-            if !e.use_stderr() {
+            if is_help {
                 println!(
                     "\nInternal Engine Modules (automatically invoked by agents via MCP & hooks):\n  atlas / splice / probe / sieve / guard / recall / baton / audit"
                 );

@@ -10,12 +10,12 @@
 
 ```bash
 # macOS / Linux (auto-detects OpenCode, Qwen, Gemini CLI, Goose, Pi, Codex, Antigravity, Claude, Grok):
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.sh | sh
 ```
 
 ```powershell
 # Windows PowerShell:
-irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/xgbtxy/ap/main/install.ps1 | iex
 ```
 
 ```bash
