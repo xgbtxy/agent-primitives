@@ -1605,3 +1605,157 @@ fn test_sql_query_engine_ast_office_search_and_spa_render() {
         "Expected .docx search hit in same pass, got: {hits:?}"
     );
 }
+
+#[test]
+fn test_omni_atlas_sqlite_attach_unified_diff_and_append() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use rusqlite::Connection;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v17_home");
+
+    // 1. Real SQLite DB + multi-sheet .xlsx + GBK .csv + PNG header + .gz log
+    let db_path = root.join("app.sqlite");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts (cid TEXT PRIMARY KEY, tier TEXT, rate REAL);
+             INSERT INTO accounts VALUES ('C1', 'VIP', 0.1), ('C2', 'STD', 0.2);",
+        )
+        .unwrap();
+    }
+    let xlsx_p = root.join("ledger.xlsx");
+    {
+        let f = fs::File::create(&xlsx_p).unwrap();
+        let mut zw = ZipWriter::new(f);
+        zw.start_file("xl/workbook.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<workbook><sheets><sheet name="国内" sheetId="1"/><sheet name="海外" sheetId="2"/></sheets></workbook>"#.as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/sharedStrings.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            r#"<sst><si><t>cid</t></si><si><t>amt</t></si><si><t>C1</t></si><si><t>¥100.10</t></si><si><t>¥200.20</t></si></sst>"#.as_bytes(),
+        )
+        .unwrap();
+        zw.start_file("xl/worksheets/sheet1.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row></sheetData></worksheet>"#,
+        )
+        .unwrap();
+        zw.start_file("xl/worksheets/sheet2.xml", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>4</v></c></row></sheetData></worksheet>"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+    }
+    let (gbk_csv, _, _) = encoding_rs::GB18030.encode("科目,备注\r\n应收,正常\r\n");
+    fs::write(root.join("notes_gbk.csv"), gbk_csv.as_ref()).unwrap();
+
+    // 1a. `ap atlas map .` surfaces .xlsx sheets, GBK .csv cols, and .sqlite DB
+    let map_out = run_ap(root, &["atlas", "map", "."], None, &[("AP_HOME", &ap_home)]);
+    assert!(map_out.status.success());
+    let map_s = String::from_utf8_lossy(&map_out.stdout);
+    assert!(map_s.contains("ledger.xlsx") && map_s.contains("国内") && map_s.contains("海外"));
+    assert!(map_s.contains("notes_gbk.csv") && map_s.contains("gbk csv"));
+    assert!(map_s.contains("app.sqlite") && map_s.contains("sqlite3 db"));
+
+    // 2. `ap query` joins SQLite `.sqlite` table `accounts` directly with `ledger__all` (0.1+0.2=0.3 clean!)
+    let q_out = run_ap(
+        root,
+        &[
+            "query",
+            "-f",
+            "app.sqlite",
+            "-f",
+            "ledger=ledger.xlsx",
+            "--json",
+            "SELECT a.tier, SUM(l.amt), 0.1 + 0.2 FROM ledger__all l JOIN accounts a ON l.cid = a.cid GROUP BY a.tier",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(q_out.status.success());
+    let qj: Value = serde_json::from_slice(&q_out.stdout).unwrap();
+    assert_eq!(qj["rows"][0][0], "VIP");
+    assert_eq!(qj["rows"][0][1], "300.3");
+    assert_eq!(qj["rows"][0][2], "0.3");
+
+    // 3. `ap read` handles SQLite DB, PNG header dimensions, and .gz log decompression
+    let r_db = run_ap(
+        root,
+        &["read", "app.sqlite"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(String::from_utf8_lossy(&r_db.stdout).contains("Table `accounts` (2 rows)"));
+
+    let mut png_hdr = vec![
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+    ];
+    png_hdr.extend_from_slice(&640u32.to_be_bytes());
+    png_hdr.extend_from_slice(&480u32.to_be_bytes());
+    fs::write(root.join("hero.png"), &png_hdr).unwrap();
+    let r_png = run_ap(root, &["read", "hero.png"], None, &[("AP_HOME", &ap_home)]);
+    assert!(String::from_utf8_lossy(&r_png.stdout).contains("PNG 640x480 px"));
+
+    let gz_path = root.join("deploy.log.gz");
+    {
+        let mut enc = GzEncoder::new(fs::File::create(&gz_path).unwrap(), Compression::default());
+        enc.write_all(b"DEPLOY_OK: service started cleanly\n")
+            .unwrap();
+        enc.finish().unwrap();
+    }
+    let r_gz = run_ap(
+        root,
+        &["read", "deploy.log.gz"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(String::from_utf8_lossy(&r_gz.stdout).contains("DEPLOY_OK"));
+
+    // 4. `ap splice` supports `@@ APPEND:`, Unified Diff, and Tier-4 blank-line-resilient patching
+    fs::write(root.join("report.md"), "# Header\n- line 1\n").unwrap();
+    fs::write(
+        root.join("calc.ts"),
+        "export function calcTax(v: number): number {\n  const base = v * 2;\n\n  return base + 5;\n}\n",
+    )
+    .unwrap();
+
+    let append_spec = "@@ APPEND: report.md\n<<<\n- line 2 appended\n>>>\n@@ FILE: calc.ts\n<<<\n  const base = v * 2;\n  return base + 5;\n===\n  const base = v * 3;\n  return base + 10;\n>>>\n";
+    let ap_res = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(append_spec),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        ap_res.status.success(),
+        "Expected APPEND + Tier-4 blank-line match to succeed: {}",
+        String::from_utf8_lossy(&ap_res.stderr)
+    );
+    assert!(fs::read_to_string(root.join("report.md"))
+        .unwrap()
+        .contains("- line 1\n- line 2 appended"));
+
+    let udiff = "--- a/calc.ts\n+++ b/calc.ts\n@@ -1,4 +1,4 @@\n export function calcTax(v: number): number {\n-  const base = v * 3;\n+  const base = v * 4;\n   return base + 10;\n }\n";
+    let ud_res = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(udiff),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ud_res.status.success());
+    assert!(fs::read_to_string(root.join("calc.ts"))
+        .unwrap()
+        .contains("v * 4"));
+}

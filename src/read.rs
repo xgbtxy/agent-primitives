@@ -1,6 +1,6 @@
 use crate::stats::record_event;
 use clap::Parser;
-use flate2::read::{DeflateDecoder, ZlibDecoder};
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use regex::Regex;
 use serde_json::json;
 use std::fs;
@@ -532,6 +532,114 @@ fn parse_line_window(spec: &str, total: usize) -> Option<(usize, usize)> {
     Some((s, e))
 }
 
+fn extract_sqlite_md(p: &Path) -> Result<String, String> {
+    use rusqlite::{Connection, OpenFlags};
+    let conn = Connection::open_with_flags(
+        p,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open sqlite read-only: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .map_err(|e| e.to_string())?;
+    let tables: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    if tables.is_empty() {
+        return Ok("*(empty SQLite database — 0 user tables)*".to_string());
+    }
+    let mut sections = Vec::new();
+    for tbl in tables.iter().take(15) {
+        let qt = tbl.replace('"', "\"\"");
+        let cnt: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM \"{qt}\""), [], |r| r.get(0))
+            .unwrap_or(0);
+        let mut s = conn
+            .prepare(&format!("SELECT * FROM \"{qt}\" LIMIT 5"))
+            .map_err(|e| e.to_string())?;
+        let cols: Vec<String> = s.column_names().map(String::from).collect();
+        let mut out = vec![format!("## Table `{tbl}` ({cnt} rows)")];
+        if !cols.is_empty() {
+            out.push(format!("| {} |", cols.join(" | ")));
+            out.push(format!("| {} |", vec!["---"; cols.len()].join(" | ")));
+            if let Ok(mut rows) = s.query([]) {
+                while let Ok(Some(r)) = rows.next() {
+                    let cells: Vec<String> = (0..cols.len())
+                        .map(|i| match r.get_ref(i) {
+                            Ok(rusqlite::types::ValueRef::Null) | Err(_) => "NULL".to_string(),
+                            Ok(rusqlite::types::ValueRef::Integer(v)) => v.to_string(),
+                            Ok(rusqlite::types::ValueRef::Real(v)) => format!("{v}"),
+                            Ok(rusqlite::types::ValueRef::Text(b)) => String::from_utf8_lossy(b)
+                                .replace('|', "\\|")
+                                .replace('\n', " "),
+                            Ok(rusqlite::types::ValueRef::Blob(b)) => format!("<{}B>", b.len()),
+                        })
+                        .collect();
+                    out.push(format!("| {} |", cells.join(" | ")));
+                }
+            }
+        }
+        sections.push(out.join("\n"));
+    }
+    sections.push(format!(
+        "[Tip: run exact SQL joins via `ap query -f db=\"{}\" \"SELECT ...\"`]",
+        p.display()
+    ));
+    Ok(sections.join("\n\n"))
+}
+
+fn extract_tar_entries(tar_bytes: &[u8]) -> String {
+    let mut pos = 0usize;
+    let mut entries = Vec::new();
+    while pos + 512 <= tar_bytes.len() {
+        let blk = &tar_bytes[pos..pos + 512];
+        if blk.iter().all(|&b| b == 0) {
+            break;
+        }
+        let name_end = blk[..100].iter().position(|&b| b == 0).unwrap_or(100);
+        let name = String::from_utf8_lossy(&blk[..name_end]).trim().to_string();
+        let size_s = String::from_utf8_lossy(&blk[124..136]);
+        let oct = size_s.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+        let size = usize::from_str_radix(oct, 8).unwrap_or(0);
+        if !name.is_empty() && blk[156] != b'5' {
+            entries.push(format!("  - `{name}` ({size} B)"));
+        }
+        pos += 512 + size.div_ceil(512) * 512;
+    }
+    format!(
+        "## TAR Archive ({} file entries)\n{}",
+        entries.len(),
+        entries.into_iter().take(120).collect::<Vec<_>>().join("\n")
+    )
+}
+
+fn try_extract_image_meta(raw: &[u8], ext: &str) -> Option<String> {
+    let kb = (raw.len() as f64) / 1024.0;
+    if raw.len() >= 24 && &raw[..8] == b"\x89PNG\r\n\x1a\n" {
+        let w = u32::from_be_bytes([raw[16], raw[17], raw[18], raw[19]]);
+        let h = u32::from_be_bytes([raw[20], raw[21], raw[22], raw[23]]);
+        return Some(format!(
+            "[IMAGE METADATA: PNG {w}x{h} px | {kb:.1} KB — binary pixels omitted]"
+        ));
+    }
+    if raw.len() >= 10 && (&raw[..6] == b"GIF87a" || &raw[..6] == b"GIF89a") {
+        let w = u16::from_le_bytes([raw[6], raw[7]]);
+        let h = u16::from_le_bytes([raw[8], raw[9]]);
+        return Some(format!(
+            "[IMAGE METADATA: GIF {w}x{h} px | {kb:.1} KB — binary pixels omitted]"
+        ));
+    }
+    if matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico") {
+        return Some(format!(
+            "[IMAGE METADATA: {} | {kb:.1} KB — binary pixels omitted]",
+            ext.to_ascii_uppercase()
+        ));
+    }
+    None
+}
+
 fn fetch_url_bytes(url: &str) -> Result<Vec<u8>, String> {
     let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
     let out = Command::new(curl_bin)
@@ -626,16 +734,28 @@ pub fn run_cli(args: &[String]) -> i32 {
                 target.to_string(),
             ]);
         }
-        let Ok(b) = fs::read(p) else {
-            eprintln!("[ap read] failed to read file: {target}");
-            return 1;
-        };
         let ext_s = p
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        (b, ext_s, p.to_string_lossy().replace('\\', "/"))
+        let lbl = p.to_string_lossy().replace('\\', "/");
+        if matches!(ext_s.as_str(), "sqlite" | "db" | "sqlite3") || crate::query::is_sqlite_magic(p)
+        {
+            match extract_sqlite_md(p) {
+                Ok(md) => (md.into_bytes(), "sqlite-md".to_string(), lbl),
+                Err(e) => {
+                    eprintln!("[ap read] {e}");
+                    return 1;
+                }
+            }
+        } else {
+            let Ok(b) = fs::read(p) else {
+                eprintln!("[ap read] failed to read file: {target}");
+                return 1;
+            };
+            (b, ext_s, lbl)
+        }
     };
 
     let raw_len = raw_bytes.len() as u64;
@@ -671,29 +791,57 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 1;
             }
         },
-        "rendered-dom" => String::from_utf8_lossy(&raw_bytes).to_string(),
-        _ => {
-            let (decoded, enc_name, healed) = decode_any_bytes(&raw_bytes);
-            win_heals += healed;
-            format_tag = enc_name;
-            if (is_url
-                || matches!(
-                    ext.as_str(),
-                    "csv" | "tsv" | "json" | "jsonl" | "html" | "htm"
-                ))
-                && decoded.len() > 2400
-                && cli.lines.is_none()
-                && cli.query.is_none()
-            {
-                let sieve_store = std::env::var("SIEVE_HOME")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| std::env::temp_dir().join("ap_read_sieve"));
-                let sr = ap_sieve::compress_stream_in(&sieve_store, &decoded, &label, 0, 1.0);
-                sr.rendered
+        "rendered-dom" | "sqlite-md" => String::from_utf8_lossy(&raw_bytes).to_string(),
+        "tgz" | "gz" => {
+            let dec = GzDecoder::new(Cursor::new(&raw_bytes));
+            let mut ubuf = Vec::new();
+            let _ = dec.take(4 * 1024 * 1024).read_to_end(&mut ubuf);
+            if ext == "tgz" || label.to_ascii_lowercase().ends_with(".tar.gz") {
+                format_tag = "tar.gz";
+                extract_tar_entries(&ubuf)
             } else {
-                decoded
+                format_tag = "gzip";
+                let (decoded, _, _) = decode_any_bytes(&ubuf);
+                if decoded.len() > 2400 && cli.lines.is_none() && cli.query.is_none() {
+                    let sieve_store = std::env::var("SIEVE_HOME")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| std::env::temp_dir().join("ap_read_sieve"));
+                    ap_sieve::compress_stream_in(&sieve_store, &decoded, &label, 0, 1.0).rendered
+                } else {
+                    decoded
+                }
+            }
+        }
+        "tar" => extract_tar_entries(&raw_bytes),
+        _ => {
+            if let Some(img_meta) = try_extract_image_meta(&raw_bytes, &ext) {
+                format_tag = "image-meta";
+                img_meta
+            } else {
+                let (decoded, enc_name, healed) = decode_any_bytes(&raw_bytes);
+                win_heals += healed;
+                format_tag = enc_name;
+                if (is_url
+                    || matches!(
+                        ext.as_str(),
+                        "csv" | "tsv" | "json" | "jsonl" | "html" | "htm"
+                    ))
+                    && decoded.len() > 2400
+                    && cli.lines.is_none()
+                    && cli.query.is_none()
+                {
+                    let sieve_store = std::env::var("SIEVE_HOME")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| std::env::temp_dir().join("ap_read_sieve"));
+                    let sr = ap_sieve::compress_stream_in(&sieve_store, &decoded, &label, 0, 1.0);
+                    sr.rendered
+                } else {
+                    decoded
+                }
             }
         }
     };

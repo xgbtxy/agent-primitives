@@ -246,12 +246,12 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     let mut bullets = Vec::new();
     if sel.contains("probe") || sel.contains("atlas") {
         bullets.push(format!(
-            "1. **Orient & Impact (`atlas` / `probe`)**: Empty/new dir -> `{ap_cmd} atlas map .` (host runtimes). Existing repo -> `{ap_cmd} probe slice . --bundle` + `{ap_cmd} atlas product .` (UI/API/DOM `#id` contracts & `[SLOP RADAR]`). Before editing shared symbols across files -> `{ap_cmd} atlas impact <Sym> .` (exact AST callers & tests)."
+            "1. **Orient & Impact (`atlas` / `probe`)**: Start with `{ap_cmd} atlas map .` (<15ms Code + Docs + `.xlsx`/`.csv`/`.sqlite`/`.gz` X-Ray & host env). For web/UI apps -> `{ap_cmd} atlas product .` (DOM `#id` ↔ API contracts & `[SLOP RADAR]`). Before changing shared symbols across files -> `{ap_cmd} atlas impact <Sym> .`."
         ));
     }
     if sel.contains("splice") {
         bullets.push(format!(
-            "2. **Edit (`splice`)**: `{ap_cmd} splice view <file> --symbol <Sym>`. Batch writes/edits + unit tests in 1 call via `{ap_cmd} splice apply --cwd . --stdin --test` (`@@ WRITE: p` `<<<`...`>>>`, `@@ FILE: p` `<<<` old `===` new `>>>`, `@@ SYMBOL: p :: S` `<<<`...`>>>`)."
+            "2. **Edit (`splice`)**: `{ap_cmd} splice view <file> --symbol <Sym>`. Batch writes/appends/edits/diffs + unit tests in 1 call via `{ap_cmd} splice apply --cwd . --stdin --test` (`@@ WRITE: p` / `@@ APPEND: p` `<<<`...`>>>`, `@@ FILE: p` `<<<` old `===` new `>>>`, `@@ SYMBOL: p :: S`, or Git unified diff)."
         ));
     }
     if sel.contains("probe") || sel.contains("guard") {
@@ -264,7 +264,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Read, SQL Query, Search, Exec & Undo**: Read `.docx`/`.xlsx`/`.pdf`/GBK/SPA URLs via `{ap_cmd} read <target> [--render|--query Q|--lines A-B]`; exact SQL joins across multi-sheet `.xlsx`/GBK `.csv`/`.json` via `{ap_cmd} query -f a=x.xlsx -f b=y.csv --schema` / `\"SELECT ...\"`; AST+Office search via `{ap_cmd} search <pat> .`; safe UTF-8/PS shell via `{ap_cmd} exec -c \"<cmd>\"`; non-Git undo via `{ap_cmd} undo`."
+            "4. **Read, SQL Query, Search, Exec & Undo**: Read `.docx`/`.xlsx`/`.pdf`/`.sqlite`/`.gz`/GBK/SPA URLs via `{ap_cmd} read <target> [--render|--query Q|--lines A-B]`; exact SQL joins across `.sqlite` + multi-sheet `.xlsx` (`a__all`) + GBK `.csv`/`.json` via `{ap_cmd} query -f a=x.xlsx -f b=y.sqlite --schema` then `--stdin`; AST+Office search via `{ap_cmd} search <pat> .`; UTF-8/PS shell via `{ap_cmd} exec -c \"<cmd>\"`; undo via `{ap_cmd} undo`."
         ));
     }
     format!(

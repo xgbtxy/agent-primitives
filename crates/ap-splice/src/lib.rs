@@ -464,6 +464,40 @@ fn apply_spec_inner(
                     working_text.insert(p.clone(), (body.replace("\r\n", "\n"), nl_sep));
                     applied_summary.push(json!({"index": idx, "path": item.path, "op": "write"}));
                 }
+                "append" => {
+                    let body = item
+                        .content
+                        .as_deref()
+                        .unwrap_or(&item.new)
+                        .trim_start_matches('\u{FEFF}')
+                        .replace("\r\n", "\n");
+                    let merged = if cur_lf.is_empty() {
+                        body
+                    } else if cur_lf.ends_with('\n') {
+                        format!("{cur_lf}{body}")
+                    } else {
+                        format!("{cur_lf}\n{body}")
+                    };
+                    working_text.insert(p.clone(), (merged, nl_sep));
+                    applied_summary.push(json!({"index": idx, "path": item.path, "op": "append"}));
+                }
+                "prepend" => {
+                    let body = item
+                        .content
+                        .as_deref()
+                        .unwrap_or(&item.new)
+                        .trim_start_matches('\u{FEFF}')
+                        .replace("\r\n", "\n");
+                    let merged = if cur_lf.is_empty() {
+                        body
+                    } else if body.ends_with('\n') {
+                        format!("{body}{cur_lf}")
+                    } else {
+                        format!("{body}\n{cur_lf}")
+                    };
+                    working_text.insert(p.clone(), (merged, nl_sep));
+                    applied_summary.push(json!({"index": idx, "path": item.path, "op": "prepend"}));
+                }
                 "replace" => {
                     let old_lf = item
                         .old

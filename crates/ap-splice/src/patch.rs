@@ -22,9 +22,10 @@ pub struct EditOp {
 fn patch_regexes() -> &'static (Regex, Regex, Regex, Regex) {
     static RE: OnceLock<(Regex, Regex, Regex, Regex)> = OnceLock::new();
     RE.get_or_init(|| {
-        let hdr =
-            Regex::new(r"(?i)^@@\s*(FILE_ALL|FILE|EDIT|REPLACE|SYMBOL|WRITE)\s*:\s*(.+?)\s*$")
-                .unwrap();
+        let hdr = Regex::new(
+            r"(?i)^@@\s*(FILE_ALL|FILE|EDIT|REPLACE|SYMBOL|WRITE|APPEND|PREPEND)\s*:\s*(.+?)\s*$",
+        )
+        .unwrap();
         let open = Regex::new(r"(?i)^<<<(?:\s*(?:OLD|SEARCH|EOF))?\s*$").unwrap();
         let mid = Regex::new(r"(?i)^===(?:\s*(?:NEW|REPLACE))?\s*$").unwrap();
         let close = Regex::new(r"(?i)^>>>(?:\s*(?:END|REPLACE|EOF))?\s*$").unwrap();
@@ -156,7 +157,8 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                     all: false,
                 });
             }
-            "WRITE" => {
+            "WRITE" | "APPEND" | "PREPEND" => {
+                let op_name = kind.to_ascii_lowercase();
                 let path = rest;
                 let mut j = i;
                 while j < n && lines[j].trim().is_empty() {
@@ -170,7 +172,9 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                         i += 1;
                     }
                     if i >= n {
-                        return Err(format!("Unclosed `@@ WRITE: {path}` block: missing `>>>`."));
+                        return Err(format!(
+                            "Unclosed `@@ {kind}: {path}` block: missing `>>>`."
+                        ));
                     }
                     i += 1;
                     format!("{}\n", w_buf.join("\n"))
@@ -188,7 +192,7 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
                 };
                 ops.push(EditOp {
                     path,
-                    op: "write".to_string(),
+                    op: op_name,
                     old: String::new(),
                     new: String::new(),
                     content: Some(content_s),
@@ -202,8 +206,103 @@ pub fn parse_text_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
     Ok(ops)
 }
 
+fn parse_unified_diff(raw_diff: &str) -> Result<Vec<EditOp>, String> {
+    let norm = raw_diff.replace("\r\n", "\n");
+    let lines: Vec<&str> = norm.split('\n').collect();
+    let mut ops = Vec::new();
+    let mut cur_path = String::new();
+    let mut is_new_file = false;
+    let mut i = 0usize;
+    while i < lines.len() {
+        let ln = lines[i];
+        if let Some(rest) = ln.strip_prefix("--- ") {
+            let p = rest.split('\t').next().unwrap_or(rest).trim();
+            is_new_file = p == "/dev/null";
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = ln.strip_prefix("+++ ") {
+            let p = rest.split('\t').next().unwrap_or(rest).trim();
+            cur_path = p
+                .strip_prefix("b/")
+                .or_else(|| p.strip_prefix("a/"))
+                .unwrap_or(p)
+                .to_string();
+            i += 1;
+            continue;
+        }
+        if ln.starts_with("@@ ") && ln[3..].contains("@@") && !cur_path.is_empty() {
+            i += 1;
+            let mut old_buf = Vec::new();
+            let mut new_buf = Vec::new();
+            while i < lines.len() {
+                let hl = lines[i];
+                if hl.starts_with("diff --git ")
+                    || hl.starts_with("--- ")
+                    || hl.starts_with("+++ ")
+                    || (hl.starts_with("@@ ") && hl[3..].contains("@@"))
+                {
+                    break;
+                }
+                if hl.starts_with('\\') {
+                    i += 1;
+                    continue;
+                }
+                if let Some(add) = hl.strip_prefix('+') {
+                    new_buf.push(add);
+                } else if let Some(del) = hl.strip_prefix('-') {
+                    old_buf.push(del);
+                } else if let Some(ctx) = hl.strip_prefix(' ') {
+                    old_buf.push(ctx);
+                    new_buf.push(ctx);
+                } else if hl.is_empty() && i + 1 < lines.len() {
+                    old_buf.push("");
+                    new_buf.push("");
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            if is_new_file && old_buf.is_empty() {
+                ops.push(EditOp {
+                    path: cur_path.clone(),
+                    op: "write".to_string(),
+                    old: String::new(),
+                    new: String::new(),
+                    content: Some(format!("{}\n", new_buf.join("\n"))),
+                    symbol: String::new(),
+                    all: false,
+                });
+            } else if !old_buf.is_empty() {
+                ops.push(EditOp {
+                    path: cur_path.clone(),
+                    op: "replace".to_string(),
+                    old: old_buf.join("\n"),
+                    new: new_buf.join("\n"),
+                    content: None,
+                    symbol: String::new(),
+                    all: false,
+                });
+            }
+            continue;
+        }
+        i += 1;
+    }
+    if ops.is_empty() {
+        Err("Unified diff contained no applicable hunks.".to_string())
+    } else {
+        Ok(ops)
+    }
+}
+
 pub fn parse_edit_spec(raw_spec: &str) -> Result<Vec<EditOp>, String> {
     let stripped = raw_spec.trim_start_matches(|c: char| c == '\u{feff}' || c.is_whitespace());
+    if stripped.starts_with("diff --git ")
+        || stripped.starts_with("--- ")
+        || stripped.starts_with("Index: ")
+    {
+        return parse_unified_diff(stripped);
+    }
     if stripped.starts_with("@@") {
         return parse_text_spec(stripped);
     }
@@ -332,6 +431,62 @@ pub fn replace_crlf_tolerant(
                 "`old` matched {} locations after indentation normalization; add surrounding lines.",
                 indent_hits.len()
             ));
+        }
+
+        // Tier 4: Blank-line-insensitive unique match (rescues LLM blank-line elision/insertion)
+        let old_nonempty: Vec<&str> = old_stripped
+            .iter()
+            .copied()
+            .filter(|l| !l.is_empty())
+            .collect();
+        if old_nonempty.len() >= 2 {
+            let old_ne_ind = min_space(&old_nonempty);
+            let old_ne_ded: Vec<&str> = old_nonempty
+                .iter()
+                .map(|l| strip_n(l, old_ne_ind))
+                .collect();
+            let src_ne: Vec<(usize, &str)> = src_stripped
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, l)| !l.is_empty())
+                .collect();
+            let m = old_ne_ded.len();
+            if m <= src_ne.len() {
+                let mut ne_hits: Vec<(usize, usize, usize)> = Vec::new();
+                for k in 0..=(src_ne.len() - m) {
+                    let win_lines: Vec<&str> = src_ne[k..k + m].iter().map(|(_, l)| *l).collect();
+                    let w_ind = min_space(&win_lines);
+                    if win_lines
+                        .iter()
+                        .zip(&old_ne_ded)
+                        .all(|(w, o)| strip_n(w, w_ind) == *o)
+                    {
+                        ne_hits.push((src_ne[k].0, src_ne[k + m - 1].0, w_ind));
+                    }
+                }
+                if ne_hits.len() == 1 {
+                    let (s_idx, e_idx, w_ind) = ne_hits[0];
+                    let delta = (w_ind as isize) - (old_ne_ind as isize);
+                    let shifted_new: Vec<String> = new_lf
+                        .split('\n')
+                        .map(|l| {
+                            if l.trim().is_empty() {
+                                String::new()
+                            } else {
+                                let cur = l.bytes().take_while(|b| *b == b' ').count();
+                                let next_ind = ((cur as isize) + delta).max(0) as usize;
+                                format!("{}{}", " ".repeat(next_ind), &l[cur..])
+                            }
+                        })
+                        .collect();
+                    let mut updated: Vec<String> = Vec::new();
+                    updated.extend(src_lines[..s_idx].iter().map(|s| (*s).to_string()));
+                    updated.extend(shifted_new);
+                    updated.extend(src_lines[e_idx + 1..].iter().map(|s| (*s).to_string()));
+                    return Ok((updated.join("\n"), 1));
+                }
+            }
         }
     }
 

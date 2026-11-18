@@ -127,7 +127,7 @@ fn load_rows_into_table(
         .collect::<Vec<_>>()
         .join(", ");
     conn.execute_batch(&format!(
-        "DROP TABLE IF EXISTS \"{table_name}\"; CREATE TABLE \"{table_name}\" ({col_defs});"
+        "BEGIN; DROP TABLE IF EXISTS \"{table_name}\"; CREATE TABLE \"{table_name}\" ({col_defs});"
     ))
     .map_err(|e| format!("create table `{table_name}`: {e}"))?;
 
@@ -151,6 +151,8 @@ fn load_rows_into_table(
             .map_err(|e| format!("insert row in `{table_name}`: {e}"))?;
         inserted += 1;
     }
+    drop(stmt);
+    let _ = conn.execute_batch("COMMIT;");
     Ok((inserted, cols))
 }
 
@@ -220,6 +222,93 @@ fn load_json_or_jsonl(
     load_rows_into_table(conn, alias, &col_order, &rows)
 }
 
+pub fn is_sqlite_magic(p: &Path) -> bool {
+    use std::io::Read;
+    let mut hdr = [0u8; 16];
+    fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut hdr))
+        .map(|_| &hdr == b"SQLite format 3\0")
+        .unwrap_or(false)
+}
+
+fn attach_sqlite_db(
+    conn: &Connection,
+    alias: &str,
+    p: &Path,
+    path_str: &str,
+    schema_info: &mut Vec<Value>,
+) -> Result<(), String> {
+    let canon = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let clean_p = canon
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .replace('\'', "''");
+    conn.execute_batch(&format!("ATTACH DATABASE '{clean_p}' AS \"{alias}\";"))
+        .map_err(|e| format!("attach sqlite `{path_str}`: {e}"))?;
+
+    let mut tbl_stmt = conn
+        .prepare(&format!(
+            "SELECT name FROM \"{alias}\".sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ))
+        .map_err(|e| format!("inspect sqlite_master: {e}"))?;
+    let tbl_names: Vec<String> = tbl_stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+
+    for tbl in tbl_names {
+        let q_tbl = tbl.replace('"', "\"\"");
+        let row_cnt: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM \"{alias}\".\"{q_tbl}\""),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let mut col_stmt = conn
+            .prepare(&format!("PRAGMA \"{alias}\".table_info(\"{q_tbl}\")"))
+            .map_err(|e| e.to_string())?;
+        let cols: Vec<String> = col_stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
+
+        let safe_tbl = sanitize_ident(&tbl);
+        let sub_view = format!("{alias}__{safe_tbl}");
+        let _ = conn.execute_batch(&format!(
+            "CREATE TEMP VIEW IF NOT EXISTS \"{sub_view}\" AS SELECT * FROM \"{alias}\".\"{q_tbl}\";
+             CREATE TEMP VIEW IF NOT EXISTS \"{safe_tbl}\" AS SELECT * FROM \"{alias}\".\"{q_tbl}\";"
+        ));
+        schema_info.push(json!({
+            "table": safe_tbl,
+            "qualified": format!("{alias}.{tbl}"),
+            "source": format!("{path_str} [sqlite:{tbl}]"),
+            "rows": row_cnt,
+            "columns": cols,
+        }));
+    }
+    Ok(())
+}
+
+fn format_clean_real(v: f64) -> String {
+    if !v.is_finite() {
+        return v.to_string();
+    }
+    if (v - v.round()).abs() < 1e-9 {
+        return format!("{:.1}", v.round());
+    }
+    if v.abs() < 1e12 {
+        let r6 = (v * 1_000_000.0).round() / 1_000_000.0;
+        if (v - r6).abs() < 1e-9 * v.abs().max(1.0) {
+            let s = format!("{r6:.6}");
+            return s.trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+    }
+    v.to_string()
+}
+
 pub fn run_cli(args: &[String]) -> i32 {
     let cli = match QueryCli::try_parse_from(args) {
         Ok(c) => c,
@@ -239,11 +328,6 @@ pub fn run_cli(args: &[String]) -> i32 {
     let mut win_heals = 0u32;
     let mut total_raw_bytes = 0u64;
 
-    if let Err(e) = conn.execute_batch("BEGIN;") {
-        eprintln!("[ap query] {e}");
-        return 1;
-    }
-
     for spec in &cli.files {
         let (alias_raw, path_str) = match spec.split_once('=') {
             Some((a, p)) if !a.trim().is_empty() && Path::new(p.trim()).exists() => {
@@ -261,16 +345,26 @@ pub fn run_cli(args: &[String]) -> i32 {
             eprintln!("[ap query] file not found: {path_str}");
             return 1;
         }
-        let Ok(bytes) = fs::read(p) else {
-            eprintln!("[ap query] failed to read: {path_str}");
-            return 1;
-        };
-        total_raw_bytes += bytes.len() as u64;
         let ext = p
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+
+        if matches!(ext.as_str(), "sqlite" | "db" | "sqlite3") || is_sqlite_magic(p) {
+            total_raw_bytes += fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            if let Err(e) = attach_sqlite_db(&conn, &alias, p, &path_str, &mut schema_info) {
+                eprintln!("[ap query] {path_str}: {e}");
+                return 1;
+            }
+            continue;
+        }
+
+        let Ok(bytes) = fs::read(p) else {
+            eprintln!("[ap query] failed to read: {path_str}");
+            return 1;
+        };
+        total_raw_bytes += bytes.len() as u64;
 
         if ext == "xlsx" {
             let sheets = match extract_xlsx_sheets_raw(&bytes) {
@@ -352,7 +446,6 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
         }
     }
-    let _ = conn.execute_batch("COMMIT;");
 
     let resolved_sql = if cli.stdin || cli.sql.as_deref() == Some("-") {
         use std::io::Read;
@@ -409,14 +502,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             let cell = match row.get_ref(i) {
                 Ok(rusqlite::types::ValueRef::Null) | Err(_) => String::new(),
                 Ok(rusqlite::types::ValueRef::Integer(v)) => v.to_string(),
-                Ok(rusqlite::types::ValueRef::Real(v)) => {
-                    if (v - v.round()).abs() < 1e-9 {
-                        format!("{v:.1}")
-                    } else {
-                        let s = format!("{v:.4}");
-                        s.trim_end_matches('0').trim_end_matches('.').to_string()
-                    }
-                }
+                Ok(rusqlite::types::ValueRef::Real(v)) => format_clean_real(v),
                 Ok(rusqlite::types::ValueRef::Text(b)) => String::from_utf8_lossy(b).to_string(),
                 Ok(rusqlite::types::ValueRef::Blob(b)) => format!("<{}B blob>", b.len()),
             };

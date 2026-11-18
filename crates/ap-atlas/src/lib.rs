@@ -95,6 +95,14 @@ pub struct DocRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataRecord {
+    pub path: String,
+    pub bytes: u64,
+    pub mtime: u64,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtlasData {
     pub root: String,
     pub elapsed_ms: f64,
@@ -105,6 +113,8 @@ pub struct AtlasData {
     pub entrypoints: Vec<String>,
     pub top_code: Vec<CodeRecord>,
     pub top_docs: Vec<DocRecord>,
+    #[serde(default)]
+    pub top_data: Vec<DataRecord>,
     pub stale_todo_traps: Vec<String>,
 }
 
@@ -710,6 +720,7 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
 
     let mut code_records: Vec<CodeRecord> = Vec::new();
     let mut doc_records: Vec<DocRecord> = Vec::new();
+    let mut data_records: Vec<DataRecord> = Vec::new();
     let mut entrypoints: Vec<String> = Vec::new();
     let mut stale_todos: Vec<String> = Vec::new();
     let mut dir_counts: HashMap<String, usize> = HashMap::new();
@@ -765,15 +776,35 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
         }
 
         let Ok(meta) = entry.metadata() else { continue };
-        if meta.len() > 600_000 {
-            continue;
-        }
-
         let ext = fpath
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+        let is_data_ext = matches!(
+            ext.as_str(),
+            "xlsx"
+                | "csv"
+                | "tsv"
+                | "sqlite"
+                | "db"
+                | "sqlite3"
+                | "docx"
+                | "pptx"
+                | "pdf"
+                | "json"
+                | "jsonl"
+                | "gz"
+                | "tgz"
+                | "zip"
+        ) && !matches!(
+            fname.as_str(),
+            "package.json" | "package-lock.json" | "tsconfig.json" | "Cargo.lock"
+        );
+        if meta.len() > 600_000 && !is_data_ext {
+            continue;
+        }
+
         total_files += 1;
         total_raw_bytes += meta.len();
         *dir_counts.entry(top_bucket).or_insert(0) += 1;
@@ -870,6 +901,15 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
                 mtime,
                 headings,
             });
+        } else if is_data_ext {
+            if let Some(summary) = fingerprint_data_artifact(&fpath, &ext, meta.len()) {
+                data_records.push(DataRecord {
+                    path: rel_str,
+                    bytes: meta.len(),
+                    mtime,
+                    summary,
+                });
+            }
         }
     }
 
@@ -1060,6 +1100,8 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
 
     code_records.truncate(max_files);
     doc_records.truncate(max_files.min(8));
+    data_records.sort_by_key(|a| std::cmp::Reverse(a.mtime));
+    data_records.truncate(max_files.min(10));
 
     let root_name = root_canon
         .file_name()
@@ -1078,7 +1120,83 @@ pub fn scan_workspace(root: &Path, focus: &str, max_files: usize, stale_days: u6
         entrypoints,
         top_code: code_records,
         top_docs: doc_records,
+        top_data: data_records,
         stale_todo_traps: stale_todos,
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    if b < 1024 {
+        format!("{b}B")
+    } else if b < 1024 * 1024 {
+        format!("{:.1}KB", (b as f64) / 1024.0)
+    } else {
+        format!("{:.1}MB", (b as f64) / (1024.0 * 1024.0))
+    }
+}
+
+fn fingerprint_data_artifact(fpath: &Path, ext: &str, bytes: u64) -> Option<String> {
+    use std::io::Read;
+    let sz = human_bytes(bytes);
+    match ext {
+        "xlsx" => {
+            let mut sheets = Vec::new();
+            if let Ok(f) = fs::File::open(fpath) {
+                if let Ok(mut za) = zip::ZipArchive::new(f) {
+                    if let Ok(mut wf) = za.by_name("xl/workbook.xml") {
+                        let mut wxml = String::new();
+                        let _ = wf.read_to_string(&mut wxml);
+                        static SHEET_RE: OnceLock<Regex> = OnceLock::new();
+                        let re = SHEET_RE.get_or_init(|| {
+                            Regex::new(r#"<sheet\b[^>]*\bname="([^"]+)""#).unwrap()
+                        });
+                        for cap in re.captures_iter(&wxml) {
+                            sheets.push(cap[1].to_string());
+                        }
+                    }
+                }
+            }
+            if sheets.is_empty() {
+                Some(format!("{sz} xlsx workbook"))
+            } else {
+                Some(format!("{sz} xlsx, sheets={sheets:?}"))
+            }
+        }
+        "csv" | "tsv" => {
+            let mut head_buf = Vec::with_capacity(2048);
+            if let Ok(f) = fs::File::open(fpath) {
+                let _ = f.take(2048).read_to_end(&mut head_buf);
+            }
+            let (txt, enc) = if let Ok(s) =
+                std::str::from_utf8(head_buf.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&head_buf))
+            {
+                (s.to_string(), "utf-8")
+            } else {
+                let (cow, _) = encoding_rs::GB18030.decode_without_bom_handling(&head_buf);
+                (cow.into_owned(), "gbk")
+            };
+            let sep = if ext == "tsv" { '\t' } else { ',' };
+            let cols: Vec<String> = txt
+                .lines()
+                .next()
+                .unwrap_or("")
+                .split(sep)
+                .take(8)
+                .map(|c| c.trim().trim_matches('"').to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            Some(format!("{sz} {enc} {ext}, cols={cols:?}"))
+        }
+        "sqlite" | "db" | "sqlite3" => {
+            let mut hdr = [0u8; 16];
+            let is_sql = fs::File::open(fpath)
+                .and_then(|mut f| f.read_exact(&mut hdr))
+                .map(|_| &hdr == b"SQLite format 3\0")
+                .unwrap_or(false);
+            let kind = if is_sql { "sqlite3 db" } else { "db file" };
+            Some(format!("{sz} {kind}"))
+        }
+        _ => Some(format!("{sz} {ext}")),
     }
 }
 
@@ -1217,6 +1335,15 @@ pub fn render_atlas_md(data: &AtlasData) -> String {
                 format!(" -> {}", d.headings[..take_n].join(" / "))
             };
             lines.push(format!("- `{}` ({}L){hd}", d.path, d.lines));
+        }
+    }
+    if !data.top_data.is_empty() {
+        lines.push(
+            "\n## Data, Office & DB Artifacts (`ap query -f a=<file> --schema` / `ap read <file>`)"
+                .to_string(),
+        );
+        for dt in &data.top_data {
+            lines.push(format!("- `{}` [{}]", dt.path, dt.summary));
         }
     }
     if !data.stale_todo_traps.is_empty() {

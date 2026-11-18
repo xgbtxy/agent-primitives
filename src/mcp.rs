@@ -114,6 +114,19 @@ fn mcp_tools_schema() -> Value {
                             "required": ["path", "old", "new"]
                         }
                     },
+                    "appends": {
+                        "type": "array",
+                        "description": "Zero-truncation appends to end of files [{path, content}]",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["path", "content"]
+                        }
+                    },
+                    "diff": { "type": "string", "description": "Optional standard Git unified diff (`--- a/...`, `+++ b/...`, `@@ ... @@`)" },
                     "run_tests": { "type": "boolean", "description": "Run auto-detected test suite after applying" }
                 }
             }
@@ -378,10 +391,34 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                     }
                 }
             }
+            if let Some(appends) = args.get("appends").and_then(Value::as_array) {
+                for a in appends {
+                    if let (Some(p), Some(c)) = (
+                        a.get("path").and_then(Value::as_str),
+                        a.get("content").and_then(Value::as_str),
+                    ) {
+                        ops.push(json!({ "op": "append", "path": p, "content": c }));
+                    }
+                }
+            }
+            if let Some(diff_raw) = args
+                .get("diff")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                if let Ok(parsed) = ap_splice::patch::parse_edit_spec(diff_raw) {
+                    for p_op in parsed {
+                        if let Ok(v) = serde_json::to_value(p_op) {
+                            ops.push(v);
+                        }
+                    }
+                }
+            }
             if ops.is_empty() {
                 return (
                     false,
-                    "Provide at least one entry in `writes` or `edits`.".to_string(),
+                    "Provide at least one entry in `writes`, `edits`, `appends`, or `diff`."
+                        .to_string(),
                 );
             }
             let mut touched_for_undo = Vec::new();
