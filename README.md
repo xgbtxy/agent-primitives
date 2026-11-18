@@ -1,8 +1,10 @@
 # agent-primitives (`ap` v1.2)
 
-**Pure-Rust, Single-Binary, Zero-Slop Cognitive & OS Infrastructure for Free and Frontier Coding Agents.**
+**Observe Real Coding-Agent Runs · Synthesize Mature Open-Source Engineering · Pure-Rust Single Binary to Elevate Core Coding Capability.**
 
-[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[Engineering Handbook (EN)](./HANDBOOK.md)** | **[核心工程宪章 (中文)](./HANDBOOK.zh-CN.md)** · [Architecture](./DESIGN.md) · [Playbook](./PLAYBOOK.md)
+[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[Core R&D Philosophy (EN)](./HANDBOOK.md)** | **[核心研发理念与演进手册 (中文)](./HANDBOOK.zh-CN.md)** · [Architecture](./DESIGN.md) · [Playbook](./PLAYBOOK.md)
+
+> **Our Core Philosophy**: No preachy prompt walls (AI Slop) and no reinventing fragile wheels from scratch. Our method is empirical and direct: **(1) observe real coding-agent execution logs and `<thinking>` bottlenecks in the wild; (2) survey and distill battle-tested mechanisms from mature open-source projects (`Aider`, `RTK`, `SWE-agent`, official `MCP` standards); and (3) ship a zero-dependency Pure-Rust single binary (`ap`) that upgrades core coding capability**—so even a complete beginner on a `$0` free coding agent gets immediate, measurable gains in speed, token efficiency, and zero-slop code quality.
 
 ---
 

@@ -1,60 +1,57 @@
-# `agent-primitives` (`ap` v1.2) — Engineering Constitution & Evolution Handbook
+# `agent-primitives` (`ap` v1.2) — Core R&D Philosophy & Continuous Evolution Handbook
 
 [English](./HANDBOOK.md) | [简体中文](./HANDBOOK.zh-CN.md) · [Home](./README.md) · [Architecture](./DESIGN.md) · [Playbook](./PLAYBOOK.md)
 
-> **Mandate**: Build zero-slop, sub-20ms, Pure-Rust deterministic instruments grounded directly in **how LLMs actually think, drift, and verify**—so even a complete beginner using a **$0 free coding agent on Windows** gets senior-engineer reliability and massive token/time savings out of the box.
+> **Mission**: We do not build heavy multi-agent wrappers or preachy prompt checklists (AI Slop). Our engineering method is direct and empirical: **observe how real coding agents actually execute and think in the wild, deeply survey and synthesize battle-tested mechanisms from mature open-source projects, and ship ultra-lean Pure-Rust primitives that elevate core coding capability**—so even a complete beginner using a `$0` free coding agent gets measurable speed, token, and code-quality gains.
 
 ---
 
-## 1. Core Philosophy: Upgrade the LLM's Cognitive Loop, Never Write Prompt Fluff
+## 1. Our Three Core Engineering Principles
 
-### 1.1 Map Every Primitive to an Observed `<thinking>` Bottleneck
-Dissecting over **`101,108` real local tool calls** and hundreds of thousands of raw `<thinking>` tokens across `Codex`, `OpenCode`, `Pi`, `Antigravity`, `Claude Code`, and `Grok` reveals **four universal cognitive bottlenecks**:
+### 1.1 Observe Real Coding-Agent Execution & `<thinking>` Processes First
+Speculative features are rejected. Every upgrade starts by inspecting **`101,108+` real local tool calls and raw `<thinking>` streams** across `OpenCode`, `Codex`, `Pi`, `Claude Code`, `Antigravity`, `Qwen Code`, `Gemini CLI`, and `Grok` on authentic user prompts (1-sentence beginner wishes, legacy bugfixes, and empty-directory random projects):
+- **Turns 1–5 (Cold-Start Guessing & Slop Contamination)**: Agents burn `10k–35k` thinking chars guessing local runtimes (`node:sqlite`? `--experimental-strip-types` `enum` traps? headless browser?) or reading unreferenced legacy files and copying `: any` and silent `catch {}` patterns.
+- **Turns 6–15 (Cross-File Working-Memory Drift & Patch Retries)**: Across 6+ files, models mismatch HTML `id="..."` vs. JS `getElementById`, mismatch `fetch('/api/...')` vs. backend routes, or fail edits due to 2-space indentation shifts and Windows PowerShell quoting.
+- **The Last 70%+ of Turns & Tokens (Verification Bottlenecks)**: In live Windows runs, vanilla agents spent **`71%–75%` of all turns** fighting hung background servers, orphaned ports, and hand-rolled 150-line Chrome DevTools scripts.
+- **Why Prose Rules Fail**: Long `AGENTS.md` reminders get ignored under context load; only deterministic tool checks and **`exit 2` physical gates** force self-discovery and self-repair before completion.
 
-1. **Cold-Start Runtime & Graph Blindness (`Turn 1–5`)**: Models burn `10k–35k` thinking chars guessing local runtimes (`node:sqlite`? `--experimental-strip-types` `enum` traps? headless browser?) or wandering unreferenced legacy slop files.
-   - **Organ (`ap-atlas` + `ap-probe slice`)**: Personalized PageRank (`PPR`, 8 power iterations over Tree-sitter imports) + cold-start Host Runtime Fingerprinting + dead-file pruning (`6.35 ms`).
-2. **Cross-File Working-Memory Drift & Patch Friction (`Turn 6–15`)**: Across 6+ files, models drop HTML `#id` ↔ JS `getElementById` contracts, mismatch `fetch('/api/...')` ↔ backend routes, or fail edits on 2-space indentation drift and Windows PowerShell quoting.
-   - **Organ (`ap-atlas product` + `ap-splice` + `ap mcp`)**: Static DOM `#id` & HTTP route contract verifier (`<17 ms`), Aider-inspired **3-tier exact → rstrip → indentation-delta** AST-gated patcher (`2.33 ms`), and structured JSON-RPC **`ap mcp`** (`0` shell quoting).
-3. **The 70% Verification Token Tax & Windows Server Hangs (`Turn 16–60`)**: In live Windows runs, vanilla agents spent **71%–75% of all turns** (`16–35` turns, `850k+` tokens) fighting hung background servers, orphaned ports, and raw Chrome DevTools WebSockets.
-   - **Organ (`ap-probe smoke`)**: Pure-Rust ephemeral server spawner (file-backed logs = `0` Windows pipe deadlocks) + native `TcpStream` **Interactive Headless Edge/Chrome CDP** (`OPEN`, `FILL`, `SELECT`, `CLICK`, `EVAL`, automatic `pageerror`/`console.error` capture) + `taskkill /T /F` tree cleanup in **1 single `<4.5s` turn**.
-4. **Prose Rule Amnesia & AI Slop (`AGENTS.md` Is Not Enough)**: Models ignore prose reminders under load, writing `: any`, `@ts-ignore`, or silent `catch (e) {}` blocks that swallow failures.
-   - **Organ (`ap-guard` + `ap-sieve` + `ap-baton` + `ap-recall`)**: Unbypassable `<2 ms` **`exit 2`** code rules (`.agents/guard.json`), ecosystem checker delegation (`tsc`/`biome`/`cargo check`/tests), `rtk`-style transparent `PreToolUse` `updatedInput` auto-sieve compression, and `<400-tok` `DO NOT RETRY` capsules.
+### 1.2 Survey & Synthesize Mature Open-Source Engineering (Never Reinvent 0-to-1 Slop)
+Instead of reinventing fragile wheels from scratch, we study proven open-source systems and distill their sharpest mechanisms into one zero-dependency Rust binary:
+- **From `Aider`**: Tree-sitter import-graph **Personalized PageRank (`PPR`, 8 power iterations)** for high-signal repo maps, plus **3-tier edit matching (exact → trailing-whitespace normalized → relative indentation-delta shift)** to eliminate whitespace/indentation patch retries.
+- **From `RTK (rtk-ai/rtk)`**: Transparent `PreToolUse` `updatedInput` command rewriting to pipe noisy test runners through lossless log compression automatically.
+- **From `SWE-agent` (ACI)**: Pre-write 6-language Tree-sitter syntax verification, closest-anchor line hints (`closest anchor at L42`) on edit misses, and cold-start host runtime fingerprinting.
+- **From Official `MCP` & Local Ecosystem Standards**: Built-in **`ap mcp`** JSON-RPC 2.0 stdio server so free models call structured tools with zero shell-quoting errors, native `TcpStream` **Headless Edge/Chrome CDP** (`OPEN`, `FILL`, `SELECT`, `CLICK`, `EVAL`), and automatic delegation to installed `tsc`, `biome`, `cargo check`, and `pytest`.
 
-### 1.2 Zero-Brain Beginner UX + Best-of-Breed Ecosystem Leverage (No 0-to-1 Reinvention)
-- **1 Line for Beginners (`ap init`)**: Auto-detects **free & commercial agents** (`OpenCode`, `Qwen Code`, `Gemini CLI`, `Goose`, `Pi`, `Codex`, `Antigravity`, `Claude Code`, `Grok`, `OpenClaw`, `Hermes`), auto-wires native **`ap mcp`** (`opencode.json`, `.qwen/settings.json`, `.gemini/settings.json`) + concise `<140-tok` rules + hooks. A beginner never learns `ap` flags—their free AI automatically calls `ap_orient`, `ap_edit`, `ap_smoke`, and `ap_verify`.
-- **Leverage Mature Standards**: Speaks standard **MCP JSON-RPC 2.0**, embeds official **Tree-sitter** C grammars & **SQLite FTS5**, drives system **Edge/Chrome CDP**, and delegates to installed `tsc`/`biome`/`cargo`/`pytest` rather than reinventing compilers.
-
----
-
-## 2. Six Non-Negotiable Senior-Engineer Laws
-
-1. **Zero AI Slop**: No preachy prompt walls, no `Regex::new` inside inner loops, no swallowed errors, no `: any` shortcuts, `0` `clippy -D warnings` across all crates.
-2. **Strict Physical Crate Isolation**: All 7 crates (`crates/ap-*`) maintain **`0` sibling `ap-*` dependencies** (`test_crate_physical_isolation_and_frontmatter_budget`).
-3. **Zero External Runtime Prerequisite**: Single prebuilt Rust binary (`ap` / `ap.exe`) across Linux (`musl` + `arm64`), macOS (`arm64` + `x64`), and Windows (`x64 MSVC`).
-4. **Hard Token & Latency Budgets**: Idle `SKILL.md` frontmatter **`< 65 tokens`** per folder (`48–61` actual = **`390 tokens` total**); core AST/SQLite/Hook paths **`0.7–18 ms`**.
-5. **Tools Enforce Rules, Not Prose**: Every recurring agent mistake must become an executable rule (`ap guard rule add`), contract check (`atlas product`), or smoke step (`probe smoke`).
-6. **Empirical Honesty**: Test on ordinary user & beginner prompts (both legacy bugfixes and empty-dir random projects) across paid & `$0` free agents, reporting all metrics transparently.
+### 1.3 Measure Everything by Core Coding Elevation & Zero-Slop Code Quality
+- **Effortless for Beginners**: One command installs prebuilt native `ap` (no Python, Node, or Rust required) and auto-wires free & commercial agents. Beginners never learn CLI flags—they type plain everyday requests.
+- **Senior-Engineer Rigor**: Sub-20ms core paths (`0.7–18 ms`), `OnceLock` single-compiled regexes (zero hot-loop recompilation), 7 isolated crates (`0` sibling `ap-*` dependencies), `0` `clippy -D warnings`, `390 tokens` total idle frontmatter, and hard anti-slop enforcement (`0` `: any`, `0` `@ts-ignore`, `0` silent `catch {}`).
 
 ---
 
-## 3. Architecture Overview (`v1.2.0`)
+## 2. The 4-Step Continuous Iteration Loop
+
+Every future iteration on this repository follows four strict steps:
+
+1. **Step 1 — Observe**: Run `ap audit --compare` and execute real user tasks across free and frontier coding agents, dissecting tool traces and `<thinking>` spikes.
+2. **Step 2 — Survey**: Research how mature open-source projects solve that exact bottleneck; extract proven algorithms and standards rather than piling on prompts.
+3. **Step 3 — Craft in Pure Rust**: Implement cleanly inside the appropriate isolated `crates/ap-*` crate (exposing both CLI and `ap mcp`), passing `rustfmt`, `clippy -D warnings`, and cross-OS tests.
+4. **Step 4 — Verify**: Run controlled Vanilla vs. `+ ap` A/B benchmarks on real tasks, verifying speed, token, reliability, and code-hygiene gains transparently.
+
+---
+
+## 3. Architecture & Evolution Log
 
 ```text
-[ap init] ──► Auto-wires Native `ap mcp` + Concise Rules + Hooks across OpenCode / Qwen / Gemini / Pi / Codex / Claude / Agy
-   │
-   ├── ap_orient  ──► ap-atlas (PPR RepoMap + Host Runtime + DOM #id / API Contract & Slop Radar) + ap-probe slice
-   ├── ap_edit    ──► ap-splice (Aider 3-tier indentation-resilient + Zero-Escaping AST-gated multi-file patcher)
-   ├── ap_smoke   ──► ap-probe smoke (Windows-safe server + Interactive Headless Edge/Chrome CDP + taskkill /T /F)
-   ├── ap_verify  ──► ap-guard verify/stop-gate (exit-2 anti-slop rules + tsc/biome/cargo/tests + RTK auto-sieve)
-   └── ap_probe   ──► ap-probe run/diff + ap-sieve (-98.8% logs + FTS5) + ap-recall (3.4ms BM25) + ap-baton
+[1-Line ap init] ──► Auto-wires OpenCode / Qwen / Gemini CLI / Goose / Pi / Codex / Claude / Antigravity / Grok
+   ├── Orient   (ap_orient) ──► ap-atlas (PPR map + host fingerprint + DOM #id/route contract & slop radar) + ap-probe slice
+   ├── Edit     (ap_edit)   ──► ap-splice (Aider 3-tier indentation-resilient + zero-escaping AST-gated multi-file patcher)
+   ├── Smoke    (ap_smoke)  ──► ap-probe smoke (ephemeral PORT + Pure-Rust headless Edge/Chrome interactive CDP + tree kill)
+   ├── Verify   (ap_verify) ──► ap-guard (exit-2 anti-slop rules + tsc/biome/cargo/test delegation + RTK auto-sieve)
+   └── Diagnose (ap_probe)  ──► ap-probe run/diff + ap-sieve (-98.8% log compression) + ap-recall (3.4ms BM25) + ap-baton
 ```
 
----
-
-## 4. Evolution Log
-
-| Milestone | Key Engineering Upgrades | Verified Real-World Impact |
+| Milestone | Observed Process Bottleneck & Open-Source Synthesis | Verified Live Impact |
 | :--- | :--- | :--- |
-| **`v0.1`–`v0.3` (2026-11-15)** | Initial 7 primitives, 4-CLI session audit (`69,963` calls), polyglot `slice --bundle` & 1-line onboarding | `Grok 1.0.77` **-26.5%–49.1% time**; `Antigravity 1.5.8` **-49.8% net tok**, **-74.2% `read_file`** |
-| **`v1.0.0` (2026-11-18)** | Complete **Pure-Rust single-binary rewrite (`0` `.py` files)**: 7 isolated crates, 6-lang Tree-sitter, bundled SQLite FTS5, Zero-Escaping `@@ FILE:`, 5-target GitHub Releases | `splice view` **`0.71ms`**, `apply` **`2.33ms`**, `recall` **`3.36ms`**; `Codex` solved 24-file `ts-ledger` (`5/5`) in **`4` commands** |
-| **`v1.2.0` (2026-11-18)** | **Thinking-Process & Zero-Config Free-Agent Engine**: Pure-Rust Interactive CDP (`OPEN`/`FILL`/`SELECT`/`CLICK`/`EVAL`), DOM `#id`↔JS & route contract radar, Personalized PageRank, Aider 3-tier indentation patcher, `rtk`-style PreToolUse auto-sieve, and native **`ap mcp`** for `OpenCode`/`Qwen`/`Gemini` | **Ordinary User `WorkPulse`**: `Codex` tok **-65.4% (`1.05M → 365k`)**; `Pi` time **-43.8% (`483s → 272s`)** & thinking **-42.7%**. **Empty-Dir Random Project `SplitMate`**: `Codex` tok **-83.3% (`1.12M → 186k`, `6.0x` less!)** & time **-29.1%**; `Pi` lifted **`5/6` (slop `empty-catch`) → `6/6` (0 slop, -322s)** |
+| **`v0.1`–`v0.3` (2026-11-15)** | Audited `69k` calls for re-reads & log floods; shipped 7 primitives & 1-line multi-harness setup | `Grok 1.0.77` **-26.5% to -49.1% time**; `Antigravity 1.5.8` **-49.8% net tok**, **-74.2% `read_file`** |
+| **`v1.0.0` (2026-11-18)** | Eliminated Python startup lag & runtime deps via **Pure-Rust single binary + 7 isolated crates** (6-lang Tree-sitter + bundled SQLite FTS5) | `splice view` **`0.71ms`**, `apply` **`2.33ms`**, `recall` **`3.36ms`**; `Codex` solved 24-file `ts-ledger` (`5/5`) in **`4` commands** |
+| **`v1.2.0` (2026-11-18)** | Dissected `<thinking>` verification tax & cross-file drift; synthesized **Aider PPR & 3-tier patcher**, **RTK auto-sieve**, **interactive CDP**, and **`ap mcp`** | **`OpenCode Free ($0)` beginner prompt**: **`2.36x` faster (`430s→182s`), `-75.1%` tok, `7/8→8/8` (`0` slop)**; **Empty-dir `SplitMate`**: `Codex` **`-83.3%` tok (`6.0x` less)**, `Pi` **`5/6→6/6` (`0` slop, `-322s`)** |

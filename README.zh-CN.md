@@ -1,8 +1,10 @@
 # agent-primitives (`ap` v1.2)
 
-**纯 Rust 单文件二进制、零 AI Slop、直击大模型思考链与系统物理边界的免费/旗舰智能体提效基座。**
+**观察真实 Coding Agent 运行过程 · 深度融合顶尖开源工程经验 · 纯 Rust 单二进制提升底层 Coding 基础能力。**
 
-[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[Engineering Handbook (EN)](./HANDBOOK.md)** | **[核心工程宪章 (中文)](./HANDBOOK.zh-CN.md)** · [架构深潜](./DESIGN.zh-CN.md) · [实战手册](./PLAYBOOK.zh-CN.md)
+[English (Default)](./README.md) | [简体中文](./README.zh-CN.md) · **[Core R&D Philosophy (EN)](./HANDBOOK.md)** | **[核心研发理念与演进手册 (中文)](./HANDBOOK.zh-CN.md)** · [架构深潜](./DESIGN.zh-CN.md) · [实战手册](./PLAYBOOK.zh-CN.md)
+
+> **我们的核心理念**：不堆砌冗长易被忽略的提示词套路（AI Slop），也不闭门从 0 到 1 重复造低质轮子。我们坚持：**（1）持续观察各类免费与商业 Coding Agent 在真实任务中的实际运行轨迹与 `<thinking>` 推理卡点；（2）深度调研并吸收成熟开源项目（`Aider`、`RTK`、`SWE-agent`、`MCP` 标准等）千锤百炼的实战经验；（3）用零依赖单文件纯 Rust 打磨底层 Coding 基础工具**——让哪怕是零基础小白用 `$0` 免费智能体，一行命令接入后也能获得显著的速度、Token 与代码洁净度提升。
 
 ---
 
