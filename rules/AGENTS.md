@@ -1,6 +1,6 @@
-# Agent Primitives Runtime Routing
+# Agent Primitives Runtime Routing (`ap`)
 
-1. **Orient & Bundle Active Slice (`probe`)**: Start unfamiliar multi-file Py/TS/JS/Go/Rust tasks with `probe slice . --bundle` to prune dead distractor files and inspect active reachable modules in 1 call.
-2. **Runtime & Equivalence Microscope (`probe`)**: Use `probe run --cwd . --focus <pkg> --stdin` and `probe diff` instead of simulating Python heap aliasing, in-place mutations, or cache collisions in prose.
-3. **Surgical Read, Atomic Patch & Auto-Test (`splice`)**: Use `splice view <files...> --symbol <Sym>`, batch atomic edits via `splice apply --cwd . --stdin`, and verify syntax/imports/tests via `splice check . --test`.
-4. **Sieve, Memory, Guard & Baton**: Compress >2KB outputs via `sieve run -- <cmd>`, query/save gotchas via `recall`, enforce `exit 2` shields/loop-breakers via `guard`, and preserve verified facts across compaction via `baton`.
+1. **Orient & Bundle Active Slice in 1 Call (`probe`)**: Start unfamiliar multi-file Py/TS/JS/Go/Rust/C tasks with `ap probe slice . --bundle` to prune dead distractor files via Tree-sitter and emit manifest + active numbered source in 1 shot.
+2. **Runtime & Differential Microscope (`probe`)**: Use `ap probe run --cwd . --code "<Py/TS/JS/Rust repro>"` (`--stdin` for multi-line) and `ap probe diff` instead of simulating heap aliasing, partial exception mutations, `-0`/`NaN`, or rounding/cache drift in prose.
+3. **Zero-Escaping Atomic Multi-File Patch + Auto-Test in 1 Turn (`splice`)**: Inspect Tree-sitter AST symbols via `ap splice view <files...> --symbol <Sym>`, and batch ALL edits + new test files + auto-test execution in 1 call via `ap splice apply --cwd . --stdin --test` (`@@ FILE: path` `<<<` old `===` new `>>>`, `@@ SYMBOL: path :: Sym` `<<<` new `>>>`, `@@ WRITE: path` `<<<` body `>>>`).
+4. **Atlas, Sieve, Memory, Guard & Baton**: Map large vaults via `ap atlas map .` (`<50ms`), compress noisy logs/JSONL/HTML tables via `ap sieve run -- <cmd>` + `ap sieve search <q>`, query gotchas via `ap recall` (`<1ms`), enforce `<2ms` `exit 2` shields/loop-breakers via `ap guard`, and preserve verified facts across compaction via `ap baton`.

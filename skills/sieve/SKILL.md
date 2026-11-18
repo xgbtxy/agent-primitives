@@ -1,28 +1,26 @@
 ---
 name: sieve
-description: Compress noisy command outputs, test/CI logs, large JSON API responses, and scraped HTML by 80-99% into a deterministic digest while archiving raw output locally for lossless `peek` retrieval by line range, regex, or JSON path. Use before inspecting long command stdout/stderr, logs, or web/API payloads.
+description: Compress noisy CLI/CI logs, JSON/JSONL streams, HTML tables, and CSV/TSV by 80-99% into a deterministic digest with sub-ms bundled SQLite FTS5 `search` and lossless `peek` (`--lines`, `--grep`, `--json-path`).
 ---
 
-# Sieve — Lossless Output Compressor & Flight Recorder
+# Sieve — Lossless Output Compressor, Table Extractor & FTS5 Flight Recorder
 
-Keep massive tool outputs out of the context window without losing a single stack frame or record. Zero dependencies (Python 3 stdlib only). Works identically for **Coding Agents** (pytest/cargo/CI/git diffs) and **Personal Assistant Agents** (JSON APIs, scraped HTML, CSVs, system/email logs).
+Keep massive tool outputs out of the context window without losing a single stack frame, JSONL error event, or HTML/CSV table row. Native Rust single-binary primitive with bundled SQLite FTS5 (`0` runtime dependencies).
 
 ## Usage
 
 ```bash
 # 1. Wrap any noisy command (captures stdout+stderr+exit code losslessly)
-python scripts/sieve.py run -- pytest -q
+ap sieve run -- cargo test
 
-# 2. Pipe long API JSON, scraped HTML, or log files
-curl -s https://api.example.com/items | python scripts/sieve.py pipe --label api-items
+# 2. Pipe API JSON, JSONL/NDJSON event streams, scraped HTML (extracts <table>!), or CSV/TSV
+curl -s https://api.example.com/events.jsonl | ap sieve pipe --label api-events
 
-# 3. Losslessly inspect exact slices from the archived raw stream (zero re-execution!)
-python scripts/sieve.py peek <id> --lines 120:160
-python scripts/sieve.py peek <id> --grep "AssertionError|Traceback" -C 6
-python scripts/sieve.py peek <id> --json-path "items.0"
+# 3. Search across ALL archived outputs from the session in <1ms via bundled SQLite FTS5
+ap sieve search "upstream_timeout"
+
+# 4. Losslessly inspect exact slices from any archived stream (zero re-execution!)
+ap sieve peek <id> --lines 120:160
+ap sieve peek <id> --grep "AssertionError|panicked at" -C 6
+ap sieve peek <id> --json-path "16.error"
 ```
-
-## Operating Rule
-
-- Never dump raw `>4 KB` logs, HTML, or JSON arrays directly into context when `sieve.py` is available.
-- Read the `<1.5 KB` digest first; use `peek <id>` with exact `--lines`, `--grep`, or `--json-path` only for the slice you actually need.

@@ -1,109 +1,94 @@
-# Real-World Efficiency Playbook: Coding Agents & Personal Assistant Agents
+# Real-World Efficiency Playbook: 1-Command Pure-Rust Setup Across Every Harness
 
 [English](./PLAYBOOK.md) | [简体中文](./PLAYBOOK.zh-CN.md) · [Handbook](./HANDBOOK.md) · [Anti-Obsolescence Architecture](./DESIGN.md)
 
-Installing a tool does nothing if onboarding takes 15 minutes of manual JSON editing, if your agent trips over OS shell quoting, or if the tool itself adds more prompt bloat than it saves. This playbook documents **how to wire `agent-primitives` in 1 command**—backed by **69,963 real audited tool calls** and live controlled CLI experiments across **Grok Build CLI (`1.0.77`)**, **Google Antigravity CLI (`1.5.8`)**, **OpenAI Codex CLI (`0.167.0`)**, and **Claude Code**.
+Installing a tool does nothing if onboarding requires Python/Node version juggling, manual JSON editing, or fragile shell quoting. In **`v1.0`**, `agent-primitives` ships as **one self-contained native Rust binary (`ap` / `ap.exe`)** embedding 6 official **Tree-sitter C grammars**, `ripgrep`'s parallel walker, **bundled static SQLite FTS5/BM25**, and all 7 `SKILL.md` definitions—requiring **zero Python, Node, or Rust toolchain on user machines**.
 
 ---
 
-## 0. Step Zero: Measure Your Own Local Agent Waste First (`ap.py audit`)
+## 0. Step Zero: Measure Your Own Local Agent Waste First (`ap audit`)
 
-Before installing anything, scan your own local CLI session logs (`~/.codex`, `~/.claude`, `~/.grok`, `~/.gemini/antigravity-cli` — **100% local, zero network calls**) to see where *your* agents burn time and tokens:
+Scan your own local CLI session logs (`~/.codex`, `~/.pi`, `~/.claude`, `~/.grok`, `~/.gemini/antigravity-cli` — **100% local, zero network calls**) to see where *your* agents burn time and tokens:
 
 ```bash
-python ap.py audit --compare
+ap audit --compare
 ```
 
-In seconds, `audit` quantifies your exact local pathology counts (redundant same-file re-reads, manual shell line-slicing, inline `python -c` quoting/`ImportError` crashes, patch mismatches, Windows `cp936`/UTF-8 decode failures, `>8 KB` raw output floods) and compares older vs. recent session trends.
+In seconds, `ap audit` quantifies redundant same-file re-reads, manual shell line-slicing, inline `python -c`/`node -e` quoting & `ImportError` crashes, patch mismatches, UTF-8 decode failures, `>8 KB` raw output floods, and identical retry loops—comparing older vs. recent session trends.
 
 ---
 
-## 1. Zero-Clone 1-Line Onboarding Across Every Harness (`ap.py init`)
+## 1. Zero-Toolchain 1-Line Onboarding Across Every Harness
 
-You do **not** need `git clone`, `pip install`, `npm`, or manual JSON/path editing:
+No `git clone`, no `python`, no `pip`, no `npm`, and no Rust compiler required:
 
 ```bash
-# Universal 1-line auto-onboarding (macOS / Linux):
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/ap.py | python3 - init
+# Universal 1-line prebuilt binary install + auto-onboarding (macOS / Linux):
+curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
 
-# Universal 1-line auto-onboarding (Windows PowerShell):
-irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/ap.py | python - init
+# Universal 1-line prebuilt binary install + auto-onboarding (Windows PowerShell):
+irm https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.ps1 | iex
 
-# Wire ONLY the current repository (.agents/skills + .agents/ap.py + fenced AGENTS.md block):
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/ap.py | python3 - init --here
+# Rust developers can also install directly from source via Cargo:
+cargo install --git https://github.com/xgbtxy/agent-primitives --locked && ap init
 
-# Target specific harness(es) + merge non-destructive hooks (Claude Code, Codex, Antigravity):
-curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/ap.py | python3 - init -a codex,pi,agy,claude --with-hooks
+# Wire ONLY the current repository (.agents/bin/ap + .agents/skills + fenced AGENTS.md block):
+ap init --here
 
-# Ecosystem-native 1-liners also work out of the box:
-pi install git:github.com/xgbtxy/agent-primitives
-codex plugin marketplace add xgbtxy/agent-primitives && codex plugin add agent-primitives@agent-primitives
-npx skills add xgbtxy/agent-primitives -g
+# Target specific harness(es) + merge <2ms native Rust hooks (Claude Code, Codex, Antigravity):
+ap init -a codex,pi,agy,claude --with-hooks
 
 # Clean, reversible 1-command removal at any time (preserves all of your existing rules):
-ap uninstall          # or: python ap.py uninstall --here
+ap uninstall          # or: ap uninstall --here
 ```
 
 ### How Each Harness Is Wired Under the Hood
-- **OpenAI Codex CLI (`codex`)**: Syncs `~/.codex/skills/` + `~/.agents/skills/`, injects `<10-line` fenced routing block into `~/.codex/AGENTS.md`, and (`--with-hooks`) merges `exit 2` shield/stop-gate into `~/.codex/hooks.json`. Also ships `.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`.
-- **Pi (`pi` / `pi-coding-agent`)**: Syncs `~/.pi/agent/skills/` (or `.pi/skills/` with `--here -a pi`) + `~/.pi/agent/AGENTS.md`, and ships a zero-dependency `package.json` `"pi"` manifest for `pi install git:github.com/xgbtxy/agent-primitives`.
-- **Google Antigravity (`agy` / IDE)**: Syncs `~/.gemini/config/skills/` + `~/.agents/skills/` + `~/.gemini/config/GEMINI.md`, and (`--with-hooks`) writes named group `"agent-primitives-guard"` (`"matcher": "run_command"`) into `~/.gemini/config/hooks.json` using Antigravity's native camelCase `{"decision": "deny"|"allow"}` / `{"decision": "continue"|"stop"}` JSON contract. Also ships `.antigravity-plugin/plugin.json` + `rules/AGENTS.md`.
-- **Anthropic Claude Code (`claude`)**: Syncs `~/.claude/skills/` + `~/.claude/CLAUDE.md`, merges `PreToolUse` (`Bash`), `PreCompact` (`baton`), and `Stop` (`exit 2`) into `~/.claude/settings.json` (with `.bak` backup), and ships `.claude-plugin/marketplace.json`.
-- **xAI Grok Build (`grok`)**: Syncs `~/.grok/skills/` (which Grok loads ahead of repo-local skills!) + `~/.grok/AGENTS.md`.
+- **OpenAI Codex CLI (`codex`)**: Syncs `~/.codex/skills/` + `~/.agents/skills/`, injects a self-contained `<10-line` fenced routing block into `~/.codex/AGENTS.md`, and (`--with-hooks`) merges `<2ms` native `ap guard` `exit 2` hooks into `~/.codex/hooks.json`.
+- **Pi (`pi` / `pi-coding-agent`)**: Syncs `~/.pi/agent/skills/` (or `.pi/skills/` with `--here -a pi`) + `~/.pi/agent/AGENTS.md`, plus root `package.json` `"pi"` manifest.
+- **Google Antigravity (`agy` / IDE)**: Syncs `~/.gemini/config/skills/` + `~/.agents/skills/` + `~/.gemini/config/GEMINI.md`, and (`--with-hooks`) writes named group `"agent-primitives-guard"` (`"matcher": "run_command"`) into `~/.gemini/config/hooks.json` using Antigravity's camelCase `{"decision": "deny"|"allow"}` / `{"decision": "continue"|"stop"}` JSON contract.
+- **Anthropic Claude Code (`claude`)**: Syncs `~/.claude/skills/` + `~/.claude/CLAUDE.md` and merges native `PreToolUse` (`Bash`), `PreCompact` (`ap baton`), and `Stop` (`exit 2`) into `~/.claude/settings.json` (with `.bak` backup).
+- **xAI Grok Build (`grok`)**: Syncs `~/.grok/skills/` + `~/.grok/AGENTS.md`.
 
 ---
 
-## 2. The 5-Stage Loop: Replace Prompt Hope with Deterministic Boundaries
-
-Wire the **7 standalone folders** (`486 tokens` combined idle frontmatter cost) to the **5 physical stages** of every agent turn:
+## 2. The 5-Stage Loop (`412 Tokens` Total Idle Cost Across All 7 Primitives)
 
 ```text
-[Stage 1: Orient & Recall]   --> atlas  (<0.1s AST/vault map + >90d stale-TODO radar)
-                             --> recall (<6ms SQLite FTS5 + CJK rule injection, ~40 tok)
-[Stage 2: Slice & Diagnose]  --> probe  (slice --bundle prunes Py/TS/JS/Go/Rust dead files + bundles active code in 1 call;
-                                         run traces Python heap aliasing, mutations & state no-ops; diff checks boundaries)
-[Stage 3: Surgical Act]      --> splice (view exact Py/TS/JS/Go/Rust symbol or Markdown heading [-94% tok];
-                                         apply UTF-8/CRLF-safe atomic edits; check --test auto-runs repo test suite)
-[Stage 4: Filter Output]     --> sieve  (compresses >1.2 KB logs/JSON/HTML by 98%+; lossless FTS5 peek)
-[Stage 5: Gate & Persist]    --> guard  (exit-2 secret/blast shield, 3x loop breaker & stop-gate)
-                             --> baton  (<400 tok state + DO NOT RETRY dead-ends across compactions)
+[Stage 1: Orient & Recall]   --> ap atlas  (16ms 6-language Tree-sitter map + >90d stale-TODO radar)
+                             --> ap recall (3.3ms bundled SQLite FTS5 + CJK rule injection, ~47 tok)
+[Stage 2: Slice & Diagnose]  --> ap probe  (7ms slice --bundle prunes Py/TS/JS/Go/Rust/C dead files + bundles code;
+                                            run traces Py/TS/JS aliasing/mutation/-0; diff tests Py/TS/JS/Rust)
+[Stage 3: Surgical Act]      --> ap splice (0.8ms Tree-sitter AST symbol view [-95.4% tok];
+                                            3.1ms zero-escaping apply --stdin --test w/ 6-lang AST syntax rollback)
+[Stage 4: Filter Output]     --> ap sieve  (compresses >1.2 KB logs/JSON/JSONL/HTML/CSV by 97-99% + FTS5 search)
+[Stage 5: Gate & Persist]    --> ap guard  (<2ms native exit-2 secret/blast shield, 3x loop breaker & stop-gate)
+                             --> ap baton  (<400 tok state + DO NOT RETRY dead-ends across compactions)
 ```
 
 ---
 
-## 3. Workflow A: Coding Agents (`Claude Code`, `Codex`, `Grok Build`, `Antigravity`, `Cursor`)
+## 3. Workflow A: Coding Agents (`Claude Code`, `Codex`, `Grok`, `Antigravity`, `Pi`, `Cursor`)
 
-1. **1-Call Polyglot Reachability & Active Bundle (`probe slice --bundle`)**:
-   - Start unfamiliar multi-file tasks across **Python, TypeScript/JS, Go, or Rust** with `python .agents/ap.py probe slice . --bundle` (`~25–60 ms`).
-   - Prunes dead distractor files (**80%** in micro-bench; **13/24** in TypeScript `ts-ledger`; **15/34** in Python `fluxpipe`) AND prints line-numbered source of active reachable files in **1 single tool call**, eliminating 10–16 sequential `read_file` round-trips.
-2. **Sub-200ms Causal Diagnosis Instead of 20-Minute Prose Guessing (`probe run` / `diff`)**:
-   - Pipe a 5-line reproducer into `python .agents/ap.py probe run --cwd . --focus <pkg> --stdin` (`@'...'@ |` on PowerShell; `<<'EOF'` on Bash). Call-site deduplication guarantees `< 3.5 KB` output even across 200-iteration loops while automatically flagging **`[ALIAS HAZARD]`**, **`[IN-PLACE MUTATION]`**, and **`[STATE NO-OP]`**.
-   - For compilers, serializers, caches, or validators, run `python .agents/ap.py probe diff` to catch `None`/`bool`/`int` (`True` vs `1`) boundary & stateful cache collisions in `<50 ms`.
-3. **Polyglot Symbol Reads, Atomic Edits & Auto-Test Verification (`splice`)**:
-   - Inspect specific symbols across 1+ files via `python .agents/ap.py splice view src/a.ts src/b.ts --symbol MyClass.run` (**-94.4%** tokens in `~1.6 ms`).
-   - Batch multi-file edits atomically via `python .agents/ap.py splice apply --cwd . --stdin` (or `--spec _edits.json --unlink-spec`), then verify UTF-8, syntax, relative imports AND run the auto-detected test suite (`pytest` / `unittest` / `node --experimental-strip-types --test` / `go test` / `cargo test`) in 1 shot via `python .agents/ap.py splice check . --test`.
-4. **Test Floods, Loop Breaking & Cross-Agent Handoffs (`sieve` + `guard` + `baton`)**:
-   - Wrap noisy commands in `python .agents/ap.py sieve run -- <cmd>` (**-98.8%**) and inspect frames via `sieve peek <id> --lines 905:930`.
-   - Record falsified hypotheses with `baton deadend` and persist newly discovered directory gotchas via `recall add`.
+1. **1-Call 6-Language Reachability & Active Bundle (`ap probe slice . --bundle`)**:
+   - Prunes dead distractor files across **Python, TypeScript/JS, Go, Rust, and C** (`7.1 ms`) and emits manifest + numbered source of active reachable files in **1 single tool call**.
+2. **Sub-200ms Causal & Differential Verification (`ap probe run` / `diff`)**:
+   - Catch `[ALIAS HAZARD]`, `[IN-PLACE MUTATION]`, `[STATE NO-OP]`, `-0`/`NaN`, `True == 1` cache collisions, or negative Rust `i64` rounding drift (`ap probe diff --lang rust`) without burning 20,000 prose reasoning tokens.
+3. **Zero-Escaping Atomic Patch + 6-Language Tree-sitter Syntax Gate + Auto-Test (`ap splice`)**:
+   - Pipe `@@ FILE:`, `@@ SYMBOL:`, and `@@ WRITE:` blocks directly into `ap splice apply --cwd . --stdin --test --rollback-on-test-fail` (`@'...'@ |` on PowerShell; `<<'EOF'` on Bash). Every modified `.py`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.c`, `.h`, and `.json` file is syntax-checked via **Tree-sitter** *before* touching disk!
 
 ---
 
 ## 4. Workflow B: Personal Assistant Agents (`OpenClaw`, `Hermes`, Research/Ops Assistants)
 
-1. **Markdown Vault & Document Tree Navigation (`atlas` + `splice view --heading`)**:
-   - Run `python .agents/ap.py atlas map ~/Notes` for a `<800-token` structural outline of hundreds of notes in `<0.1s`.
-   - Read a specific section of a 2,000-line handbook via `splice view ~/Notes/ops.md --heading "Incident Escalation"`, and update structured JSON/Markdown files atomically via `splice apply` without Windows UTF-8 corruption.
-2. **Zero-Cloud Bilingual Personal SOP & Contact Memory (`recall`)**:
-   - Store recurring personal/ops rules (`invoice/报销`, `contract/合同`, `server/服务器`) in `recall` (**`5.5 ms`** median query, `100%` Top-1 accuracy across 200 rules, zero cloud API keys).
-3. **Web Scrapes, REST JSON APIs & Server Logs (`sieve`)**:
-   - Pipe `curl` JSON payloads or scraped HTML pages through `sieve pipe` (**-99.6%** on 400-record JSON; **-98.4%** on JS/CSS-bloated HTML) and drill into exact records via `sieve peek <id> --json-path "items.0"`.
-4. **Multi-Day Continuity & Outbound Blast Protection (`baton` + `guard`)**:
-   - Resume multi-day ops checklists after compaction via `baton resume` (`<400 tokens`), while `guard shield` blocks secret leaks or destructive commands with `exit 2`.
+1. **Knowledge Vault Outlines & Section Edits (`ap atlas` + `ap splice view --heading`)**: Map hundreds of Markdown notes in `<20ms` and read/edit exact sections atomically.
+2. **Zero-Cloud Bilingual SOP Memory (`ap recall`)**: `3.3 ms` hybrid English + Chinese FTS5 recall (`100%` Top-1 accuracy on 200 rules).
+3. **JSONL Streams, HTML Tables & CSV/TSV (`ap sieve`)**: Pipe noisy scrapes/APIs into `ap sieve pipe` and search across sessions via `ap sieve search <query>`.
+4. **Compaction Continuity & `<2ms` Blast Shield (`ap baton` + `ap guard`)**: Resume multi-day work in `<400 tokens` while blocking leaked keys or `rm -rf` with `exit 2`.
 
 ---
 
 ## 5. Honest Anti-Bloat Rules: When NOT to Use Each Tool
 
-- **Skip `sieve` for tiny outputs** (`pwd`, `git status -s`, 30-line files)—`sieve` passes `<1.2 KB` outputs through untouched anyway.
-- **Skip `probe` for trivial 1-line typos**—if the stack trace already names the exact line, edit directly and run `splice check . --test`.
-- **Keep universal invariants in `AGENTS.md`, conditional rules in `recall`**—never bloat `AGENTS.md` with 200 low-frequency rules.
+- **Skip `sieve` for tiny outputs** (`pwd`, `git status -s`)—`sieve` passes `<1.2 KB` outputs through untouched (`0.0%`).
+- **Skip `probe` for obvious 1-line typos**—apply directly and run `ap splice check . --test`.
+- **Keep universal identity rules in `AGENTS.md`, conditional gotchas in `recall`**.

@@ -1,100 +1,101 @@
 {
-  "generated_at": "2026-11-15T10:21:05Z",
-  "python_version": "3.12.0",
-  "platform": "win32",
+  "arch": "x86_64",
+  "atlas_real_scan_benchmark": {
+    "atlas_map_tokens_est": 438,
+    "orientation_reduction_pct": 99.0,
+    "raw_corpus_tokens_est": 42338,
+    "scan_latency_ms": 16.3,
+    "scanned_files": 64,
+    "scanned_target": "sdk_corpus (64 Rust modules via Tree-sitter)"
+  },
+  "engine": "agent-primitives v1.0.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
+  "generated_at": "2026-11-18T03:29:44Z",
   "idle_frontmatter_tokens_per_folder": {
-    "atlas": 73,
-    "baton": 70,
-    "guard": 63,
-    "probe": 62,
-    "recall": 71,
-    "sieve": 83,
-    "splice": 64
+    "atlas": 58,
+    "baton": 60,
+    "guard": 57,
+    "probe": 59,
+    "recall": 58,
+    "sieve": 59,
+    "splice": 61
+  },
+  "os": "windows",
+  "probe_microscope_benchmark": {
+    "dead_code_pruned_pct": 62.5,
+    "pruned_dead_files": 15,
+    "reachable_files": 9,
+    "slice_latency_ms": 6.32,
+    "total_code_files": 24
+  },
+  "recall_benchmark_200_rules": {
+    "avg_injected_tokens_top2": 47.0,
+    "median_query_latency_ms": 3.37,
+    "monolithic_agents_md_tokens": 6880,
+    "token_reduction_pct": 99.3,
+    "top1_recall_accuracy": "20/20 (100%)",
+    "vault_rules": 200
   },
   "sieve_benchmarks": [
     {
-      "workload": "sieve: 2,500-line CI/pytest log (Coding Agent)",
+      "latency_ms": 61.4,
+      "out_bytes": 2073,
+      "out_tokens_est": 519,
       "raw_bytes": 172075,
-      "out_bytes": 2080,
       "raw_tokens_est": 43019,
-      "out_tokens_est": 520,
       "reduction_pct": 98.8,
-      "latency_ms": 31.03,
-      "signal_preserved": true
+      "signal_preserved": true,
+      "workload": "sieve: 2,500-line CI/pytest log (Coding Agent)"
     },
     {
-      "workload": "sieve: 400-record JSON API dump (Personal/Coding Agent)",
-      "raw_bytes": 107887,
-      "out_bytes": 423,
-      "raw_tokens_est": 26972,
-      "out_tokens_est": 106,
+      "latency_ms": 13.49,
+      "out_bytes": 417,
+      "out_tokens_est": 105,
+      "raw_bytes": 107906,
+      "raw_tokens_est": 26977,
       "reduction_pct": 99.6,
-      "latency_ms": 5.13,
-      "signal_preserved": true
+      "signal_preserved": true,
+      "workload": "sieve: 400-record JSON API dump (Personal/Coding Agent)"
     },
     {
-      "workload": "sieve: Noisy HTML page w/ JS+CSS bloat (Personal Agent)",
-      "raw_bytes": 48160,
-      "out_bytes": 780,
-      "raw_tokens_est": 12040,
-      "out_tokens_est": 195,
+      "fts5_search_latency_ms": 5.65,
+      "latency_ms": 10.32,
+      "out_bytes": 582,
+      "out_tokens_est": 146,
+      "raw_bytes": 19100,
+      "raw_tokens_est": 4775,
+      "reduction_pct": 97.0,
+      "signal_preserved": true,
+      "workload": "sieve: 300-record JSONL stream + bundled FTS5 search"
+    },
+    {
+      "latency_ms": 46.61,
+      "out_bytes": 792,
+      "out_tokens_est": 198,
+      "raw_bytes": 48174,
+      "raw_tokens_est": 12044,
       "reduction_pct": 98.4,
-      "latency_ms": 11.99,
-      "signal_preserved": true
+      "signal_preserved": true,
+      "workload": "sieve: Noisy HTML page w/ JS+CSS + <table> (Personal Agent)"
     },
     {
-      "workload": "sieve: Negative control (<1.2 KB short output passthrough)",
-      "raw_bytes": 69,
-      "out_bytes": 117,
-      "raw_tokens_est": 18,
+      "latency_ms": 9.37,
+      "out_bytes": 118,
       "out_tokens_est": 30,
+      "raw_bytes": 70,
+      "raw_tokens_est": 18,
       "reduction_pct": 0.0,
-      "latency_ms": 2.23,
-      "signal_preserved": true
+      "signal_preserved": true,
+      "workload": "sieve: Negative control (<1.2 KB short output passthrough)"
     }
   ],
-  "recall_benchmark_200_rules": {
-    "vault_rules": 200,
-    "monolithic_agents_md_tokens": 6380,
-    "avg_injected_tokens_top2": 39.9,
-    "token_reduction_pct": 99.4,
-    "top1_recall_accuracy": "20/20 (100%)",
-    "median_query_latency_ms": 4.92
-  },
-  "atlas_real_scan_benchmark": {
-    "scanned_target": "sdk_corpus (64 Python modules)",
-    "scanned_files": 64,
-    "raw_corpus_tokens_est": 42710,
-    "atlas_map_tokens_est": 446,
-    "orientation_reduction_pct": 99.0,
-    "scan_latency_ms": 36.7
-  },
-  "probe_microscope_benchmark": {
-    "total_py_files": 25,
-    "reachable_files": 3,
-    "pruned_dead_files": 20,
-    "dead_code_pruned_pct": 80.0,
-    "slice_latency_ms": 24.29,
-    "trace_latency_ms": 14.39,
-    "auto_detected_hazards": {
-      "alias_hazards": 2,
-      "in_place_mutations": 1,
-      "state_noops": 1
-    }
-  },
   "splice_surgeon_benchmark": {
-    "full_module_tokens_est": 1376,
-    "symbol_view_tokens_est": 77,
-    "symbol_read_reduction_pct": 94.4,
-    "view_latency_ms": 1.74,
-    "atomic_apply_latency_ms": 5.52,
+    "atomic_apply_latency_ms": 2.46,
     "crlf_preserved": true,
-    "repo_check_latency_ms": 18.2,
-    "polyglot_ts_slice": {
-      "total_ts_files": 24,
-      "reachable_ts_files": 9,
-      "pruned_dead_ts_files": 15,
-      "slice_latency_ms": 23.06
-    }
+    "full_module_tokens_est": 1048,
+    "repo_ast_check_latency_ms": 2.71,
+    "symbol_read_reduction_pct": 95.4,
+    "symbol_view_tokens_est": 48,
+    "view_latency_ms": 0.68,
+    "zero_escaping_atomic_apply_ok": true
   }
 }

@@ -9,32 +9,32 @@
 ## 1. Core Philosophy (Why We Exist & Why Models Won't Obsolete Us)
 
 ### 1.1 Never Build "Thinking Crutches"—Only Build "Physical Organs"
-95% of open-source agent repositories become obsolete within 6 months because they try to **teach the LLM how to think** in prompts or heavy outer orchestration wrappers (roleplay personas, planning checklists, multi-agent state machines, or lossy vector RAG). Every frontier post-training cycle (`GPT-6`, `Grok-5`, `Claude-5`, `Gemini-4`) absorbs those crutches into model weights, turning yesterday's scaffolding into today's latency tax.
+95% of open-source agent repositories become obsolete within 6 months because they try to **teach the LLM how to think** in prompts or heavy outer orchestration wrappers (roleplay personas, planning checklists, multi-agent state machines, or lossy vector RAG). Every frontier post-training cycle (`GPT-6`, `Grok-5`, `Claude-5`, `Gemini-4`, `DeepSeek`) absorbs those crutches into model weights, turning yesterday's scaffolding into today's latency tax.
 
-Our philosophy is the exact opposite: **the smarter the base model becomes, the less prompt hand-holding it wants—and the better it wields fast, deterministic OS/AST/Heap/Byte instruments.**
+Our philosophy is the exact opposite: **the smarter the base model becomes, the less prompt hand-holding it wants—and the better it wields sub-10ms, memory-safe, deterministic OS/AST/Heap/Byte instruments.**
 
 No matter how high model IQ climbs, an LLM remains an autoregressive token generator operating over an append-only KV-cache, separated from software and personal files by **four irreducible physical boundaries**:
-1. **External Entropy vs. `O(N)` KV-Cache Physics**: Pouring `200 KB` CI logs, giant JSON API dumps, noisy HTML, or 20 unreferenced dead modules into context physically inflates prefill latency, dilutes attention, and bills every subsequent turn.
-2. **Prose Simulation vs. Concrete Runtime Memory & Types**: Mentally simulating shallow-copy nested aliasing, in-place argument mutation, or `None` / `True == 1` type collisions in prose burns `35k–55k` reasoning tokens (`11–19 min`), while ad-hoc `python -c` one-liners crash on shell quoting and `ImportError`.
-3. **BPE Token Streams vs. Byte/AST-Exact File Transactions**: Models emit BPE tokens, whereas disk files require strict UTF-8 encoding, preserved CRLF/LF line endings, valid AST syntax, and clean `.pyc` bytecode state.
-4. **Compaction Amnesia & Self-Report Bias**: Context compaction (`/compact`) wipes negative constraints ("what already failed"), and probabilistic prose can never substitute for a deterministic **`exit 2`** OS gate.
+1. **External Entropy vs. `O(N)` KV-Cache Physics**: Pouring `200 KB` CI logs, giant JSON/JSONL dumps, noisy HTML, or 15 unreferenced dead modules into context physically inflates prefill latency, dilutes attention, and bills every subsequent turn.
+2. **Prose Simulation vs. Concrete Runtime Memory & Types**: Mentally simulating shallow-copy nested aliasing, in-place argument mutation, `-0.0` signed-zero drift, or `None` / `True == 1` type collisions in prose burns `35k–55k` reasoning tokens (`11–19 min`), while ad-hoc inline one-liners crash on shell quoting and module path mismatches.
+3. **BPE Token Streams vs. Byte/AST-Exact File Transactions**: Models emit BPE tokens, whereas disk files require strict UTF-8 encoding, preserved CRLF/LF line endings, valid concrete Tree-sitter AST syntax across every target language *before* hitting disk, and zero JSON-escaping corruption.
+4. **Compaction Amnesia & Self-Report Bias**: Context compaction (`/compact`) wipes negative constraints ("what already failed"), and probabilistic prose can never substitute for a `<2 ms` deterministic **`exit 2`** OS gate.
 
-**Core Law**: We build **Unix-style deterministic primitives** (`git` / `strace` / `sqlite` equivalents for agents) strictly at those four boundaries. Smarter engineers don't stop using `git` or `strace`—and smarter models wield `agent-primitives` with even higher precision.
+**Core Law**: We build **Unix-style deterministic primitives in Pure Rust** (`ripgrep` / `git` / `strace` / `sqlite` equivalents for agents) strictly at those four boundaries. Smarter engineers don't stop using `ripgrep` or `git`—and smarter models wield `ap` with even higher precision.
 
-### 1.2 Micro-Infrastructure Aesthetics: One Folder = One Standalone Mini-Project
-We reject monolithic frameworks requiring `Docker`, `Node`/`Bun`, background daemons, vector databases, or paid cloud keys:
-- **Single-Folder Autonomy**: Every folder under `skills/` is a self-contained mini-project. Want lossless output compression? Copy only `skills/sieve/`. Want sub-100ms causal debugging and atomic AST patching? Copy only `skills/probe/` and `skills/splice/`.
-- **Zero External Dependencies**: 100% Python 3.9+ standard library (`0` pip packages, `0` daemons, `0` network uploads, `0` API keys) across Linux, macOS, and Windows.
-- **Near-Zero Idle Context Tax**: Each folder's `SKILL.md` frontmatter costs **`63–83 tokens`** at rest (`< 500 tokens` for all 7 folders combined).
+### 1.2 Micro-Infrastructure Aesthetics: Pure-Rust Single Binary + 7 Standalone Crates
+We reject monolithic frameworks requiring `Python`, `Node`/`Bun`, `Docker`, background daemons, vector databases, or paid cloud keys:
+- **Zero Runtime Prerequisite (`ap` / `ap.exe`)**: One native prebuilt Rust binary statically embeds **6-language Tree-sitter grammars** (`Python`, `TypeScript/TSX`, `JavaScript`, `Go`, `Rust`, `C`), **bundled SQLite 3 (`FTS5` + `BM25`)**, `.gitignore`-aware parallel traversal, and all 7 `SKILL.md` manifests. Users need neither Python nor Rust installed (`curl ... | sh` or `irm ... | iex`).
+- **Physical Crate Autonomy**: Every primitive lives in its own isolated Cargo crate (`crates/ap-{atlas,recall,probe,splice,sieve,guard,baton}`) with **`0` sibling `ap-*` dependencies** and its own standalone `main.rs` (`cargo install --path crates/ap-splice` works independently).
+- **Near-Zero Idle Context Tax**: Each folder's `SKILL.md` frontmatter costs **`57–61 tokens`** at rest (**`412 tokens`** total across all 7 folders combined).
 
 ### 1.3 Unified Substrate for Coding Agents & Personal Assistant Agents
-Coding Agents (`Claude Code`, `Codex`, `Grok Build`, `Antigravity`, `Cursor`) and Personal Assistant Agents (`OpenClaw`, `Hermes`, vault/research/ops assistants) share the **exact same underlying process bottlenecks**:
-- Codebases need AST hub maps; 500-note Markdown vaults need directory + `H1/H2` outlines (`atlas`).
-- Code subsystems have local gotchas; client invoicing, contracts, and server ops have conditional SOPs (`recall`).
-- Code fixes need heap/boundary tracing; financial rounding and data-cleaning scripts need edge-case verification before batch runs (`probe`).
-- Source files need AST symbol reads & atomic edits; long handbooks and JSON configs need section reads & UTF-8-safe atomic writes (`splice`).
-- `pytest` floods need lossless compression; REST API JSON payloads and scraped web HTML need noise stripping (`sieve`).
-- Force-pushes need pre-execution shields & test truth gates; autonomous assistants need secret-leak & mass-blast **`exit 2`** shields (`guard`).
+Coding Agents (`Codex`, `Pi`, `Antigravity`, `Claude Code`, `Grok Build`, `Cursor`) and Personal Assistant Agents (`OpenClaw`, `Hermes`, vault/research/ops assistants) share the **exact same underlying process bottlenecks**:
+- Codebases need 6-language Tree-sitter hub maps; 500-note Markdown vaults need directory + `H1/H2` outlines (`atlas`).
+- Code subsystems have local gotchas; client invoicing, contracts, and server ops have conditional bilingual SOPs (`recall`).
+- Code fixes need reachability slicing & heap/boundary tracing; financial rounding and data scripts need differential verification before batch runs (`probe`).
+- Source files need `<1 ms` Tree-sitter AST symbol reads & Zero-Escaping `@@ FILE:` atomic edits; long handbooks and JSON configs need section reads & UTF-8-safe atomic writes (`splice`).
+- `pytest`/`cargo` floods need lossless compression; REST API JSON/JSONL streams, CSV/TSV exports, and HTML `<table>` pages need noise stripping + `<6 ms` FTS5 search (`sieve`).
+- Force-pushes need `<2 ms` pre-execution shields & test truth gates; autonomous assistants need secret-leak & mass-blast **`exit 2`** shields (`guard`).
 - Multi-CLI coding handoffs need state capsules; multi-day personal research needs compaction-proof resume (`baton`).
 
 ---
@@ -43,71 +43,49 @@ Coding Agents (`Claude Code`, `Codex`, `Grok Build`, `Antigravity`, `Cursor`) an
 
 Any proposed feature or PR that violates even one of these six rules is rejected:
 
-1. **Zero Pure-Prompt Fluff**: Never add prompt-only persona/checklist folders without deterministic runtime computation.
-2. **Strict Physical Isolation**: Every `skills/<name>/` folder must run with **zero cross-folder imports** when copied alone into an empty directory (enforced in CI by `test_standalone_no_cross_imports`).
-3. **Zero Third-Party Packages & Full Cross-OS Parity**: Pure Python 3.9+ stdlib only; must pass natively on Ubuntu, macOS, and Windows (including PowerShell quoting and `cp936` default codepages).
-4. **Hard Context & Latency Budgets**: Idle `SKILL.md` frontmatter **`< 85 tokens`** per folder; core CLI latency **`< 100 ms`**; default stdout **`< 1,000 tokens`** with lossless on-demand `peek`.
-5. **Deepen Before Multiplying**: Always prefer sharpening the existing 7 orthogonal primitives (subcommands, multi-language support, zero-friction ergonomics) over adding an 8th folder unless a genuinely new physical boundary is proven.
-6. **Empirical Honesty & Negative Controls**: Every claim must trace to real session telemetry (`audit_sessions.py`), deterministic benchmarks (`bench/run_bench.py`), and live CLI A/B runs—including **honest negative controls** documenting when *not* to invoke a tool.
+1. **Zero Pure-Prompt Fluff**: Never add prompt-only persona/checklist folders without deterministic native computation.
+2. **Strict Physical Crate Isolation**: Every `crates/ap-<name>/` crate must compile and run standalone with **zero dependencies on sibling `ap-*` crates** (enforced in CI by `test_crate_physical_isolation`).
+3. **Zero External Runtime Dependencies & Full Cross-OS Parity**: Prebuilt single-file Rust binary (`musl` static on Linux x64, native Mach-O on macOS, native `.exe` on Windows MSVC) with bundled SQLite FTS5 + Tree-sitter; must pass `clippy -D warnings` and integration suites across Linux, macOS, and Windows (including PowerShell pipes, `\\?\` canonical paths, and CRLF preservation).
+4. **Hard Context & Latency Budgets**: Idle `SKILL.md` frontmatter **`< 85 tokens`** per folder (`57–61` actual); core CLI latency **`< 50 ms`** (`0.68 ms`–`16.3 ms` actual on AST/SQLite paths); default stdout **`< 1,000 tokens`** with lossless on-demand `search` / `peek`.
+5. **Deepen Before Multiplying**: Always prefer sharpening the existing 7 orthogonal primitives over adding an 8th crate unless a genuinely new physical boundary is proven.
+6. **Empirical Honesty & Negative Controls**: Every claim must trace to real session telemetry (`ap audit`), deterministic benchmarks (`ap bench`), and live CLI runs—including **honest negative controls and harness-specific limitations**.
 
 ---
 
-## 3. Current "1 + 7" Architecture & Responsibility Boundaries
+## 3. Current "1 + 7" Pure-Rust Architecture & Responsibility Boundaries
 
 ```text
-[Offline Diagnostics] audit/audit_sessions.py  ──► Scans local Codex / Claude / Grok / Antigravity logs (0 cloud)
+[Offline Diagnostics] ap audit [--compare]  ──► Scans 5 local harnesses: Codex / Pi / Antigravity / Claude / Grok (0 cloud)
    │
-   ├── Stage 1: Orient & Recall  ──► skills/atlas/  (Sub-second AST/vault map + >90-day stale-TODO radar)
-   │                             ──► skills/recall/ (<4ms SQLite FTS5 + EN/CJK triggered micro-memory)
-   ├── Stage 2: Slice & Diagnose ──► skills/probe/  (Reachability dead-file pruning + heap/mutation tracer + diff)
-   ├── Stage 3: Surgical Act     ──► skills/splice/ (AST/Markdown section view + UTF-8/CRLF atomic rollback patcher)
-   ├── Stage 4: Filter Output    ──► skills/sieve/  (98%+ log/JSON/HTML compression + FTS5 lossless peek)
-   └── Stage 5: Gate & Persist   ──► skills/guard/  (Native exit-2 secret/blast shield, 3x loop breaker & stop-gate)
-                                 ──► skills/baton/  (<400-tok compaction capsule + DO NOT RETRY handoff)
+   ├── Stage 1: Orient & Recall  ──► crates/ap-atlas/  (16ms 6-lang Tree-sitter AST/vault map + >90d stale-TODO radar)
+   │                             ──► crates/ap-recall/ (3.4ms bundled SQLite FTS5/BM25 + EN/CJK triggered micro-memory)
+   ├── Stage 2: Slice & Diagnose ──► crates/ap-probe/  (6.3ms 6-lang Tree-sitter slice --bundle + Py/TS/JS/Rust run/diff)
+   ├── Stage 3: Surgical Act     ──► crates/ap-splice/ (0.7ms AST view + 2.5ms Zero-Escaping AST-verified atomic patcher)
+   ├── Stage 4: Filter Output    ──► crates/ap-sieve/  (98%+ log/JSON/JSONL/HTML-table/CSV compressor + 5.7ms FTS5 search)
+   └── Stage 5: Gate & Persist   ──► crates/ap-guard/  (<2ms dual-protocol exit-2 / JSON hook shield & 3x loop breaker)
+                                 ──► crates/ap-baton/  (<400-tok compaction capsule + DO NOT RETRY handoff)
 ```
 
 ---
 
 ## 4. The 5-Step Continuous Iteration Protocol
 
-Every future iteration around this repository follows a strict five-step engineering loop:
-
-### Step 1 — Mine Real Agent Trajectories (`Telemetry First`)
-After real daily work in `Grok`, `Codex`, `Antigravity`, `Claude Code`, or `OpenClaw`, run:
-```bash
-python audit/audit_sessions.py
-```
-Or inspect concrete sessions where an agent stalled, burned `30k+` thinking tokens, hit shell/encoding crashes, or looped. **No observed trajectory friction = no speculative feature.**
-
-### Step 2 — Pass the 4 Anti-Obsolescence Gate Questions
-Before writing code, answer:
-1. *If next year's model doubles in reasoning IQ, does this bottleneck disappear on its own, or is it a physical boundary?* (Build only the latter.)
-2. *Does this belong inside one of the existing 7 primitives (e.g., adding TypeScript/Go symbol spans to `splice`), or is it truly orthogonal?*
-3. *Can an agent invoke it in 1 shot via `--stdin` without shell-quoting traps or needing `--help`?*
-4. *Where is the honest negative boundary where calling it adds overhead?*
-
-### Step 3 — Build Zero-Dep & Enforce Isolation Tests
-- Implement inside `skills/<folder>/scripts/<name>.py` and verify frontmatter stays `< 85 tokens` via `python bench/run_bench.py`.
-- Add unit, rollback, CRLF/UTF-8 encoding, and standalone temp-dir isolation tests in `tests/test_primitives.py`.
-
-### Step 4 — Validate via Live Controlled Multi-Harness CLI A/B Runs
-- Test Vanilla vs. `+ Primitive` on live CLIs (`grok`, `codex`, `agy`, `claude`) with identical prompts and an independent hidden test oracle.
-- Inspect real traces for UX friction (e.g., parameter naming, missing auto-detection) and polish until wall-clock time, thinking spikes, crash rates, or token throughput show clear, reproducible gains.
-
-### Step 5 — Sync Bilingual Docs, Pass 6-Way Matrix CI & Log Evolution
-- Keep English (`README.md`, `HANDBOOK.md`, `PLAYBOOK.md`, skill `README.md`s) and Simplified Chinese (`*.zh-CN.md`) 1-to-1 synchronized.
-- Verify `python -m unittest discover -s tests -v`, `python bench/run_bench.py`, and GitHub Actions (`ubuntu`, `macos`, `windows` × Python `3.10`, `3.12`), then record the milestone in Section 6 below.
+1. **Step 1 — Mine Real Agent Trajectories (`ap audit --compare`)**: Inspect real local trajectories across `Codex`, `Pi`, `Antigravity`, `Claude Code`, and `Grok` (`101,108` tool calls across `427` sessions audited locally). **No observed trajectory friction = no speculative feature.**
+2. **Step 2 — Pass the 4 Anti-Obsolescence Gate Questions**: (a) Does higher model IQ erase this or is it a physical boundary? (b) Does it belong inside one of the 7 existing crates? (c) Can an agent invoke it in 1 shot via `--stdin` with zero escaping traps? (d) Where is the honest negative boundary?
+3. **Step 3 — Implement in Isolated Rust Crates**: Implement inside `crates/ap-<name>/`, keep `SKILL.md` frontmatter `< 85 tokens`, pass `cargo clippy --workspace --all-targets -- -D warnings`, and add integration/rollback/encoding tests in `tests/integration_primitives.rs`.
+4. **Step 4 — Validate via Live Controlled Multi-Harness CLI Runs**: Run real CLIs (`codex`, `pi`, `agy`, `grok`, `claude`) against hidden test oracles and inspect exact tool traces for friction.
+5. **Step 5 — Sync Bilingual Docs, Pass 3-OS CI & Publish Cross-Platform Binaries**: Keep English (`*.md`) and Simplified Chinese (`*.zh-CN.md`) 1:1 synchronized, verify Linux/macOS/Windows CI (`ci.yml`), and ship SHA-256 verified prebuilt binaries via `release.yml`.
 
 ---
 
-## 5. Active Iteration Backlog (Grounded in Observed Live Traces)
+## 5. Shipped Roadmap & Next Frontier Backlog
 
-- [x] **P1 · Polyglot Structural & Symbol Support (`probe slice --bundle` + `splice`)**: Shipped in `v0.3` — zero-dependency lexical/brace-aware import reachability slicing, active code bundling, and symbol `view` + `replace_symbol` across **Python, TypeScript/JavaScript, Go, and Rust** (handling Rust `'a` lifetimes vs. char literals).
-- [x] **P1 · Zero-Guess Test Runner Auto-Detection (`splice check --test`)**: Shipped in `v0.3` — auto-detects `pytest` vs. stdlib `unittest` vs. `node --experimental-strip-types --test` vs. `go test` vs. `cargo test` with bounded failure-preserving output.
-- [x] **P2 · Before/After Efficiency Delta Mode in `audit_sessions.py` (`--compare`)**: Shipped in `v0.3` — compares older vs. newer local session cohorts per harness.
-- [x] **P2 · 1-Line Zero-Clone Multi-Harness Onboarding (`ap.py init` + Native Manifests)**: Shipped in `v0.3` — 1-line `curl`/`irm | python - init` zero-clone bootstrapper across **`Codex`**, **`Pi`**, **`Antigravity`**, **`Claude Code`**, **`Grok`**, **`OpenClaw`**, and **`Hermes`**, dual-protocol `guard.py` hooks (Claude/Codex `exit 2` + Antigravity camelCase `deny`/`continue`), plus native `pi install`, `codex plugin`, `agy plugin`, and `Claude` plugin manifests.
-- [ ] **P3 · Polyglot Structural Hub & Stale-TODO Map (`atlas`)**: Extend `atlas map` symbol signature & import centrality extraction to TypeScript/Go/Rust monorepos.
-- [ ] **P3 · Personal Assistant Table, Email-Thread & JSONL Stream Extractors (`sieve` + `splice`)**: Higher-density extraction for wide HTML/Markdown tables, paginated APIs, and multi-message threads.
+- [x] **P1 · Polyglot Structural Slicing, Bundling & Auto-Test Runner (`probe` + `splice`)**: Shipped (`v0.3` → upgraded to real 6-language **Tree-sitter** AST in `v1.0.0`).
+- [x] **P2 · 1-Line Multi-Harness Onboarding & Cohort Trend Auditor (`ap init` + `ap audit --compare`)**: Shipped (`v0.3` → zero-Python native prebuilt binaries + 5-harness `Pi` support in `v1.0.0`).
+- [x] **P3 · 6-Language Tree-Sitter Hub & Stale-TODO Map (`ap-atlas`)**: Shipped in `v1.0.0` — native Tree-sitter signatures, `.gitignore`-aware hub scoring, `[dirty]` git markers & `>90d` stale-TODO warnings across Python, TS/TSX, JS, Go, Rust, and C (`16.3 ms` on 64 Rust modules).
+- [x] **P3 · Personal Assistant HTML `<table>`, CSV/TSV, JSONL Stream & FTS5 Search (`ap-sieve` + `ap-splice`)**: Shipped in `v1.0.0` — lossless HTML `<table>` → Markdown pipe-table extraction, CSV/TSV summaries, JSONL schemas, `<6 ms` bundled SQLite FTS5 `sieve search`, and Zero-Escaping `@@ FILE:` / `@@ SYMBOL:` / `@@ WRITE:` patching.
+- [ ] **P4 · Cross-Language Call-Graph Symbol Impact Cone (`ap-probe impact <symbol>`)**: Given a modified function/type signature, list exact downstream call sites across Py/TS/Go/Rust/C in `<15 ms` before patching.
+- [ ] **P4 · Native Windows Git-Bash PATH Bridge for `Pi` (`pi-coding-agent`)**: Auto-emit POSIX forward-slash `.agents/bin/ap` wrapper hints so `Pi`'s Git-Bash shell on Windows invokes `probe slice --bundle` on Turn 1 without falling back to `for f in src/*` loops.
 
 ---
 
@@ -115,7 +93,7 @@ Before writing code, answer:
 
 | Date / Milestone | Shipped Capabilities | Real Bottleneck Addressed | Verified Empirical Proof |
 | :--- | :--- | :--- | :--- |
-| **2026-11-15 · `v0.1` Foundation** | Shipped `sieve`, `baton`, `recall`, `guard`, `atlas` + `install.py` + deterministic `bench/run_bench.py` w/ negative controls | Context rot, compaction amnesia, `AGENTS.md` bloat, false completions, cold-start wandering & stale TODO traps | CI logs **-98.8%**, JSON **-99.6%**, 200-rule EN+CJK recall **`4.0ms` (100% Top-1)**, `360 tok` idle |
-| **2026-11-15 · `v0.2` Multi-CLI Empirical Upgrade** | Audited `69,963` real calls across 4 CLIs; shipped `audit/audit_sessions.py`, `skills/probe/` (`slice`/`run`/`diff`) & `skills/splice/` (`view`/`apply`/`check`) | `50.1%` same-file re-reads, `55k`-token prose heap simulation, `python -c` quoting crashes, Windows `cp936` errors & stale `.pyc` | `Grok 1.0.77` wall time **-49.1%** & reasoning **-65.4%**; `Antigravity 1.5.8` gross tokens **-53.4% (-506k tok)** & steps **-41.5%**; `10/10` tests & 6-job CI green |
-| **2026-11-15 · `v0.2.1` Living Handbook & Repo Constitution** | Established bilingual `HANDBOOK.md` / `HANDBOOK.zh-CN.md` and repo-level `AGENTS.md` | Codifies the 4-boundary anti-obsolescence philosophy, 6 constitutional laws, 5-step iteration loop & backlog | Full bilingual parity & CI matrix verified |
-| **2026-11-15 · `v0.3` Polyglot + 1-Line Multi-Harness Onboarding** | Shipped zero-clone `ap.py` (`curl`/`irm \| python - init`), native manifests (`pi`, `codex`, `agy`, `claude`), polyglot Py/TS/JS/Go/Rust `probe slice --bundle` & `splice` + `check --test`, `probe run` loop-dedup, dual-protocol `guard.py` hooks, and `audit --compare` | Eliminates 15-file sequential `read_file` waterfalls, 82KB loop trace spills, PowerShell quoting traps, Grok global-skill shadowing, and per-harness config friction | Live TS `ts-ledger` (`5/5` oracle): `Grok 1.0.77` **-26.5% time**, **-66.7% `read_file`**, **-38.7% tok (-34.4% cost)**; `Antigravity 1.5.8` **-61.3% steps**, **-85.7% edit errors** (Py `rulelang`: **-24.0% time**, **-74.2% `read_file`**, **-49.8% net tok**); `Codex 0.167` **-7.3% time**; `14/14` tests green |
+| **2026-11-15 · `v0.1` Foundation** | Initial `sieve`, `baton`, `recall`, `guard`, `atlas` + deterministic benchmarks w/ negative controls | Context rot, compaction amnesia, `AGENTS.md` bloat, false completions & stale TODO traps | CI logs **-98.8%**, JSON **-99.6%**, 200-rule EN+CJK recall **100% Top-1** |
+| **2026-11-15 · `v0.2`–`v0.2.1` Multi-CLI Upgrade & Handbook** | Audited `69,963` calls; shipped `probe` (`slice`/`run`/`diff`), `splice` (`view`/`apply`/`check`) & bilingual `HANDBOOK` | `50.1%` same-file re-reads, `55k`-tok prose heap simulation, quoting crashes & Windows `cp936` errors | `Grok 1.0.77` wall time **-49.1%** & reasoning **-65.4%**; `Antigravity 1.5.8` net tok **-49.8%** & `read_file` **-74.2%** |
+| **2026-11-15 · `v0.3` Polyglot + 1-Line Multi-Harness** | 1-line `init` across `Codex`/`Pi`/`Antigravity`/`Claude`/`Grok`, `slice --bundle`, `check --test`, dual-protocol hooks & `audit --compare` | 15-file sequential `read_file` waterfalls, 82KB loop trace spills & per-harness config friction | TS `ts-ledger` (`5/5` oracle): `Grok 1.0.77` **-26.5% time**, **-38.7% tok**; `Antigravity 1.5.8` **-61.3% steps**, **-85.7% edit errors** |
+| **2026-11-18 · `v1.0.0` Pure-Rust Single-Binary Engine** | Complete **Pure-Rust rewrite (`0` `.py` files)**: single native `ap` binary + 7 isolated Cargo crates (`ap-*`), 6-lang **Tree-sitter** AST (`Py/TS/JS/Go/Rust/C`), **bundled SQLite FTS5**, Zero-Escaping `@@ FILE:` AST-verified patcher, Node V8 `Proxy` + `rustc` probes, `sieve search` + HTML-table/JSONL/CSV, `101,108`-call 5-harness `ap audit`, and `install.sh`/`install.ps1` + 5-target GitHub Releases | Eliminates Python/interpreter startup overhead (`40–90ms` → `0.7–16ms`), brace-heuristic edge cases, JSON patch escaping errors, BrokenPipe crashes, Windows `\\?\` Node path bugs & Python runtime prerequisites | `splice view` **`0.68ms` (-95.4% tok)**, `apply` **`2.46ms`**, `recall` **`3.37ms` (20/20)**, `probe slice` **`6.32ms`**, `atlas` **`16.3ms`**, `412 tok` total idle; live `Codex 0.167 + Rust ap v1.0` solved 24-file TS `ts-ledger` (`5/5` oracle) in **`4` total commands** (`161.8k tok`, `0` manual file reads, 13 edits + 15 tests in 1 atomic `ap splice apply --stdin --test` call); `11/11` Rust integration suites & `0` clippy warnings |

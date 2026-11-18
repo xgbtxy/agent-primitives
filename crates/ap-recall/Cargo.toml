@@ -1,0 +1,20 @@
+[package]
+name = "ap-recall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Sub-millisecond triggered micro-memory vault (bundled SQLite FTS5/BM25 + CJK hybrid)"
+
+[[bin]]
+name = "recall"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

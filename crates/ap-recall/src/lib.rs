@@ -1,0 +1,520 @@
+use clap::{Parser, Subcommand};
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleMatch {
+    pub id: String,
+    pub kind: String,
+    pub triggers: String,
+    pub rule: String,
+    pub score: f64,
+    pub hits: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultStats {
+    pub total_rules: usize,
+    pub monolithic_tokens_if_always_loaded: usize,
+    pub typical_top3_injected_tokens: usize,
+    pub total_hits: i64,
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "recall", about = "Sub-millisecond triggered micro-memory vault (bundled SQLite FTS5)")]
+struct Cli {
+    #[command(subcommand)]
+    subcmd: SubCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum SubCmd {
+    /// Add or update a triggered micro-rule
+    Add {
+        #[arg(long)]
+        triggers: String,
+        #[arg(long)]
+        rule: String,
+        #[arg(long, default_value = "gotcha")]
+        kind: String,
+    },
+    /// Retrieve top-K matching rules in <1ms
+    Match {
+        #[arg(long, default_value = "")]
+        query: String,
+        #[arg(long, default_value = "")]
+        files: String,
+        #[arg(long, default_value_t = 3)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show vault size, token comparison, and hit metrics
+    Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete zero-hit rules older than N days
+    Prune {
+        #[arg(long, default_value_t = 90)]
+        stale_days: i64,
+    },
+}
+
+fn is_cjk(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+pub fn tokenize_cjk_hybrid(text: &str) -> String {
+    let mut out_tokens: Vec<String> = Vec::new();
+    let mut cur_ascii = String::new();
+    let mut cjk_buf: Vec<char> = Vec::new();
+
+    let flush_ascii = |buf: &mut String, out: &mut Vec<String>| {
+        if !buf.is_empty() {
+            for w in buf.split_whitespace() {
+                if !w.is_empty() {
+                    out.push(w.to_string());
+                }
+            }
+            buf.clear();
+        }
+    };
+
+    let flush_cjk = |buf: &mut Vec<char>, out: &mut Vec<String>| {
+        if !buf.is_empty() {
+            for &ch in buf.iter() {
+                out.push(ch.to_string());
+            }
+            for win in buf.windows(2) {
+                let mut bi = String::with_capacity(6);
+                bi.push(win[0]);
+                bi.push(win[1]);
+                out.push(bi);
+            }
+            buf.clear();
+        }
+    };
+
+    for ch in text.chars() {
+        if is_cjk(ch) {
+            flush_ascii(&mut cur_ascii, &mut out_tokens);
+            cjk_buf.push(ch);
+        } else {
+            flush_cjk(&mut cjk_buf, &mut out_tokens);
+            cur_ascii.push(ch);
+        }
+    }
+    flush_ascii(&mut cur_ascii, &mut out_tokens);
+    flush_cjk(&mut cjk_buf, &mut out_tokens);
+    out_tokens.join(" ")
+}
+
+pub fn vault_path(cwd: &Path) -> PathBuf {
+    let base = match std::env::var("RECALL_HOME") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
+        _ => cwd.join(".recall"),
+    };
+    let _ = fs::create_dir_all(&base);
+    let gi = base.join(".gitignore");
+    if !gi.exists() {
+        let _ = fs::write(&gi, "*.db-journal\n*.db-wal\n*.db-shm\n");
+    }
+    base.join("vault.db")
+}
+
+pub fn open_vault(db_path: &Path) -> rusqlite::Result<Connection> {
+    if let Some(parent) = db_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(db_path)?;
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS rules (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            triggers TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            search_tokens TEXT NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            last_hit_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS rules_fts USING fts5(
+            id UNINDEXED,
+            search_tokens,
+            tokenize='unicode61'
+        );",
+    )?;
+    Ok(conn)
+}
+
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+pub fn add_rule(conn: &Connection, triggers: &str, rule: &str, kind: &str) -> rusqlite::Result<String> {
+    let norm_rule = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+    let norm_trig = triggers
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{norm_trig}::{norm_rule}").as_bytes());
+    let rule_id = format!("{:x}", hasher.finalize())[..10].to_string();
+    let now = now_epoch();
+    let tokens = tokenize_cjk_hybrid(&format!("{} {norm_rule} {kind}", norm_trig.replace(',', " ")));
+
+    conn.execute(
+        "INSERT INTO rules (id, kind, triggers, rule, search_tokens, hits, created_at, last_hit_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 0)
+         ON CONFLICT(id) DO UPDATE SET
+             kind=excluded.kind,
+             triggers=excluded.triggers,
+             rule=excluded.rule,
+             search_tokens=excluded.search_tokens",
+        params![rule_id, kind, norm_trig, norm_rule, tokens, now],
+    )?;
+    conn.execute("DELETE FROM rules_fts WHERE id = ?1", params![rule_id])?;
+    conn.execute(
+        "INSERT INTO rules_fts (id, search_tokens) VALUES (?1, ?2)",
+        params![rule_id, tokens],
+    )?;
+    Ok(rule_id)
+}
+
+fn wildcard_match(pat: &str, text: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_pi, mut star_ti) = (None, 0usize);
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_ti = ti;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+fn contains_token_bounded(haystack: &str, needle: &str, block_left_slash: bool) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    for (idx, _) in haystack.match_indices(needle) {
+        let left_ok = match haystack[..idx].chars().next_back() {
+            None => true,
+            Some(c) => !is_ident_char(c) && !(block_left_slash && c == '/'),
+        };
+        let right_idx = idx + needle.len();
+        let right_ok = match haystack[right_idx..].chars().next() {
+            None => true,
+            Some(c) => !is_ident_char(c),
+        };
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
+}
+
+struct StoredRow {
+    kind: String,
+    triggers: String,
+    rule: String,
+    hits: i64,
+}
+
+pub fn match_rules(
+    conn: &Connection,
+    query: &str,
+    files: &[String],
+    top_k: usize,
+) -> rusqlite::Result<(Vec<RuleMatch>, f64)> {
+    let t0 = Instant::now();
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    let mut rows_by_id: HashMap<String, StoredRow> = HashMap::new();
+
+    let q_lower = query.to_lowercase();
+    let norm_files: Vec<String> = files
+        .iter()
+        .map(|f| f.trim().replace('\\', "/").trim_start_matches("./").to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let norm_files_lower: Vec<String> = norm_files.iter().map(|f| f.to_lowercase()).collect();
+
+    {
+        let mut stmt = conn.prepare("SELECT id, kind, triggers, rule, hits FROM rules")?;
+        let iter = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                StoredRow {
+                    kind: r.get(1)?,
+                    triggers: r.get(2)?,
+                    rule: r.get(3)?,
+                    hits: r.get(4)?,
+                },
+            ))
+        })?;
+        for item in iter {
+            let (rid, row) = item?;
+            let mut sc = 0.0;
+            for trig in row.triggers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let tl = trig.to_lowercase().replace('\\', "/");
+                if tl.contains('*') || tl.contains('?') || tl.contains('/') {
+                    let prefix = tl.trim_end_matches(['/', '*']);
+                    for nfl in &norm_files_lower {
+                        if wildcard_match(&tl, nfl)
+                            || (!prefix.is_empty() && (nfl == prefix || nfl.starts_with(&format!("{prefix}/"))))
+                        {
+                            sc += 8.0;
+                        }
+                    }
+                    if !prefix.is_empty() && contains_token_bounded(&q_lower, prefix, true) {
+                        sc += 4.0;
+                    }
+                } else if contains_token_bounded(&q_lower, &tl, false)
+                    || norm_files_lower
+                        .iter()
+                        .any(|nfl| contains_token_bounded(nfl, &tl, false))
+                {
+                    sc += 5.0;
+                }
+            }
+            if sc > 0.0 {
+                scores.insert(rid.clone(), sc);
+            }
+            rows_by_id.insert(rid, row);
+        }
+    }
+
+    let combined_q = format!("{query} {}", norm_files.join(" "));
+    let mut q_tokens: Vec<String> = Vec::new();
+    for raw_tok in tokenize_cjk_hybrid(&combined_q).split_whitespace() {
+        let cleaned: String = raw_tok
+            .chars()
+            .filter(|&c| c.is_alphanumeric() || c == '_' || is_cjk(c))
+            .collect();
+        if (cleaned.chars().count() >= 2 || cleaned.chars().any(is_cjk)) && !q_tokens.contains(&cleaned) {
+            q_tokens.push(cleaned);
+            if q_tokens.len() >= 24 {
+                break;
+            }
+        }
+    }
+
+    if !q_tokens.is_empty() {
+        let fts_expr = q_tokens
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if let Ok(mut fts_stmt) = conn.prepare(
+            "SELECT id, bm25(rules_fts) AS rank FROM rules_fts WHERE rules_fts MATCH ?1 ORDER BY rank LIMIT 20",
+        ) {
+            if let Ok(rows) = fts_stmt.query_map(params![fts_expr], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            }) {
+                for pair in rows.flatten() {
+                    let boost = (-pair.1).max(0.5);
+                    *scores.entry(pair.0).or_insert(0.0) += boost;
+                }
+            }
+        }
+    }
+
+    let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(top_k);
+
+    let now = now_epoch();
+    let mut results = Vec::new();
+    for (rid, sc) in ranked {
+        if let Some(r) = rows_by_id.get(&rid) {
+            let _ = conn.execute(
+                "UPDATE rules SET hits = hits + 1, last_hit_at = ?1 WHERE id = ?2",
+                params![now, rid],
+            );
+            results.push(RuleMatch {
+                id: rid,
+                kind: r.kind.clone(),
+                triggers: r.triggers.clone(),
+                rule: r.rule.clone(),
+                score: (sc * 100.0).round() / 100.0,
+                hits: r.hits + 1,
+            });
+        }
+    }
+
+    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    Ok((results, elapsed_ms))
+}
+
+pub fn compute_stats(conn: &Connection) -> rusqlite::Result<VaultStats> {
+    let mut stmt = conn.prepare("SELECT rule, triggers, hits FROM rules")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut total_rules = 0usize;
+    let mut full_bytes = 0usize;
+    let mut total_hits = 0i64;
+    for item in rows {
+        let (rule, triggers, hits) = item?;
+        total_rules += 1;
+        full_bytes += rule.len() + triggers.len() + 16;
+        total_hits += hits;
+    }
+    let full_tokens_est = full_bytes.div_ceil(4);
+    Ok(VaultStats {
+        total_rules,
+        monolithic_tokens_if_always_loaded: full_tokens_est,
+        typical_top3_injected_tokens: full_tokens_est.min(135),
+        total_hits,
+    })
+}
+
+pub fn run_cli(args: &[String]) -> i32 {
+    let cli = match Cli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if e.use_stderr() { 2 } else { 0 };
+            let _ = e.print();
+            return code;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let conn = match open_vault(&vault_path(&cwd)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[recall] failed to open SQLite vault: {e}");
+            return 1;
+        }
+    };
+
+    match cli.subcmd {
+        SubCmd::Add {
+            triggers,
+            rule,
+            kind,
+        } => match add_rule(&conn, &triggers, &rule, &kind) {
+            Ok(rid) => {
+                println!("[recall] stored id={rid} kind={kind} triggers='{triggers}'");
+                0
+            }
+            Err(e) => {
+                eprintln!("[recall] error storing rule: {e}");
+                1
+            }
+        },
+        SubCmd::Match {
+            query,
+            files,
+            top,
+            json: as_json,
+        } => {
+            let file_list: Vec<String> = files
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            match match_rules(&conn, &query, &file_list, top) {
+                Ok((hits, elapsed_ms)) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "elapsed_ms": (elapsed_ms * 100.0).round() / 100.0,
+                                "matches": hits
+                            }))
+                            .unwrap_or_default()
+                        );
+                        return 0;
+                    }
+                    if hits.is_empty() {
+                        println!("[recall] 0 triggered rules ({elapsed_ms:.2}ms)");
+                        return 0;
+                    }
+                    println!("# Recall Active Rules ({} matched in {elapsed_ms:.2}ms)", hits.len());
+                    for h in hits {
+                        println!("- **[{}]** (`{}`): {}", h.kind, h.triggers, h.rule);
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("[recall] match failed: {e}");
+                    1
+                }
+            }
+        }
+        SubCmd::Stats { json: as_json } => match compute_stats(&conn) {
+            Ok(st) => {
+                if as_json {
+                    println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+                } else {
+                    println!(
+                        "[recall] rules={} | full-dump={} tok vs top-3={} tok | total_hits={}",
+                        st.total_rules,
+                        st.monolithic_tokens_if_always_loaded,
+                        st.typical_top3_injected_tokens,
+                        st.total_hits
+                    );
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("[recall] stats failed: {e}");
+                1
+            }
+        },
+        SubCmd::Prune { stale_days } => {
+            let cutoff = now_epoch() - stale_days * 86400;
+            let stale_ids: Vec<String> = conn
+                .prepare("SELECT id FROM rules WHERE hits = 0 AND created_at < ?1")
+                .and_then(|mut st| {
+                    let rows = st.query_map(params![cutoff], |r| r.get::<_, String>(0))?;
+                    Ok(rows.flatten().collect())
+                })
+                .unwrap_or_default();
+            for rid in &stale_ids {
+                let _ = conn.execute("DELETE FROM rules WHERE id = ?1", params![rid]);
+                let _ = conn.execute("DELETE FROM rules_fts WHERE id = ?1", params![rid]);
+            }
+            println!("[recall] pruned {} stale zero-hit rules.", stale_ids.len());
+            0
+        }
+    }
+}

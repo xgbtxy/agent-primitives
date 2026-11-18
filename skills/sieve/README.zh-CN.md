@@ -1,37 +1,20 @@
-# `sieve` — 无损输出漏斗与黑匣子回放器
+# `sieve` (`crates/ap-sieve`) — 无损输出压缩器、表格提取与内置 SQLite FTS5 黑匣子
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-**独立单文件夹微基础设施（`skills/sieve/`）** · 零第三方依赖 · 待机仅占 `83 Tokens`。
+**独立纯 Rust Crate（`crates/ap-sieve`）与技能目录（`skills/sieve/`）** · 内置静态 SQLite FTS5 · 待机仅 `59 tokens`。
 
 ## 解决什么真实痛点？
 
-一次 `pytest` / `cargo` 测试、一份 CI 构建日志、一段大 JSON 接口返回或抓回来的长网页（动辄 `50~300 KB`），会瞬间把 Agent 上下文灌满（Context Rot），导致后续每一轮对话都在重复为这堆噪音付费。而市面上常见的命令行代理采用**有损裁剪**——一旦把关键报错行裁掉了，Agent 只能重跑整条耗时命令。
-
-`sieve` 采用**「高信噪比摘要 + 本地环形黑匣子无损回放」**双层机制（默认上限 50 MB 自动淘汰旧文件）：
-- **测试 / 构建 / 运维日志**：自动折叠重复刷屏行，精准提取去重后的异常调用栈并标注精确行号（`L915-L920`），压减 **98.8%**。
-- **JSON 接口数据**：提取顶层字段、数组长度、元素 Schema 与 `error`/`warnings` 告警字段，400 条记录实测压减 **99.6%**。
-- **网页 HTML**：剥离 `<script>`、`<style>`、`<svg>` 噪音，保留标题、`H1–H3` 大纲与核心正文，压减 **98.4%**。
-- **短输出保护（`< 1.2 KB`）**：短结果（如 `git status`）自动原样直通，绝不画蛇添足。
-
-## 单独拷走这一个文件夹即可使用
-
-```bash
-cp -r skills/sieve ~/.agents/skills/
-# 或：npx skills add xgbtxy/agent-primitives --skill sieve
-```
+本机审计发现 **30,274 次** 工具输出超过 `8 KB`。`ap sieve` 将 `>1.2 KB` 的 CI 日志（**-98.8%**）、JSON 接口（**-99.6%**）、**JSONL / NDJSON 事件流（-97.0%，自动提取异常行）**、**复杂 HTML 网页（含 `<table>` 管道表，-98.4%）** 与 **CSV/TSV 数据表** 压缩为高信噪比摘要，同时将原文索引至内置静态 SQLite `FTS5`，支持 `<6 ms` 全文检索 `search` 与按需无损切片 `peek`（`<1.2 KB` 短输出诚实原样直通）。
 
 ## 常用命令
 
 ```bash
-# Coding Agent：包裹冗长测试或编译命令
-python scripts/sieve.py run -- pytest -q
-
-# 个人助手 Agent：通过管道压缩 API JSON、网页 HTML 或长日志
-curl -s https://api.example.com/events | python scripts/sieve.py pipe --label events
-
-# 毫秒级无损回放原文切片（无需重跑原命令！）
-python scripts/sieve.py peek <id> --lines 910:930
-python scripts/sieve.py peek <id> --grep "AssertionError|KeyError" -C 6
-python scripts/sieve.py peek <id> --json-path "items.0"
+ap sieve run -- cargo test
+curl -s https://api.example.com/events.jsonl | ap sieve pipe --label events
+ap sieve search "upstream_gateway_timeout"
+ap sieve peek <id> --lines 120:160
+ap sieve peek <id> --grep "AssertionError|panicked at" -C 5
+ap sieve peek <id> --json-path "42.error"
 ```

@@ -1,6 +1,6 @@
 ---
 name: baton
-description: Save and resume compaction-proof task state, verified facts, falsified dead-ends, and next steps across sessions, git worktrees, and heterogeneous agents (Claude Code, Codex, Grok Build, Antigravity, OpenClaw, Hermes) in <500 tokens with zero LLM cost.
+description: Save and resume compaction-proof task state, verified facts, falsified dead-ends, and next steps across sessions, git worktrees, and heterogeneous agents (Claude Code, Codex, Grok, Antigravity, Pi) in <500 tokens.
 ---
 
 # Baton — Compaction-Proof State & Cross-Agent Handoff Capsule
@@ -11,15 +11,15 @@ Eliminate post-compaction amnesia and cross-agent state loss without cloud accou
 
 ```bash
 # 1. Start or update active task state
-python scripts/baton.py set --goal "Fix OTLP retry backoff jitter" --next "Run unit test on line 142"
+ap baton set --goal "Fix OTLP retry backoff jitter" --next "Run unit test on line 142"
 
 # 2. Record verified ground-truth facts & falsified dead-ends (prevents repeat loops!)
-python scripts/baton.py fact "Timeout originates in exporter/http.py:88" --ref "exporter/http.py:88"
-python scripts/baton.py deadend "Increasing pool_maxsize had zero effect on 429 retries"
+ap baton fact "Timeout originates in exporter/http.rs:88" --ref "exporter/http.rs:88"
+ap baton deadend "Increasing pool_maxsize had zero effect on 429 retries"
 
 # 3. Auto-snapshot workspace state (wire into PreCompact / Stop hooks)
-python scripts/baton.py checkpoint --note "Before context compaction"
+ap baton checkpoint --note "Before context compaction"
 
 # 4. Resume cleanly in <500 tokens in any new session or different agent
-python scripts/baton.py resume
+ap baton resume
 ```

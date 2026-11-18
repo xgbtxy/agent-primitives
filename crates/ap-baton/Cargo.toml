@@ -1,0 +1,18 @@
+[package]
+name = "ap-baton"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Compaction-proof state & cross-agent handoff capsule (<500 tokens)"
+
+[[bin]]
+name = "baton"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

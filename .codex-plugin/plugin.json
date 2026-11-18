@@ -1,6 +1,6 @@
 {
   "name": "agent-primitives",
-  "version": "0.3.0",
-  "description": "Zero-dependency deterministic OS/AST/Heap/SQLite micro-infrastructure primitives for coding & personal assistant agents",
+  "version": "1.0.0",
+  "description": "Single-binary Rust OS/Tree-sitter-AST/Heap/SQLite micro-infrastructure primitives for coding & personal assistant agents",
   "skills": "./skills/"
 }

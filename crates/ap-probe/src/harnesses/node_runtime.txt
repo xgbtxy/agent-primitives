@@ -1,0 +1,163 @@
+const __probeEvents = [];
+const __aliasHazards = [];
+const __mutationAlerts = [];
+const __stateNoops = [];
+const __numericHazards = [];
+const __callCounts = new Map();
+const __seenAlerts = new Set();
+const __MUTATOR_RE = /^(?:set|put|add|delete|remove|revoke|rollback|clear|reset|cancel|record|append|post|apply|update|evict|purge|commit)/i;
+const __CLONE_RE = /(?:clone|copy|snapshot|dup)/i;
+
+function __isMutObj(v) {
+  return v !== null && typeof v === "object" && !(v instanceof RegExp) && !(v instanceof Date);
+}
+
+function __collectRefs(v, out = new Set(), seen = new Set()) {
+  if (!__isMutObj(v) || seen.has(v)) return out;
+  seen.add(v);
+  out.add(v);
+  if (Array.isArray(v)) {
+    for (const x of v) __collectRefs(x, out, seen);
+  } else if (v instanceof Map) {
+    for (const [k, val] of v.entries()) { __collectRefs(k, out, seen); __collectRefs(val, out, seen); }
+  } else if (v instanceof Set) {
+    for (const x of v.values()) __collectRefs(x, out, seen);
+  } else {
+    for (const k of Object.keys(v)) __collectRefs(v[k], out, seen);
+  }
+  return out;
+}
+
+function __snap(v, depth = 0, seen = new WeakMap()) {
+  if (v === null || v === undefined) return { t: String(v) };
+  if (typeof v === "number") {
+    if (Number.isNaN(v)) return { t: "NaN" };
+    if (Object.is(v, -0)) return { t: "-0" };
+    return { t: "num", v };
+  }
+  if (typeof v !== "object") return { t: typeof v, v: typeof v === "bigint" ? v.toString() : v };
+  if (depth > 5) return { t: "max_depth" };
+  if (seen.has(v)) return { t: "cycle" };
+  seen.set(v, true);
+  if (Array.isArray(v)) return { t: "arr", items: v.map(x => __snap(x, depth + 1, seen)) };
+  if (v instanceof Map) return { t: "map", entries: Array.from(v.entries()).map(([k, val]) => [__snap(k, depth + 1, seen), __snap(val, depth + 1, seen)]) };
+  if (v instanceof Set) return { t: "set", items: Array.from(v.values()).map(x => __snap(x, depth + 1, seen)) };
+  const obj = {};
+  for (const k of Object.keys(v).sort()) obj[k] = __snap(v[k], depth + 1, seen);
+  return { t: v.constructor ? v.constructor.name : "Object", props: obj };
+}
+
+function __deepEq(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function __short(v) {
+  if (Object.is(v, -0)) return "-0";
+  if (typeof v === "number" && Number.isNaN(v)) return "NaN";
+  if (v === undefined) return "undefined";
+  try {
+    const s = JSON.stringify(v, (_, val) => {
+      if (val instanceof Map) return Object.fromEntries(val);
+      if (val instanceof Set) return Array.from(val);
+      return typeof val === "bigint" ? val.toString() + "n" : val;
+    });
+    return s && s.length > 96 ? s.slice(0, 93) + "..." : String(s);
+  } catch {
+    return String(v);
+  }
+}
+
+function __pushUnique(arr, msg) {
+  if (!__seenAlerts.has(msg)) {
+    __seenAlerts.add(msg);
+    arr.push(msg);
+  }
+}
+
+function __wrapCallable(fn, label, isMethod) {
+  return new Proxy(fn, {
+    apply(target, thisArg, args) {
+      const argSnaps = args.map(a => __snap(a));
+      const selfSnap = (isMethod && __isMutObj(thisArg)) ? __snap(thisArg) : null;
+      const argRefs = new Set();
+      for (const a of args) __collectRefs(a, argRefs);
+      const selfRefs = (isMethod && __isMutObj(thisArg)) ? __collectRefs(thisArg) : new Set();
+      if (isMethod && __isMutObj(thisArg)) selfRefs.delete(thisArg);
+
+      let ret;
+      try {
+        ret = Reflect.apply(target, thisArg, args);
+      } catch (err) {
+        const afterSelf = (isMethod && __isMutObj(thisArg)) ? __snap(thisArg) : null;
+        if (selfSnap && afterSelf && !__deepEq(selfSnap, afterSelf)) {
+          __pushUnique(__mutationAlerts, `${label} threw ${err?.name || "Error"}(${err?.message || err}) AFTER mutating \`this\` state without rollback`);
+        }
+        for (let i = 0; i < args.length; i++) {
+          if (__isMutObj(args[i]) && !__deepEq(argSnaps[i], __snap(args[i]))) {
+            __pushUnique(__mutationAlerts, `${label} threw ${err?.name || "Error"} AFTER mutating caller arg[${i}] in-place`);
+          }
+        }
+        const cnt = (__callCounts.get(label) || 0) + 1;
+        __callCounts.set(label, cnt);
+        if (cnt === 1) __probeEvents.push({ label, args: args.map(__short).join(", "), outcome: `RAISED ${err?.name || "Error"}: ${err?.message || err}`, count: 1 });
+        else { const e = __probeEvents.find(x => x.label === label); if (e) e.count = cnt; }
+        throw err;
+      }
+
+      for (let i = 0; i < args.length; i++) {
+        if (__isMutObj(args[i]) && !__deepEq(argSnaps[i], __snap(args[i]))) {
+          __pushUnique(__mutationAlerts, `${label} mutated caller arg[${i}] in-place`);
+        }
+      }
+      if (__isMutObj(ret) && ret !== thisArg) {
+        const retRefs = __collectRefs(ret);
+        for (const r of retRefs) {
+          if (selfRefs.has(r)) {
+            __pushUnique(__aliasHazards, `${label} returned object sharing mutable nested reference with \`this\` state`);
+            break;
+          }
+          if (argRefs.has(r) && (r !== args[0] || __CLONE_RE.test(label))) {
+            __pushUnique(__aliasHazards, `${label} returned object sharing mutable nested reference with caller input`);
+            break;
+          }
+        }
+      }
+      const methodShort = label.split(".").pop() || label;
+      if (isMethod && selfSnap && __MUTATOR_RE.test(methodShort) && __deepEq(selfSnap, __snap(thisArg))) {
+        __pushUnique(__stateNoops, `${label} left \`this\` state unchanged (state no-op)`);
+      }
+      if (typeof ret === "number" && (Number.isNaN(ret) || Object.is(ret, -0) || !Number.isFinite(ret))) {
+        __pushUnique(__numericHazards, `${label} returned ${Object.is(ret, -0) ? "-0 (negative zero)" : String(ret)}`);
+      }
+
+      const cnt = (__callCounts.get(label) || 0) + 1;
+      __callCounts.set(label, cnt);
+      if (cnt === 1) {
+        __probeEvents.push({ label, args: args.map(__short).join(", "), outcome: `-> ${__short(ret)}`, count: 1 });
+      } else {
+        const existing = __probeEvents.find(x => x.label === label);
+        if (existing) existing.count = cnt;
+      }
+      return ret;
+    }
+  });
+}
+
+globalThis.__probeWrap = function(val, modName, symName) {
+  if (typeof val !== "function") return val;
+  const proto = val.prototype;
+  if (proto && Object.getOwnPropertyNames(proto).some(k => k !== "constructor" && typeof proto[k] === "function")) {
+    if (!Object.prototype.hasOwnProperty.call(proto, "__probeWrapped")) {
+      Object.defineProperty(proto, "__probeWrapped", { value: true, enumerable: false });
+      for (const k of Object.getOwnPropertyNames(proto)) {
+        if (k === "constructor") continue;
+        const desc = Object.getOwnPropertyDescriptor(proto, k);
+        if (desc && typeof desc.value === "function" && desc.writable) {
+          proto[k] = __wrapCallable(desc.value, `${modName}::${symName}.${k}`, true);
+        }
+      }
+    }
+    return val;
+  }
+  return __wrapCallable(val, `${modName}::${symName}`, false);
+};

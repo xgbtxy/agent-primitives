@@ -1,8 +1,12 @@
-__pycache__/
-*.py[cod]
+/target/
+/dist/
 .sieve/
 .baton/
 .recall/
 .guard/
+.probe/
+.splice/
+__pycache__/
+*.py[cod]
 .pytest_cache/
 .DS_Store

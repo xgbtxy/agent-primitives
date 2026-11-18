@@ -1,0 +1,240 @@
+import copy, inspect, io, json, linecache, os, re, sys, time, traceback, types, unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", "target", ".agents", ".sieve", ".baton", ".recall", ".guard"}
+READONLY_PREFIXES = ("__", "get_", "is_", "has_", "can_", "should_", "to_", "as_", "format", "render", "dump", "print", "log", "check_", "validate", "verify", "count", "len", "peek", "match", "find", "search")
+
+def _short(val, max_len=88):
+    try:
+        if isinstance(val, bool): return "True" if val else "False"
+        if isinstance(val, (int, float, type(None))): return repr(val)
+        s = repr(val)
+        return s if len(s) <= max_len else s[:max_len - 3] + "..."
+    except Exception:
+        return f"<{type(val).__name__}>"
+
+def _is_mut(val):
+    if isinstance(val, (str, bytes, int, float, bool, tuple, frozenset, type(None), type, types.FunctionType, types.MethodType, types.ModuleType)):
+        return False
+    if isinstance(val, (dict, list, set, bytearray)):
+        return True
+    return hasattr(val, "__dict__") and not getattr(getattr(type(val), "__dataclass_params__", None), "frozen", False)
+
+def _snap(val, d=0, seen=None):
+    if seen is None: seen = set()
+    tn = type(val).__name__
+    if val is None or isinstance(val, (bool, int, float, str, bytes)): return (tn, val)
+    oid = id(val)
+    if oid in seen: return ("cycle", tn)
+    if d >= 5: return (tn, _short(val, 60))
+    ns = seen | {oid}
+    if isinstance(val, dict):
+        items = [(_snap(k, d+1, ns), _snap(v, d+1, ns)) for k, v in list(val.items())[:40]]
+        items.sort(key=lambda p: repr(p[0]))
+        return ("dict", tuple(items))
+    if isinstance(val, (list, tuple)):
+        return (tn, tuple(_snap(x, d+1, ns) for x in list(val)[:40]))
+    if isinstance(val, (set, frozenset)):
+        el = [_snap(x, d+1, ns) for x in list(val)[:40]]
+        el.sort(key=repr)
+        return (tn, tuple(el))
+    dct = getattr(val, "__dict__", None)
+    if isinstance(dct, dict):
+        return ("obj:" + tn, tuple((k, _snap(dct[k], d+1, ns)) for k in sorted(dct.keys())[:40] if not k.startswith("__")))
+    return (tn, _short(val, 60))
+
+def _collect_muts(val, path, d=0, out=None, seen=None):
+    if out is None: out = {}
+    if seen is None: seen = set()
+    oid = id(val)
+    if oid in seen or d > 4: return out
+    seen.add(oid)
+    if _is_mut(val): out[oid] = (path, type(val).__name__)
+    if isinstance(val, dict):
+        for k, v in list(val.items())[:30]: _collect_muts(v, f"{path}[{k!r}]", d+1, out, seen)
+    elif isinstance(val, (list, tuple, set)):
+        for i, x in enumerate(list(val)[:30]): _collect_muts(x, f"{path}[{i}]", d+1, out, seen)
+    else:
+        dct = getattr(val, "__dict__", None)
+        if isinstance(dct, dict):
+            for k, v in list(dct.items())[:30]:
+                if not k.startswith("__"): _collect_muts(v, f"{path}.{k}", d+1, out, seen)
+    return out
+
+cfg = json.loads(sys.stdin.read())
+mode = cfg["mode"]
+cwd = Path(cfg["cwd"]).resolve()
+sys.path.insert(0, str(cwd))
+if (cwd / "src").is_dir(): sys.path.insert(0, str(cwd / "src"))
+
+if mode == "run":
+    t0 = time.perf_counter()
+    cwd_norm = os.path.normcase(str(cwd))
+    focus_norm = cfg.get("focus", "").strip().replace("\\", "/").lower()
+    include_tests = bool(cfg.get("include_tests", False))
+    max_calls = int(cfg.get("max_calls", 30))
+    call_log, total_calls = [], [0]
+    alias_sites, mut_sites, noop_sites, exc_sites = {}, {}, {}, {}
+    frame_state, depth = {}, [0]
+
+    def tracer(frame, event, arg):
+        if event == "call":
+            fn = frame.f_code.co_filename
+            if not fn or fn.startswith("<"): return None
+            ab = os.path.abspath(fn)
+            if not os.path.normcase(ab).startswith(cwd_norm): return None
+            rel = os.path.relpath(ab, str(cwd)).replace("\\", "/")
+            parts = rel.split("/")
+            if any(p in SKIP_DIRS for p in parts): return None
+            if not include_tests and (parts[0] == "tests" or parts[-1].startswith("test_")): return None
+            if focus_norm and focus_norm not in rel.lower(): return None
+            co_name = frame.f_code.co_name
+            if co_name.startswith("<") or linecache.getline(fn, frame.f_code.co_firstlineno).lstrip().startswith("class "): return None
+            ai = inspect.getargvalues(frame)
+            bargs = [(a, ai.locals[a]) for a in ai.args if a in ai.locals]
+            qual = f"{type(bargs[0][1]).__name__}.{co_name}" if (bargs and bargs[0][0] == "self") else co_name
+            pre_s = {k: _snap(v) for k, v in bargs}
+            pre_m = {k: _collect_muts(v, k) for k, v in bargs}
+            prevs = [f"{k}={_short(v, 44)}" for k, v in bargs if k != "self"]
+            cidx = len(call_log) if total_calls[0] < max_calls else -1
+            total_calls[0] += 1
+            if cidx >= 0:
+                call_log.append(f"{'  '*min(depth[0],6)}-> {rel}:L{frame.f_lineno} {qual}({', '.join(prevs)})")
+            frame_state[id(frame)] = {"rel": rel, "ln": frame.f_lineno, "fn": co_name, "qual": qual, "bargs": bargs, "pre_s": pre_s, "pre_m": pre_m, "prevs": prevs, "cidx": cidx, "d": depth[0], "exc": None}
+            depth[0] += 1
+            return tracer
+        st = frame_state.get(id(frame))
+        if st is None: return tracer
+        if event == "line":
+            st["exc"] = None
+            return tracer
+        if event == "exception":
+            et, ev, _ = arg
+            st["exc"] = f"{et.__name__}: {ev}"
+            ek = (st["rel"], frame.f_lineno, st["qual"], et.__name__)
+            if ek in exc_sites: exc_sites[ek][1] += 1
+            elif len(exc_sites) < 12: exc_sites[ek] = [f"{st['rel']}:L{frame.f_lineno} in {st['qual']}: {et.__name__}({ev})", 1]
+            return tracer
+        if event == "return":
+            depth[0] = max(0, st["d"])
+            frame_state.pop(id(frame), None)
+            qual, co_name, rel, exc_d = st["qual"], st["fn"], st["rel"], st["exc"]
+            if 0 <= st["cidx"] < len(call_log):
+                call_log[st["cidx"]] += f"  !! RAISED {exc_d}" if (exc_d and arg is None) else f" => {_short(arg, 56)}"
+            if exc_d is None and arg is not None and co_name != "__init__":
+                rmuts = _collect_muts(arg, "return")
+                for an, av in st["bargs"]:
+                    if arg is av: continue
+                    imuts = st["pre_m"].get(an, {})
+                    shared = [f"{imuts[oid][0]} <-> {rp} ({rt})" for oid, (rp, rt) in rmuts.items() if oid != id(arg) and oid != id(av) and oid in imuts]
+                    if shared:
+                        ak = (rel, st["ln"], qual, an)
+                        if ak in alias_sites: alias_sites[ak][1] += 1
+                        elif len(alias_sites) < 12: alias_sites[ak] = [f"{rel}:L{st['ln']} `{qual}()` SHARES mutable nested heap object(s) with `{an}`: {', '.join(shared[:4])}", 1]
+            any_mut = False
+            for an, av in st["bargs"]:
+                if _snap(av) != st["pre_s"].get(an):
+                    any_mut = True
+                    if an == "self" and (co_name == "__init__" or exc_d is None): continue
+                    mk = (rel, st["ln"], qual, an, bool(exc_d))
+                    if mk in mut_sites: mut_sites[mk][1] += 1
+                    elif len(mut_sites) < 12:
+                        tag = "[MUTATED ON EXCEPTION] " if exc_d else ""
+                        mut_sites[mk] = [f"{tag}{rel}:L{st['ln']} `{qual}()` mutated `{an}` in-place", 1]
+            if exc_d is None and arg is None and not any_mut and st["bargs"] and st["bargs"][0][0] == "self" and not co_name.startswith(READONLY_PREFIXES):
+                sobj = st["bargs"][0][1]
+                if isinstance(getattr(sobj, "__dict__", None), dict) and sobj.__dict__:
+                    nk = (rel, st["ln"], qual)
+                    if nk in noop_sites: noop_sites[nk][1] += 1
+                    elif len(noop_sites) < 12: noop_sites[nk] = [f"{rel}:L{st['ln']} `{qual}({', '.join(st['prevs'])})` returned `None` with ZERO change to `self`! State: {_short(sobj, 100)}", 1]
+        return tracer
+
+    ob, eb, exec_err = io.StringIO(), io.StringIO(), None
+    sys.settrace(tracer)
+    try:
+        with redirect_stdout(ob), redirect_stderr(eb):
+            if cfg.get("code") is not None:
+                ns = {"__name__": "__main__"}
+                exec(compile(cfg["code"], "<probe_snippet>", "exec"), ns, ns)
+            elif cfg.get("script"):
+                sp = (cwd / cfg["script"]).resolve()
+                ns = {"__name__": "__main__", "__file__": str(sp)}
+                exec(compile(sp.read_text(encoding="utf-8"), str(sp), "exec"), ns, ns)
+            elif cfg.get("unittest"):
+                ut = cfg["unittest"]
+                loader = unittest.TestLoader()
+                suite = loader.discover(str(cwd / ("tests" if ut == "discover" else ut)), top_level_dir=str(cwd)) if (ut == "discover" or (cwd / ut).is_dir()) else loader.loadTestsFromName(ut)
+                res = unittest.TextTestRunner(stream=ob, verbosity=2).run(suite)
+                if not res.wasSuccessful(): exec_err = f"Unittest failures={len(res.failures)} errors={len(res.errors)}"
+    except BaseException as exc:
+        exec_err = f"{type(exc).__name__}: {exc}"
+    finally:
+        sys.settrace(None)
+    fmt = lambda d: [f"{m} (+{c-1} repeats)" if c > 1 else m for m, c in d.values()]
+    print(json.dumps({
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "total_calls_traced": total_calls[0],
+        "exec_error": exec_err,
+        "alias_hazards": fmt(alias_sites),
+        "mutation_alerts": fmt(mut_sites),
+        "state_noop_alerts": fmt(noop_sites),
+        "exceptions_observed": fmt(exc_sites),
+        "call_tree": call_log,
+        "stdout": ob.getvalue()[:2000],
+        "stderr": eb.getvalue()[-1200:],
+    }))
+elif mode == "diff":
+    t0 = time.perf_counter()
+    setup_c, fa_c, fb_c = cfg["setup"], cfg["fn_a"], cfg["fn_b"]
+    def make_pair():
+        ns = {}
+        if setup_c.strip(): exec(compile(setup_c, "<setup>", "exec"), ns, ns)
+        return eval(compile(fa_c, "<fa>", "eval"), ns, ns), eval(compile(fb_c, "<fb>", "eval"), ns, ns)
+    seq_a, seq_b = make_pair()
+    if cfg["inputs"].strip():
+        ns_i = {}
+        if setup_c.strip(): exec(compile(setup_c, "<setup_i>", "exec"), ns_i, ns_i)
+        corpus = list(eval(compile(cfg["inputs"], "<inputs>", "eval"), ns_i, ns_i))
+    else:
+        vnames = [v.strip() for v in cfg["vars"].split(",") if v.strip()]
+        if not vnames:
+            found = re.findall(r"""(?:Var|get)\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]""", f"{setup_c}\n{fa_c}\n{fb_c}")
+            found += re.findall(r"""\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]""", f"{setup_c}\n{fa_c}\n{fb_c}")
+            for c in found:
+                if c not in vnames and not c.startswith("__"): vnames.append(c)
+        if vnames:
+            atoms = [None, True, 1, False, 0, -1, 2, "", "Alice", [1, False], [True, 0]]
+            corpus = [{}] + [{k: v for k in vnames} for v in atoms] + [{vnames[0]: True, "nested": [1, False]}, {vnames[0]: 1, "nested": [True, 0]}, {vnames[0]: False, "nested": [0, True]}, {vnames[0]: 0, "nested": [False, 1]}]
+        else:
+            corpus = [None, True, 1, False, 0, -1, 2, 0.0, "", "Alice", [1, False], [True, 0], {"flag": True}, {"flag": 1}]
+    def eval1(fn, x):
+        cp = copy.deepcopy(x)
+        bs = _snap(cp)
+        try:
+            r = fn(cp)
+            return ("ok", r, _snap(cp) != bs)
+        except Exception as e:
+            return ("exc", f"{type(e).__name__}: {e}", _snap(cp) != bs)
+    divs, drifts, muts = [], [], []
+    for idx, inp in enumerate(corpus):
+        fa, fb = make_pair()
+        ka, ra, ma = eval1(fa, inp)
+        kb, rb, mb = eval1(fb, inp)
+        if ma or mb: muts.append({"index": idx, "input": _short(inp, 90), "mutated_by": "both" if (ma and mb) else ("fn_a" if ma else "fn_b")})
+        if ka != kb or _snap(ra) != _snap(rb):
+            divs.append({"index": idx, "input": _short(inp, 90), "a": f"{ra!r} ({type(ra).__name__})" if ka == "ok" else f"RAISED {ra}", "b": f"{rb!r} ({type(rb).__name__})" if kb == "ok" else f"RAISED {rb}"})
+        ska, sra, _ = eval1(seq_a, inp)
+        skb, srb, _ = eval1(seq_b, inp)
+        if ska != ka or _snap(sra) != _snap(ra):
+            drifts.append({"index": idx, "target": "fn_a", "input": _short(inp, 90), "fresh": repr(ra), "sequential": repr(sra)})
+        if skb != kb or _snap(srb) != _snap(rb):
+            drifts.append({"index": idx, "target": "fn_b", "input": _short(inp, 90), "fresh": repr(rb), "sequential": repr(srb)})
+    print(json.dumps({
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "cases_tested": len(corpus),
+        "equivalent": not (divs or drifts or muts),
+        "divergences": divs[:12],
+        "stateful_cache_drifts": drifts[:12],
+        "caller_input_mutations": muts[:12],
+    }))

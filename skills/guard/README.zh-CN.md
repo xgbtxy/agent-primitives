@@ -1,34 +1,27 @@
-# `guard` — Exit-2 真相门禁、死循环熔断与高危拦截盾
+# `guard` (`crates/ap-guard`) — `<2ms` 原生 `exit 2` 真值门禁、死循环熔断与护盾
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-**独立单文件夹微基础设施（`skills/guard/`）** · 零第三方依赖 · 待机仅占 `63 Tokens`。
+**独立纯 Rust Crate（`crates/ap-guard`）与技能目录（`skills/guard/`）** · `< 2 ms` 原生启动 · 待机仅 `57 tokens`。
 
 ## 解决什么真实痛点？
 
-自治 Agent 日常最烧钱、最危险的三类事故：
-1. **带病谎报“已完成”（`exit 1` 陷阱）**：在 Claude Code、Codex、Grok Build 等主流运行时的 `Stop` Hook 中，脚本返回 `exit 1` 只会被当成非阻断提示，Agent 照样结束对话！**只有返回 `exit 2` 并向 `stderr` 输出错误详情**，才能把 Agent 强制打回重修。
-2. **原地死循环烧额度**：同一条报错命令一字不改连跑五六遍，纯烧 Token 毫无进展。
-3. **密钥泄露与高危外发事故**：把 `sk-...` / `ghp_...` / `AKIA...` 私钥拼进命令或写入文件，或误执行 `git push --force`、`rm -rf`、批量群发外部邮件/Webhook。
+1. **虚报完工（`exit 1` 不拦截陷阱）**：在 Claude Code、Codex 等宿主中，`exit 1` 仅被视为非阻塞警告；唯有 **`exit 2` + `stderr` 诊断** 才能物理拦住未过检的“已完成”宣告。
+2. **同错死循环重试**：本机审计抓到 **237 次** 完全相同的报错命令连刷。
+3. **密钥泄露与高危操作**：拦截 `sk-...` / `ghp_...` / `AKIA...` 私钥外泄及 `git push --force`、`rm -rf /`、`DROP TABLE` 等高爆炸半径动作。
 
-`guard` 将这三道防线统一封装为确定性门禁，并**自动识别双协议**：同时原生兼容 **Claude Code / Codex**（`exit 2` + `stderr`）与 **Google Antigravity**（camelCase JSON `{"decision": "deny"|"allow"}` / `{"decision": "continue"|"stop"}` 及防死循环保护）。
+采用纯 Rust 编译为原生机器码，每次 `PreToolUse` Hook 启动仅需 **`< 2 ms`**（比 Python 脚本快 25 倍以上），并原生双协议兼容 **Claude Code / Codex**（`exit 2`）与 **Google Antigravity**（camelCase `deny`/`allow`/`continue`/`stop` + `continuationActive` 防死循环）。
 
-## 单独拷走这一个文件夹即可使用
+## 自动挂载 Hook
 
 ```bash
-cp -r skills/guard ~/.agents/skills/
-# 或：npx skills add xgbtxy/agent-primitives --skill guard
+ap init --with-hooks
 ```
 
 ## 常用命令
 
 ```bash
-# 1. 事前护盾：检测高危命令与密钥外泄（支持 --text 或直接读取 Hook stdin JSON，违规即 exit 2）
-python scripts/guard.py shield --text "git push --force origin main"
-
-# 2. 死循环熔断器：同一报错指纹连续出现 3 次立即触发 exit 2 强制换思路
-python scripts/guard.py run --max-repeats 3 -- pytest tests/test_payment.py
-
-# 3. 完工真相门：检查无冲突标记、无明文密钥且通过指定验收命令，否则 exit 2 打回
-python scripts/guard.py stop-gate --check "python -m unittest discover -s tests"
+ap guard shield --text "git push --force origin main"
+ap guard run --max-repeats 3 -- cargo test
+ap guard stop-gate --check "cargo test --quiet"
 ```

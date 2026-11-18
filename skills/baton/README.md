@@ -1,37 +1,32 @@
-# `baton` — Compaction-Proof State & Cross-Agent Handoff Capsule
+# `baton` (`crates/ap-baton`) — Compaction-Proof State & Cross-Agent Handoff Capsule
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-**Standalone Mini-Project (`skills/baton/`)** · Zero third-party dependencies · `70 tokens` idle skill cost.
+**Standalone Rust Crate (`crates/ap-baton`) & Skill (`skills/baton/`)** · Zero sibling dependencies · `60 tokens` idle skill cost.
 
 ## Why You Need It
 
 Two failures plague long agent work:
-1. **Compaction Amnesia**: Right in the middle of a complex debug or research workflow, automatic context compaction triggers—and the agent wakes up having forgotten *which hypotheses already failed*, immediately repeating broken edits.
-2. **Cross-Agent & Worktree Silos**: Switching from Claude Code to Codex CLI, Grok Build, Antigravity, or OpenClaw (or switching git worktrees) loses active task state, while heavy memory plugins require Docker/Bun or paid cloud observers.
+1. **Compaction Amnesia**: Mid-task context compaction triggers—and the agent forgets *which hypotheses already failed*, immediately repeating broken edits.
+2. **Cross-Agent & Worktree Silos**: Switching between Claude Code, Codex CLI, Grok Build, Antigravity, Pi, or OpenClaw loses active state.
 
-`baton` maintains a deterministic, zero-LLM, `< 400-token` capsule in `.baton/` separating four orthogonal slots: **Goal & Constraints**, **Verified Facts (with file/URL evidence)**, **Falsified Dead-Ends (`DO NOT RETRY`)**, and **Next Immediate Step** + automatic Git / workspace file snapshot.
+`ap baton` maintains a deterministic, zero-LLM, `< 400-token` capsule in `.baton/` separating **Goal & Constraints**, **Verified Facts (`--ref`)**, **Falsified Dead-Ends (`DO NOT RETRY`)**, and **Next Immediate Step** + automatic Git / workspace snapshot.
 
-## Copy Just This Folder
+## Install
 
 ```bash
-cp -r skills/baton ~/.agents/skills/
-# or: npx skills add xgbtxy/agent-primitives --skill baton
+# Single-binary full install (macOS / Linux / Windows):
+curl -fsSL https://raw.githubusercontent.com/xgbtxy/agent-primitives/main/install.sh | sh
+# Or install ONLY baton into current repo:
+ap init --here --only baton
 ```
 
 ## Real Commands
 
 ```bash
-# Set objective and next concrete step
-python scripts/baton.py set --goal "Eliminate 429 retry storm in webhook sender" --next "Patch jitter in sender.py:118"
-
-# Record verified ground truth & falsified dead-ends
-python scripts/baton.py fact " Upstream resets Retry-After in seconds, not ms" --ref "sender.py:94"
-python scripts/baton.py deadend "Doubling worker threads" --reason "Triggered stricter IP rate-limit"
-
-# Auto-snapshot (ideal for PreCompact / SessionEnd hooks)
-python scripts/baton.py checkpoint --note "Pre-compaction snapshot"
-
-# Resume in <400 tokens in any session or any other agent
-python scripts/baton.py resume
+ap baton set --goal "Eliminate 429 retry storm in webhook sender" --next "Patch jitter in sender.rs:118"
+ap baton fact "Upstream resets Retry-After in seconds, not ms" --ref "sender.rs:94"
+ap baton deadend "Doubling worker threads" --reason "Triggered stricter IP rate-limit"
+ap baton checkpoint --note "Pre-compaction snapshot"
+ap baton resume
 ```
