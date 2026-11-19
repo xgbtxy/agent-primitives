@@ -129,12 +129,19 @@ impl CdpSession {
             .args([
                 "--headless=new",
                 "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
                 "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--metrics-recording-only",
+                "--mute-audio",
                 "--no-sandbox",
                 "--proxy-bypass-list=<-loopback>",
                 "--log-level=3",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--remote-debugging-address=127.0.0.1",
                 &format!("--remote-debugging-port={port}"),
                 "--remote-allow-origins=*",
                 &format!("--user-data-dir={}", profile_dir.display()),
@@ -146,9 +153,14 @@ impl CdpSession {
             .spawn()
             .map_err(|e| format!("spawn headless browser: {e}"))?;
 
-        let deadline = Instant::now() + Duration::from_millis(8000);
+        let deadline = Instant::now() + Duration::from_millis(15000);
         let mut ws_url = String::new();
+        let mut exited_early: Option<String> = None;
         while Instant::now() < deadline {
+            if let Ok(Some(st)) = child.try_wait() {
+                exited_early = Some(format!("browser exited early ({st})"));
+                break;
+            }
             if let Ok(Value::Array(items)) = http_get_json(port, "/json/list") {
                 for it in items {
                     if it.get("type").and_then(Value::as_str) == Some("page") {
@@ -166,8 +178,15 @@ impl CdpSession {
         }
 
         if ws_url.is_empty() {
+            let err_tail = fs::read_to_string(&err_log)
+                .unwrap_or_default()
+                .chars()
+                .take(400)
+                .collect::<String>();
             kill_browser(&mut child, &profile_dir);
-            return Err("Timed out waiting for headless browser CDP /json/list".to_string());
+            let reason = exited_early
+                .unwrap_or_else(|| "Timed out waiting for headless browser CDP /json/list".into());
+            return Err(format!("{reason}; stderr={}", err_tail.trim()));
         }
 
         let after_scheme = ws_url.strip_prefix("ws://").unwrap_or(&ws_url);

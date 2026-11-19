@@ -2052,11 +2052,11 @@ fn test_ui_layout_network_auditor_sec_scanner_and_fault_localizer() {
         let vp0_issues = uj["viewports"][0]["issues"].to_string();
         assert!(
             vp0_issues.contains("Horizontal overflow"),
-            "Expected overflow: {vp0_issues}"
+            "Expected overflow in {uj}"
         );
         assert!(
             vp0_issues.contains("Overlapped/blocked control #buy-btn"),
-            "Expected overlap: {vp0_issues}"
+            "Expected overlap in {uj}"
         );
         assert!(
             !uj["network_errors"].as_array().unwrap().is_empty(),
