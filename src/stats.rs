@@ -32,6 +32,9 @@ struct StatsCli {
     /// Reset local stats ledger
     #[arg(long)]
     reset: bool,
+    /// Only include events from the last N hours (e.g. `--since-hours 24`)
+    #[arg(long)]
+    since_hours: Option<u64>,
     /// Override home directory
     #[arg(long)]
     home: Option<String>,
@@ -105,11 +108,21 @@ pub fn run_cli(args: &[String]) -> i32 {
         return 0;
     }
 
+    let now_s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = cli
+        .since_hours
+        .map(|h| now_s.saturating_sub(h.saturating_mul(3600)));
+
     let mut events: Vec<StatEvent> = Vec::new();
     if let Ok(txt) = fs::read_to_string(&path) {
         for ln in txt.lines() {
             if let Ok(ev) = serde_json::from_str::<StatEvent>(ln) {
-                events.push(ev);
+                if cutoff.map(|c| ev.ts >= c).unwrap_or(true) {
+                    events.push(ev);
+                }
             }
         }
     }

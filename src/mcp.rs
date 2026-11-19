@@ -6,11 +6,18 @@ fn mcp_tools_schema() -> Value {
     let mut tools = json!([
         {
             "name": "ap_read",
-            "description": "Universal zero-dependency reader: parses .docx/.xlsx/.pptx/.pdf/.sqlite/.gz, Electron .asar & .zip/.vsix/.jar/.whl virtual archives (--entry without extracting), PE/ELF/Mach-O headers + ASCII & Windows UTF-16LE strings, minified JS bundles (--offset/--chars/--pretty), GBK files, and JS-rendered URLs.",
+            "description": "Universal zero-dependency reader: parses code with AST `--symbol`/`--outline` (Py/TS/JS/Go/Rust/C) & batch multi-file `targets`, .docx/.xlsx/.pptx/.pdf/.sqlite/.gz, Electron .asar & .zip/.vsix/.jar/.whl virtual archives, PE/ELF/Mach-O headers + strings, minified JS bundles (--offset/--chars/--pretty), GBK files, and JS-rendered URLs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": { "type": "string", "description": "Local file/folder path or http(s):// URL" },
+                    "targets": {
+                        "type": "array",
+                        "description": "Optional batch list of up to 12 file paths to read in a single call",
+                        "items": { "type": "string" }
+                    },
+                    "symbol": { "type": "string", "description": "Optional Tree-sitter AST symbol name(s) to extract cleanly (comma-separated, e.g. 'Engine.commit,parse_spec')" },
+                    "outline": { "type": "boolean", "description": "Emit ONLY the compact Tree-sitter AST symbol outline (for code) or heading outline (for Markdown)" },
                     "lines": { "type": "string", "description": "Optional line window or comma-separated multi-ranges, e.g. '1-30,120-160'" },
                     "query": { "type": "string", "description": "Optional keyword/regex filter for rows, minified slices, archive entries, or binary strings" },
                     "sheet": { "type": "string", "description": "Optional worksheet filter for .xlsx" },
@@ -23,8 +30,7 @@ fn mcp_tools_schema() -> Value {
                     "decode": { "type": "boolean", "description": "Auto-decode embedded JWT tokens, Base64 blobs, and URL-encoded strings" },
                     "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome" },
                     "hex": { "type": "boolean", "description": "Emit canonical hex+ASCII dump with SHA-256 & entropy (supports hex/decimal offset)" }
-                },
-                "required": ["target"]
+                }
             }
         },
         {
@@ -40,6 +46,7 @@ fn mcp_tools_schema() -> Value {
                     },
                     "sql": { "type": "string", "description": "SQL query to execute (omit or set schema=true to inspect table columns first)" },
                     "schema": { "type": "boolean", "description": "If true, list loaded table names, row counts & columns" },
+                    "format": { "type": "string", "description": "Output format: 'md' (default) or 'json' (populates structuredContent.records with named column objects)" },
                     "out": { "type": "string", "description": "Optional output CSV file path" }
                 },
                 "required": ["files"]
@@ -769,18 +776,47 @@ fn run_self_captured_in(
 fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
     match name {
         "ap_read" => {
-            let target = args
+            let mut all_targets: Vec<String> = Vec::new();
+            if let Some(t) = args
                 .get("target")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if target.is_empty() {
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                all_targets.push(t.to_string());
+            }
+            if let Some(arr) = args.get("targets").and_then(Value::as_array) {
+                for v in arr {
+                    if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        if !all_targets.iter().any(|x| x == s) {
+                            all_targets.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            if all_targets.is_empty() {
                 return (
                     false,
-                    "Pass non-empty `target` path or URL to `ap_read`.".to_string(),
+                    "Pass non-empty `target` or `targets` to `ap_read`.".to_string(),
                 );
             }
-            let mut cli = vec!["read".to_string(), target.to_string()];
+            let mut cli = vec!["read".to_string()];
+            cli.extend(all_targets);
+            if let Some(sym) = args
+                .get("symbol")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--symbol".to_string());
+                cli.push(sym.trim().to_string());
+            }
+            if args
+                .get("outline")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli.push("--outline".to_string());
+            }
             if let Some(l) = args
                 .get("lines")
                 .and_then(Value::as_str)
@@ -876,6 +912,14 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             if args.get("schema").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--schema".to_string());
+            }
+            if args
+                .get("format")
+                .and_then(Value::as_str)
+                .map(|s| s.eq_ignore_ascii_case("json"))
+                .unwrap_or(false)
+            {
+                cli.push("--json".to_string());
             }
             if let Some(out_p) = args
                 .get("out")

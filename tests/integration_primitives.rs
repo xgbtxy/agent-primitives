@@ -4356,3 +4356,180 @@ fn test_v280_pi_deepseek_accelerator_dsml_reread_overthinking_and_audit_metrics(
         .unwrap()
         .contains("Add retry backoff"));
 }
+
+#[test]
+fn test_v290_ast_read_symbol_outline_batch_doctor_json_stats_window_and_query_records() {
+    use serde_json::json;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_home");
+    fs::create_dir_all(root.join("src")).unwrap();
+
+    // 1. Large code file (>8KB) for AST outline pager + `--symbol` + `--outline` + batch multi-file read
+    let mut big_rs = String::from("pub struct Ledger;\nimpl Ledger {\n");
+    for i in 0..80 {
+        big_rs.push_str(&format!(
+            "    pub fn step_{i:02}(&self, x: i64) -> i64 {{\n        // Padding explanation comment line for step {i:02} so total size exceeds default pager budget cleanly\n        x + {i}\n    }}\n"
+        ));
+    }
+    big_rs.push_str(
+        "    pub fn finalize_balance(&self, a: i64, b: i64) -> i64 {\n        a * 2 + b\n    }\n}\n",
+    );
+    fs::write(root.join("src/ledger.rs"), &big_rs).unwrap();
+    fs::write(
+        root.join("src/util.ts"),
+        "export function formatCents(v: number): string { return (v / 100).toFixed(2); }\n",
+    )
+    .unwrap();
+
+    // 1a. Auto-AST symbol outline on large code file
+    let paged = run_ap(
+        root,
+        &["read", "src/ledger.rs"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(paged.status.success());
+    let paged_s = String::from_utf8_lossy(&paged.stdout);
+    assert!(
+        paged_s.contains("AST Symbol Outline") && paged_s.contains("--symbol <Name>"),
+        "Expected AST outline on large code file, got: {paged_s}"
+    );
+
+    // 1b. `--outline` returns compact AST symbol table
+    let outl = run_ap(
+        root,
+        &["read", "src/ledger.rs", "--outline"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(outl.status.success());
+    let outl_s = String::from_utf8_lossy(&outl.stdout);
+    assert!(
+        outl_s.contains("Ledger.finalize_balance") && outl_s.contains("AST symbol(s)"),
+        "Unexpected outline output: {outl_s}"
+    );
+
+    // 1c. `--symbol` extracts exact AST span with line numbers
+    let sym = run_ap(
+        root,
+        &[
+            "read",
+            "src/ledger.rs",
+            "--symbol",
+            "Ledger.finalize_balance",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(sym.status.success());
+    let sym_s = String::from_utf8_lossy(&sym.stdout);
+    assert!(sym_s.contains("pub fn finalize_balance") && sym_s.contains("a * 2 + b"));
+    assert!(!sym_s.contains("step_00"));
+
+    // 1d. Batch multi-file read (`ap read file1 file2 --json`)
+    let batch = run_ap(
+        root,
+        &[
+            "read",
+            "src/util.ts",
+            "src/ledger.rs",
+            "--outline",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(batch.status.success());
+    let bj: Value = serde_json::from_slice(&batch.stdout).unwrap();
+    assert_eq!(bj["ok"], true);
+    assert_eq!(bj["count"], 2);
+
+    // 2. `ap query --json` emits named-column `records` + MCP `ap_query(format="json")` structuredContent
+    fs::write(
+        root.join("sales.csv"),
+        "region,amount\neast,120\nwest,350\neast,80\n",
+    )
+    .unwrap();
+    let q_out = run_ap(
+        root,
+        &[
+            "query",
+            "-f",
+            "s=sales.csv",
+            "SELECT region, SUM(amount) AS total FROM s GROUP BY region ORDER BY region",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(q_out.status.success());
+    let qj: Value = serde_json::from_slice(&q_out.stdout).unwrap();
+    assert_eq!(qj["records"][0]["region"], "east");
+    assert_eq!(qj["records"][0]["total"], 200);
+    assert_eq!(qj["records"][1]["region"], "west");
+    assert_eq!(qj["records"][1]["total"], 350);
+
+    // 3. `ap doctor --json` + `ap stats --since-hours 24 --json`
+    let doc = run_ap(root, &["doctor", "--json"], None, &[("AP_HOME", &ap_home)]);
+    assert!(doc.status.success());
+    let dj: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dj["ok"], true);
+    assert_eq!(dj["fts5_ok"], true);
+    assert_eq!(dj["ast_ok"], true);
+    assert!(dj["wired_mcp_count"].is_u64());
+
+    let st24 = run_ap(
+        root,
+        &["stats", "--since-hours", "24", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(st24.status.success());
+    let sj: Value = serde_json::from_slice(&st24.stdout).unwrap();
+    assert!(sj["total_calls"].as_u64().unwrap_or(0) >= 4);
+
+    // 4. MCP `ap_read` (`targets` + `symbol`) & `ap_query` (`format: "json"` -> `structuredContent.records`)
+    let ledger_p = root
+        .join("src/ledger.rs")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let util_p = root
+        .join("src/util.ts")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let sales_p = root.join("sales.csv").to_string_lossy().replace('\\', "/");
+    let mcp_in = format!(
+        "{}\n{}\n{}\n",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "ap_read", "arguments": {"target": ledger_p, "symbol": "Ledger.finalize_balance"}}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "ap_read", "arguments": {"targets": [util_p, ledger_p], "outline": true}}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ap_query", "arguments": {"files": [format!("s={sales_p}")], "sql": "SELECT region, SUM(amount) AS total FROM s GROUP BY region ORDER BY total DESC", "format": "json"}}})
+    );
+    let mcp_out = run_ap(root, &["mcp"], Some(&mcp_in), &[("AP_HOME", &ap_home)]);
+    assert!(mcp_out.status.success());
+    let resps: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(resps.len(), 3);
+    assert_eq!(resps[0]["result"]["isError"], false);
+    assert!(resps[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("pub fn finalize_balance"));
+    assert_eq!(resps[1]["result"]["isError"], false);
+    assert!(resps[1]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("formatCents"));
+    assert_eq!(resps[2]["result"]["isError"], false);
+    assert_eq!(
+        resps[2]["result"]["structuredContent"]["records"][0]["region"],
+        "west"
+    );
+    assert_eq!(
+        resps[2]["result"]["structuredContent"]["records"][0]["total"],
+        350
+    );
+}

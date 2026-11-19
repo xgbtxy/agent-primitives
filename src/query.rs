@@ -554,6 +554,31 @@ pub fn run_cli(args: &[String]) -> i32 {
     );
 
     if cli.json {
+        let records: Vec<serde_json::Map<String, Value>> = result_rows
+            .iter()
+            .take(cli.limit)
+            .map(|r| {
+                let mut m = serde_json::Map::new();
+                for (i, col) in col_names.iter().enumerate() {
+                    let s = r.get(i).map(String::as_str).unwrap_or("");
+                    let v = if s.is_empty() {
+                        Value::Null
+                    } else if let Ok(iv) = s.parse::<i64>() {
+                        json!(iv)
+                    } else if let Ok(fv) = s.parse::<f64>() {
+                        if fv.is_finite() {
+                            json!(fv)
+                        } else {
+                            Value::String(s.to_string())
+                        }
+                    } else {
+                        Value::String(s.to_string())
+                    };
+                    m.insert(col.clone(), v);
+                }
+                m
+            })
+            .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -562,6 +587,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 "row_count": result_rows.len(),
                 "columns": col_names,
                 "rows": result_rows.iter().take(cli.limit).collect::<Vec<_>>(),
+                "records": records,
             }))
             .unwrap_or_default()
         );

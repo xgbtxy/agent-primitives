@@ -1853,25 +1853,22 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
     0
 }
 
-pub fn cmd_doctor() -> i32 {
-    println!(
-        "[ap doctor] agent-primitives v{} ({}/{}) -> OK (Pure-Rust single binary, zero external runtime)",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
+pub fn cmd_doctor(as_json: bool) -> i32 {
     let mut ok = true;
-    match Connection::open_in_memory().and_then(|c| {
-        c.execute_batch("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61'); INSERT INTO t VALUES ('ok');")
-    }) {
-        Ok(()) => println!("  [OK] Engine Core       : Bundled SQLite FTS5/BM25 + 7 embedded modules ready"),
-        Err(e) => {
-            println!("  [FAIL] Engine Core     : Bundled SQLite FTS5 failed ({e})");
-            ok = false;
-        }
+    let fts5_ok = Connection::open_in_memory()
+        .and_then(|c| {
+            c.execute_batch(
+                "CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61'); INSERT INTO t VALUES ('ok');",
+            )
+        })
+        .is_ok();
+    if !fts5_ok {
+        ok = false;
     }
+    let mut ast_ok = true;
     for ext in ["py", "ts", "js", "go", "rs", "c"] {
         if ap_splice::ast::language_for_ext(ext).is_none() {
+            ast_ok = false;
             ok = false;
         }
     }
@@ -1879,6 +1876,128 @@ pub fn cmd_doctor() -> i32 {
         if md.is_empty() {
             ok = false;
         }
+    }
+
+    let browser_found = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .copied()
+    .find(|p| Path::new(p).is_file());
+
+    let home = default_home_dir();
+    let detected = resolve_requested_harnesses("auto", &home, true).unwrap_or_default();
+
+    let global_bin =
+        home.join(".local")
+            .join("bin")
+            .join(if cfg!(windows) { "ap.exe" } else { "ap" });
+    let global_bin_version = if global_bin.is_file() {
+        std::process::Command::new(&global_bin)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        None
+    };
+    let expected_ver = format!("ap {}", env!("CARGO_PKG_VERSION"));
+    let global_bin_up_to_date = global_bin_version
+        .as_deref()
+        .map(|v| v == expected_ver)
+        .unwrap_or(false);
+
+    let mcp_candidates = [
+        home.join(".pi").join("agent").join("mcp.json"),
+        home.join(".config").join("opencode").join("opencode.json"),
+        home.join(".cursor").join("mcp.json"),
+        home.join(".gemini").join("settings.json"),
+        home.join(".qwen").join("settings.json"),
+        home.join(".codeium")
+            .join("windsurf")
+            .join("mcp_config.json"),
+    ];
+    let wired_mcp_count = mcp_candidates
+        .iter()
+        .filter(|p| {
+            fs::read_to_string(p)
+                .map(|s| s.contains("agent-primitives"))
+                .unwrap_or(false)
+        })
+        .count();
+
+    let hook_candidates = [
+        home.join(".claude").join("settings.json"),
+        home.join(".codex").join("hooks.json"),
+        home.join(".gemini").join("config").join("hooks.json"),
+        home.join(".pi")
+            .join("agent")
+            .join("extensions")
+            .join("zz-ap-accelerator.ts"),
+    ];
+    let wired_hooks_count = hook_candidates
+        .iter()
+        .filter(|p| {
+            fs::read_to_string(p)
+                .map(|s| {
+                    s.contains("agent-primitives") || s.contains("ap exec") || s.contains("ap.exe")
+                })
+                .unwrap_or(false)
+        })
+        .count();
+
+    let sieve_dir = home.join(".ap").join("sieve");
+    let mut sieve_archives = 0usize;
+    let mut sieve_bytes = 0u64;
+    if let Ok(rd) = fs::read_dir(&sieve_dir) {
+        for ent in rd.flatten() {
+            if ent.path().extension().and_then(|e| e.to_str()) == Some("raw") {
+                sieve_archives += 1;
+                sieve_bytes += ent.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": ok,
+                "version": env!("CARGO_PKG_VERSION"),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "fts5_ok": fts5_ok,
+                "ast_ok": ast_ok,
+                "browser_cdp": browser_found,
+                "detected_agents": detected,
+                "global_bin_version": global_bin_version,
+                "global_bin_up_to_date": global_bin_up_to_date,
+                "wired_mcp_count": wired_mcp_count,
+                "wired_hooks_count": wired_hooks_count,
+                "sieve_archives": sieve_archives,
+                "sieve_kb": ((sieve_bytes as f64 / 1024.0) * 10.0).round() / 10.0,
+            }))
+            .unwrap_or_default()
+        );
+        return if ok { 0 } else { 1 };
+    }
+
+    println!(
+        "[ap doctor] agent-primitives v{} ({}/{}) -> OK (Pure-Rust single binary, zero external runtime)",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    if fts5_ok {
+        println!("  [OK] Engine Core       : Bundled SQLite FTS5/BM25 + 7 embedded modules ready");
+    } else {
+        println!("  [FAIL] Engine Core     : Bundled SQLite FTS5 failed");
     }
     println!(
         "  [OK] AST Syntax Gate   : Python, TypeScript/TSX, JS, Go, Rust, C grammars compiled"
@@ -1903,31 +2022,22 @@ pub fn cmd_doctor() -> i32 {
         );
     }
 
-    let browser_found = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium",
-    ]
-    .iter()
-    .copied()
-    .find(|p| Path::new(p).is_file());
     if let Some(bp) = browser_found {
         println!("  [OK] Browser Smoke CDP : READY ({bp}) — 0-MB native headless verification");
     } else {
         println!("  [INFO] Browser Smoke   : HTTP/API smoke ready (install Edge/Chrome to enable DOM CDP)");
     }
 
-    let home = default_home_dir();
-    if let Ok(detected) = resolve_requested_harnesses("auto", &home, true) {
-        if !detected.is_empty() {
-            println!("  [OK] Detected Agents   : {}", detected.join(", "));
-        }
+    if !detected.is_empty() {
+        println!("  [OK] Detected Agents   : {}", detected.join(", "));
     }
     println!(
-        "  Tip: Run `ap stats` (or `ap gain`) anytime to view saved tokens & prevented crashes."
+        "  [OK] Agent Wiring      : {wired_mcp_count} MCP config(s), {wired_hooks_count} hook/extension(s), global bin={} | ~/.ap/sieve: {sieve_archives} archive(s) ({:.1} KB)",
+        global_bin_version.as_deref().unwrap_or("not installed"),
+        sieve_bytes as f64 / 1024.0
+    );
+    println!(
+        "  Tip: Run `ap stats` (or `ap stats --since-hours 24`) anytime to view saved tokens & prevented crashes."
     );
     if ok {
         0

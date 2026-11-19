@@ -18,6 +18,14 @@ use zip::ZipArchive;
 struct ReadCli {
     /// File path or http(s):// URL to read
     target: String,
+    /// Optional extra file paths to read in the same batch call (up to 12 files)
+    extra_targets: Vec<String>,
+    /// Optional Tree-sitter AST symbol name(s) to extract cleanly (comma-separated, e.g. `handle_rpc_request,Engine.commit`)
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Emit ONLY the compact Tree-sitter symbol outline (for code) or heading outline (for Markdown)
+    #[arg(long)]
+    outline: bool,
     /// Optional line range or comma-separated batch ranges (e.g. `1-120` or `10-40,120-160,300-340`)
     #[arg(long)]
     lines: Option<String>,
@@ -700,7 +708,68 @@ pub fn run_cli(args: &[String]) -> i32 {
         }
     };
 
-    let target = cli.target.trim();
+    if !cli.extra_targets.is_empty() {
+        let mut all_targets = vec![cli.target.clone()];
+        all_targets.extend(cli.extra_targets.iter().take(11).cloned());
+        let per_budget = (cli.max_chars / all_targets.len().max(1)).max(1600);
+        let mut sub_cli = cli;
+        sub_cli.max_chars = per_budget;
+        sub_cli.extra_targets.clear();
+
+        let mut rendered_blocks = Vec::new();
+        let mut json_files = Vec::new();
+        let mut had_err = false;
+        for t in &all_targets {
+            match read_single_target(&sub_cli, t.trim()) {
+                Ok((md, jv)) => {
+                    rendered_blocks.push(md);
+                    json_files.push(jv);
+                }
+                Err((_, msg)) => {
+                    had_err = true;
+                    rendered_blocks.push(format!("# READ `{t}` [ERROR]\n{msg}"));
+                    json_files.push(json!({ "ok": false, "target": t, "error": msg }));
+                }
+            }
+        }
+        if sub_cli.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": !had_err,
+                    "count": json_files.len(),
+                    "files": json_files,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{}", rendered_blocks.join("\n\n"));
+        }
+        return if had_err { 1 } else { 0 };
+    }
+
+    match read_single_target(&cli, cli.target.trim()) {
+        Ok((rendered, jv)) => {
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&jv).unwrap_or_default());
+            } else {
+                println!("{rendered}");
+            }
+            0
+        }
+        Err((code, msg)) => {
+            if !msg.is_empty() {
+                eprintln!("{msg}");
+            }
+            code
+        }
+    }
+}
+
+fn read_single_target(
+    cli: &ReadCli,
+    target: &str,
+) -> Result<(String, serde_json::Value), (i32, String)> {
     let is_url = target.starts_with("http://") || target.starts_with("https://");
 
     let (raw_bytes, ext, label) = if is_url {
@@ -711,10 +780,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                     "rendered-dom".to_string(),
                     target.to_string(),
                 ),
-                Err(e) => {
-                    eprintln!("[ap read --render] {e}");
-                    return 1;
-                }
+                Err(e) => return Err((1, format!("[ap read --render] {e}"))),
             }
         } else {
             match fetch_url_bytes(target) {
@@ -739,24 +805,26 @@ pub fn run_cli(args: &[String]) -> i32 {
                         (b, "html".to_string(), target.to_string())
                     }
                 }
-                Err(e) => {
-                    eprintln!("[ap read] {e}");
-                    return 1;
-                }
+                Err(e) => return Err((1, format!("[ap read] {e}"))),
             }
         }
     } else {
         let p = Path::new(target);
         if !p.exists() {
-            eprintln!("[ap read] path not found: {target}");
-            return 1;
+            return Err((1, format!("[ap read] path not found: {target}")));
         }
         if p.is_dir() {
-            return ap_atlas::run_cli(&[
-                "atlas".to_string(),
-                "map".to_string(),
-                target.to_string(),
-            ]);
+            let data = ap_atlas::scan_workspace(p, "", 35, 14);
+            let md = ap_atlas::render_atlas_md(&data);
+            return Ok((
+                md.clone(),
+                json!({
+                    "ok": true,
+                    "target": target,
+                    "format": "directory-atlas",
+                    "content": md,
+                }),
+            ));
         }
         let ext_s = p
             .extension()
@@ -770,15 +838,11 @@ pub fn run_cli(args: &[String]) -> i32 {
         {
             match extract_sqlite_md(p) {
                 Ok(md) => (md.into_bytes(), "sqlite-md".to_string(), lbl),
-                Err(e) => {
-                    eprintln!("[ap read] {e}");
-                    return 1;
-                }
+                Err(e) => return Err((1, format!("[ap read] {e}"))),
             }
         } else {
             let Ok(b) = fs::read(p) else {
-                eprintln!("[ap read] failed to read file: {target}");
-                return 1;
+                return Err((1, format!("[ap read] failed to read file: {target}")));
             };
             (b, ext_s, lbl)
         }
@@ -829,22 +893,16 @@ pub fn run_cli(args: &[String]) -> i32 {
             1,
             "hex",
         );
-        if cli.json {
-            println!(
-                "{}",
-                json!({
-                    "target": label,
-                    "format": "hex",
-                    "size_bytes": raw_bytes.len(),
-                    "sha256": sha,
-                    "entropy": (ent * 100.0).round() / 100.0,
-                    "content": rendered,
-                })
-            );
-        } else {
-            println!("{rendered}");
-        }
-        return 0;
+        let jv = json!({
+            "ok": true,
+            "target": label,
+            "format": "hex",
+            "size_bytes": raw_bytes.len(),
+            "sha256": sha,
+            "entropy": (ent * 100.0).round() / 100.0,
+            "content": rendered,
+        });
+        return Ok((rendered, jv));
     }
 
     let raw_len = raw_bytes.len() as u64;
@@ -854,17 +912,11 @@ pub fn run_cli(args: &[String]) -> i32 {
     let converted: String = match ext.as_str() {
         "docx" => match extract_docx_md(&raw_bytes) {
             Ok(s) => s,
-            Err(e) => {
-                eprintln!("[ap read] {e}");
-                return 1;
-            }
+            Err(e) => return Err((1, format!("[ap read] {e}"))),
         },
         "xlsx" => match extract_xlsx_md(&raw_bytes, cli.sheet.as_deref(), cli.query.as_deref()) {
             Ok(s) => s,
-            Err(e) => {
-                eprintln!("[ap read] {e}");
-                return 1;
-            }
+            Err(e) => return Err((1, format!("[ap read] {e}"))),
         },
         "map" => match serde_json::from_slice::<serde_json::Value>(&raw_bytes) {
             Ok(v) if crate::inspect::is_sourcemap_v3(&v) => {
@@ -881,19 +933,13 @@ pub fn run_cli(args: &[String]) -> i32 {
                     format_tag = "sourcemap-vlq";
                     match crate::inspect::resolve_sourcemap_pos(&v, ln, col) {
                         Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("[ap read] {e}");
-                            return 1;
-                        }
+                        Err(e) => return Err((1, format!("[ap read] {e}"))),
                     }
                 } else if let Some(ref ent) = cli.entry {
                     format_tag = "sourcemap-entry";
                     match crate::inspect::read_sourcemap_entry(&v, ent) {
                         Ok((_, body)) => body,
-                        Err(e) => {
-                            eprintln!("[ap read] {e}");
-                            return 1;
-                        }
+                        Err(e) => return Err((1, format!("[ap read] {e}"))),
                     }
                 } else {
                     format_tag = "sourcemap-v3";
@@ -911,19 +957,13 @@ pub fn run_cli(args: &[String]) -> i32 {
                         win_heals += healed;
                         dec
                     }
-                    Err(e) => {
-                        eprintln!("[ap read] {e}");
-                        return 1;
-                    }
+                    Err(e) => return Err((1, format!("[ap read] {e}"))),
                 }
             } else {
                 format_tag = "asar";
                 match crate::binary::list_asar_md(&raw_bytes, cli.query.as_deref()) {
                     Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[ap read] {e}");
-                        return 1;
-                    }
+                    Err(e) => return Err((1, format!("[ap read] {e}"))),
                 }
             }
         }
@@ -936,27 +976,18 @@ pub fn run_cli(args: &[String]) -> i32 {
                         win_heals += healed;
                         dec
                     }
-                    Err(e) => {
-                        eprintln!("[ap read] {e}");
-                        return 1;
-                    }
+                    Err(e) => return Err((1, format!("[ap read] {e}"))),
                 }
             } else {
                 match extract_pptx_or_zip(&raw_bytes, &ext) {
                     Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[ap read] {e}");
-                        return 1;
-                    }
+                    Err(e) => return Err((1, format!("[ap read] {e}"))),
                 }
             }
         }
         "pdf" => match extract_pdf_text(&raw_bytes) {
             Ok(s) => s,
-            Err(e) => {
-                eprintln!("[ap read] {e}");
-                return 1;
-            }
+            Err(e) => return Err((1, format!("[ap read] {e}"))),
         },
         "rendered-dom" | "sqlite-md" => String::from_utf8_lossy(&raw_bytes).to_string(),
         "tgz" | "gz" => {
@@ -1042,13 +1073,94 @@ pub fn run_cli(args: &[String]) -> i32 {
         idx
     };
 
-    let mut rendered = if let Some(ref jp) = cli.json_path {
+    let mut rendered = if cli.outline {
+        if ap_splice::ast::language_for_ext(&ext).is_some() {
+            let syms = ap_splice::ast::scan_symbols(&converted, &ext);
+            let lines_out: Vec<String> = syms
+                .iter()
+                .map(|s| {
+                    let pad = if s.qual.contains('.') { "  " } else { "" };
+                    format!(
+                        "{pad}L{}-L{}: {} {}",
+                        s.start_line, s.end_line, s.kind, s.qual
+                    )
+                })
+                .collect();
+            format!(
+                "# OUTLINE `{label}` [{} AST symbol(s) across {total_lines} lines | {format_tag}]\n{}",
+                syms.len(),
+                if lines_out.is_empty() {
+                    "*(no top-level symbols detected)*".to_string()
+                } else {
+                    lines_out.join("\n")
+                }
+            )
+        } else {
+            let headings: Vec<String> = all_lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.starts_with('#') || l.starts_with("## Sheet:"))
+                .take(80)
+                .map(|(i, l)| format!("L{}: {}", i + 1, l))
+                .collect();
+            format!(
+                "# OUTLINE `{label}` [{} heading(s) across {total_lines} lines | {format_tag}]\n{}",
+                headings.len(),
+                if headings.is_empty() {
+                    "*(no headings detected)*".to_string()
+                } else {
+                    headings.join("\n")
+                }
+            )
+        }
+    } else if let Some(ref sym_spec) = cli.symbol {
+        if ap_splice::ast::language_for_ext(&ext).is_none() {
+            return Err((
+                2,
+                format!("[ap read] --symbol requires a Tree-sitter code file (Py/TS/JS/Go/Rust/C), got `.{ext}`"),
+            ));
+        }
+        let wanted: Vec<&str> = sym_spec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if wanted.is_empty() {
+            return Err((2, "[ap read] empty --symbol value".to_string()));
+        }
+        let mut blocks = Vec::new();
+        for sym in wanted.into_iter().take(12) {
+            let Some(sp) = ap_splice::ast::find_symbol_span(&converted, &ext, sym) else {
+                let avail: Vec<String> = ap_splice::ast::scan_symbols(&converted, &ext)
+                    .into_iter()
+                    .take(12)
+                    .map(|s| s.qual)
+                    .collect();
+                return Err((
+                    1,
+                    format!(
+                        "[ap read] symbol `{sym}` not found in `{label}` (available: {})",
+                        avail.join(", ")
+                    ),
+                ));
+            };
+            let s = sp.start_line.max(1);
+            let e = sp.end_line.min(total_lines);
+            let slice = (s..=e)
+                .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(format!("## {} {} [L{s}-L{e}]\n{slice}", sp.kind, sp.qual,));
+        }
+        format!(
+            "# READ `{label}` [{} AST symbol(s) of {total_lines} lines | {format_tag}]\n{}",
+            blocks.len(),
+            blocks.join("\n\n")
+        )
+    } else if let Some(ref jp) = cli.json_path {
         match crate::inspect::query_json_or_jsonl(&converted, jp) {
             Ok(out) => format!("# READ `{label}` [json-path='{jp}' | {format_tag}]\n{out}"),
-            Err(e) => {
-                eprintln!("[ap read] {e}");
-                return 1;
-            }
+            Err(e) => return Err((1, format!("[ap read] {e}"))),
         }
     } else if let Some(ref off_spec) = cli.offset {
         let mut offsets: Vec<usize> = Vec::new();
@@ -1056,14 +1168,15 @@ pub fn run_cli(args: &[String]) -> i32 {
             match tok.parse::<usize>() {
                 Ok(n) => offsets.push(n),
                 Err(_) => {
-                    eprintln!("[ap read] invalid --offset `{tok}` (expected byte offset(s), e.g. 18000 or 18000,95000)");
-                    return 2;
+                    return Err((
+                        2,
+                        format!("[ap read] invalid --offset `{tok}` (expected byte offset(s), e.g. 18000 or 18000,95000)"),
+                    ));
                 }
             }
         }
         if offsets.is_empty() {
-            eprintln!("[ap read] empty --offset value");
-            return 2;
+            return Err((2, "[ap read] empty --offset value".to_string()));
         }
         if offsets.len() == 1 {
             let s = floor_boundary(&converted, offsets[0]);
@@ -1114,15 +1227,19 @@ pub fn run_cli(args: &[String]) -> i32 {
                     .join("\n");
                 format!("# READ `{label}` [L{s}-L{e} of {total_lines} | {format_tag}]\n{slice}")
             } else {
-                eprintln!("[ap read] invalid --lines `{lspec}` (expected START-END, e.g. 1-120 or 10-40,120-160)");
-                return 2;
+                return Err((
+                    2,
+                    format!("[ap read] invalid --lines `{lspec}` (expected START-END, e.g. 1-120 or 10-40,120-160)"),
+                ));
             }
         } else {
             let mut blocks = Vec::new();
             for p in parts.into_iter().take(12) {
                 let Some((s, e)) = parse_line_window(p, total_lines) else {
-                    eprintln!("[ap read] invalid --lines range `{p}` in `{lspec}`");
-                    return 2;
+                    return Err((
+                        2,
+                        format!("[ap read] invalid --lines range `{p}` in `{lspec}`"),
+                    ));
                 };
                 let slice = (s..=e)
                     .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
@@ -1207,28 +1324,66 @@ pub fn run_cli(args: &[String]) -> i32 {
             converted.len()
         )
     } else if converted.len() > cli.max_chars {
-        let headings: Vec<String> = all_lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.starts_with('#') || l.starts_with("## Sheet:"))
-            .take(25)
-            .map(|(i, l)| format!("  L{}: {}", i + 1, l))
-            .collect();
+        let is_ast_code = ap_splice::ast::language_for_ext(&ext).is_some();
+        let outline = if is_ast_code {
+            let syms = ap_splice::ast::scan_symbols(&converted, &ext);
+            if syms.is_empty() {
+                String::new()
+            } else {
+                let sym_lines: Vec<String> = syms
+                    .iter()
+                    .take(35)
+                    .map(|s| format!("  L{}-L{}: {} {}", s.start_line, s.end_line, s.kind, s.qual))
+                    .collect();
+                let more = if syms.len() > 35 {
+                    format!(
+                        "\n  ... (+{} more symbols; pass `--outline`)",
+                        syms.len() - 35
+                    )
+                } else {
+                    String::new()
+                };
+                format!(
+                    "AST Symbol Outline ({} total):\n{}{more}\n\n",
+                    syms.len(),
+                    sym_lines.join("\n")
+                )
+            }
+        } else {
+            let headings: Vec<String> = all_lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.starts_with('#') || l.starts_with("## Sheet:"))
+                .take(25)
+                .map(|(i, l)| format!("  L{}: {}", i + 1, l))
+                .collect();
+            if headings.is_empty() {
+                String::new()
+            } else {
+                format!("Outline:\n{}\n\n", headings.join("\n"))
+            }
+        };
         let head_n = 45.min(total_lines);
         let head_s = (1..=head_n)
             .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
             .collect::<Vec<_>>()
             .join("\n");
-        let outline = if headings.is_empty() {
-            String::new()
+        let tip = if is_ast_code {
+            format!(
+                "[ap read pager: pass `--symbol <Name>` (AST-exact), `--lines {}-{}`, or `--query <keyword>`]",
+                head_n + 1,
+                (head_n + 120).min(total_lines.max(1))
+            )
         } else {
-            format!("Outline:\n{}\n\n", headings.join("\n"))
+            format!(
+                "[ap read pager: pass `--lines {}-{} ` or `--query <keyword>` to inspect specific sections]",
+                head_n + 1,
+                (head_n + 120).min(total_lines.max(1))
+            )
         };
         format!(
-            "# READ `{label}` [paged: {}B -> preview of L1-L{head_n} / {total_lines} total lines | {format_tag}]\n{outline}{head_s}\n\n[ap read pager: pass `--lines {}-{} ` or `--query <keyword>` to inspect specific sections]",
-            raw_len,
-            head_n + 1,
-            (head_n + 120).min(total_lines.max(1))
+            "# READ `{label}` [paged: {}B -> preview of L1-L{head_n} / {total_lines} total lines | {format_tag}]\n{outline}{head_s}\n\n{tip}",
+            raw_len
         )
     } else {
         format!("# READ `{label}` [{total_lines} lines | {format_tag}]\n{converted}")
@@ -1243,22 +1398,14 @@ pub fn run_cli(args: &[String]) -> i32 {
     let out_len = rendered.len() as u64;
     record_event("read", raw_len, out_len, win_heals, 0, format_tag);
 
-    if cli.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "ok": true,
-                "target": label,
-                "format": format_tag,
-                "raw_bytes": raw_len,
-                "emitted_bytes": out_len,
-                "total_lines": total_lines,
-                "content": rendered,
-            }))
-            .unwrap_or_default()
-        );
-    } else {
-        println!("{rendered}");
-    }
-    0
+    let jv = json!({
+        "ok": true,
+        "target": label,
+        "format": format_tag,
+        "raw_bytes": raw_len,
+        "emitted_bytes": out_len,
+        "total_lines": total_lines,
+        "content": rendered,
+    });
+    Ok((rendered, jv))
 }

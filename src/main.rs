@@ -56,10 +56,15 @@ enum TopCmd {
         #[arg(long)]
         reset: bool,
         #[arg(long)]
+        since_hours: Option<u64>,
+        #[arg(long)]
         home: Option<String>,
     },
     /// Check Windows/macOS shell, UTF-8, headless browser CDP & agent wiring health
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// Read any file (.docx, .xlsx, .pptx, .pdf, .csv, GBK/UTF-16) or URL without context overflow
     Read { target: Option<String> },
     /// Run exact SQL joins & aggregations across .xlsx, GBK/UTF-8 .csv/.tsv & .json files
@@ -223,7 +228,7 @@ fn main() {
             no_rules,
         ),
         TopCmd::Stats { .. } => stats::run_cli(&args[1..]),
-        TopCmd::Doctor => install::cmd_doctor(),
+        TopCmd::Doctor { json } => install::cmd_doctor(json),
         TopCmd::Read { .. } => read::run_cli(&args[1..]),
         TopCmd::Query { .. } => query::run_cli(&args[1..]),
         TopCmd::Search { .. } => search::run_cli(&args[1..]),
