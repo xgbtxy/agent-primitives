@@ -4533,3 +4533,135 @@ fn test_v290_ast_read_symbol_outline_batch_doctor_json_stats_window_and_query_re
         350
     );
 }
+
+#[test]
+fn test_v210_pi_native_context_edit_masking_and_doctor_pi_audit() {
+    use serde_json::json;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let fake_home = root.join("fake_home");
+    let ap_home = root.join("ap_v210_home");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(pi_agent.join("extensions")).unwrap();
+
+    // 1. Seed realistic Pi v1.5+ DeepSeek Flash config with an older v2.4.2 accelerator stub
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "defaultTools": ["+codemode"],
+            "compaction": { "enabled": true, "reserveTokens": 32768, "keepRecentTokens": 32000 }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        pi_agent.join("models.json"),
+        serde_json::to_string_pretty(&json!({
+            "providers": {
+                "deepseek": {
+                    "modelOverrides": {
+                        "deepseek-flash": {
+                            "compat": { "supportsMidConvoSystemMessages": true }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        pi_agent.join("extensions").join("zz-ap-accelerator.ts"),
+        "// Managed by agent-primitives (`ap init` v2.4.2).\nexport default function () {}\n",
+    )
+    .unwrap();
+
+    // 2. `ap doctor --json` detects stale Pi accelerator and surfaces upgrade hint
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let doc_before = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc_before.status.success());
+    let dbj: Value = serde_json::from_slice(&doc_before.stdout).unwrap();
+    assert_eq!(dbj["pi_runtime"]["detected"], true);
+    assert_eq!(dbj["pi_runtime"]["accelerator_present"], true);
+    assert_eq!(dbj["pi_runtime"]["accelerator_up_to_date"], false);
+    assert_eq!(dbj["pi_runtime"]["default_model"], "deepseek/deepseek-flash");
+    assert_eq!(dbj["pi_runtime"]["codemode_enabled"], true);
+    assert_eq!(dbj["pi_runtime"]["deepseek_mid_convo_system"], true);
+    assert!(
+        !dbj["pi_runtime"]["hints"].as_array().unwrap().is_empty(),
+        "Expected stale accelerator hint, got: {dbj}"
+    );
+
+    // 3. Upgrade via `ap init -a pi --with-hooks --no-rules --home <fake_home>`
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(
+        init_out.status.success(),
+        "ap init -a pi failed: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+    // Ensure `--no-rules` did not create AGENTS.md
+    assert!(!pi_agent.join("AGENTS.md").exists());
+
+    // Verify upgraded `zz-ap-accelerator.ts` has Pi v1.5 native context_edit batch masking & DeepSeek guards
+    let accel_ts = fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts"))
+        .unwrap();
+    for needle in [
+        "ContextEditEntryDraft",
+        "ProjectedSessionEntry",
+        "export function formatMaskedToolResult",
+        "export function planObservationMasking",
+        "MASK_HIGH_WATER_TOKENS = 180000",
+        "MASK_COOLDOWN_TURNS = 10",
+        "type: \"context_edit\"",
+        "entries: [...(event.entries ?? []), ...plan.edits]",
+        "[ap codemode-tip]",
+        "[ap read-tip]",
+        "extractDsmlToolCalls",
+        "session_before_compact",
+    ] {
+        assert!(
+            accel_ts.contains(needle),
+            "Missing expected Pi v1.5+ DeepSeek feature '{needle}' in zz-ap-accelerator.ts"
+        );
+    }
+
+    // Verify updated `mcp.json` uses deferred `codemode` exposure and mentions AST ap_read & parallel ap_search
+    let mcp_cfg: Value =
+        serde_json::from_str(&fs::read_to_string(pi_agent.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        mcp_cfg["mcpServers"]["agent-primitives"]["exposure"],
+        "codemode"
+    );
+    let desc = mcp_cfg["mcpServers"]["agent-primitives"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(desc.contains("AST ap_read") && desc.contains("ap_rename") && desc.contains("ap_changes"));
+
+    // 4. Re-run `ap doctor --json`: Pi runtime now 100% green with zero hints!
+    let doc_after = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc_after.status.success());
+    let daj: Value = serde_json::from_slice(&doc_after.stdout).unwrap();
+    assert_eq!(daj["pi_runtime"]["accelerator_up_to_date"], true);
+    assert_eq!(daj["pi_runtime"]["mcp_codemode_wired"], true);
+    assert_eq!(daj["pi_runtime"]["hints"].as_array().unwrap().len(), 0);
+}

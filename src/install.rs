@@ -776,7 +776,7 @@ fn merge_pi_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
             "command": ap_bin_posix,
             "args": ["mcp"],
             "exposure": "codemode",
-            "description": "Fast Pure-Rust MCP 2025-06-18 (34 annotated tools, Resources, Prompts): AST edit/rename/orient/impact/changes/trace, parallel search, SQLite/Office/SourceMap/PE/ELF read, compiler/test/diff sieve, baton/recall memory & CDP/HTTP/TCP/WS/TLS probes"
+            "description": "Fast Pure-Rust MCP 2025-06-18 (34 annotated tools, Resources, Prompts): AST ap_read (--symbol/--outline/batch), parallel ap_search (-l/-c/-C), ap_edit/ap_rename, ap_orient/ap_impact/ap_changes/ap_locate/ap_trace, ap_query (named records), ap_sieve (compiler/test/diff), ap_baton/ap_recall & CDP/HTTP/TCP/WS/TLS probes"
         }),
     );
     if let Some(p) = cfg_path.parent() {
@@ -799,14 +799,22 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
 // Designed for Pi v1.5+ and interleaved-thinking models (e.g. DeepSeek Flash / Reasoner):
 // - Accelerates slow `grep -rn`, heals Windows `> NUL`, non-raw `python -c` paths & UTF-8
 // - Auto-sieves >28KB direct-to-LLM shell outputs into `~/.ap/sieve` (zero `.sieve` clutter)
+// - Native Pi v1.5 `context_edit` batch observation masking at high-water marks (180k tok / 72%)
+//   with >=10-turn cooldown to prevent Context Rot while preserving DeepSeek 50x KV-cache & thinking
 // - Breaks 3x shell doom-loops, 3x unchanged file re-reads & 3-turn heavy-thinking stalls
 // - Recovers leaked DSML XML tool blocks when 0 native tool calls were emitted (zero conflict)
-// - Auto-checkpoints `.baton/` on compaction (only if `.baton` already exists) + TUI context HUD
+// - Self-healing tips for `edit` misses, `codemode` errors & giant code `read` calls
+// - Auto-checkpoints `.baton/` on compaction (only if `.baton` already exists) + token-aware TUI HUD
 import {{ spawnSync }} from "node:child_process";
 import {{ existsSync }} from "node:fs";
 import {{ homedir }} from "node:os";
 import {{ join }} from "node:path";
-import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
+import type {{
+	ContextEditEntryDraft,
+	ExtensionAPI,
+	ExtensionContext,
+	ProjectedSessionEntry,
+}} from "@earendil-works/pi-coding-agent";
 
 const AP_BIN = "{escaped}";
 const SIEVE_HOME = process.env.SIEVE_HOME || join(homedir(), ".ap", "sieve");
@@ -818,12 +826,25 @@ const PY_INVOKE = /(?:^|[;&|]\s*)(?:python3?|py)\b/i;
 const HAS_UTF8_ENV = /PYTHONUTF8|PYTHONIOENCODING/i;
 const PY_WIN_BS = /\b(?:python3?|py)\s+-c\s+.*(?<![rR])['"][A-Za-z]:\\(?!\\)/;
 const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
+const CODE_FILE_EXT = /\.(?:rs|ts|tsx|js|jsx|mjs|cjs|py|go|c|cc|cpp|h|hpp)$/i;
 const EDIT_TOOLS = new Set(["write", "edit", "ap_edit", "ap_rename"]);
 const LOOP_WINDOW = 6;
 const LOOP_THRESHOLD = 3;
 const REREAD_THRESHOLD = 3;
 const HEAVY_THINKING_CHARS = 12000;
 const STAGNATION_TURNS = 3;
+const LARGE_CODE_READ_CHARS = 20000;
+
+// High-water batch observation masking constants (tuned for 1M-window DeepSeek Flash & 128k-256k models)
+const MASK_PREFIX = "[ap masked stale toolResult:";
+const MASK_HIGH_WATER_PCT = 72;
+const MASK_HIGH_WATER_TOKENS = 180000;
+const MASK_STALE_CHARS_FALLBACK = 120000;
+const MASK_KEEP_RECENT_ENTRIES = 12;
+const MASK_MIN_ENTRY_CHARS = 4500;
+const MASK_MIN_BATCH_ENTRIES = 2;
+const MASK_MIN_RECLAIMED_CHARS = 16000;
+const MASK_COOLDOWN_TURNS = 10;
 
 export function normCmdFingerprint(raw: string): string {{
 	return raw
@@ -937,12 +958,144 @@ export function extractDsmlToolCalls(
 	return {{ cleanedText, calls }};
 }}
 
+/**
+ * Deterministic, timestamp-free replacement stub for stale bulky `toolResult` entries.
+ * Preserves any `ap sieve` archive ID for lossless recovery via `ap_sieve(action="peek")`.
+ */
+export function formatMaskedToolResult(toolName: string, rawText: string): string {{
+	const lineCount = rawText.split("\n").length;
+	const sieveMatch =
+		rawText.match(/\bsieve\s+(?:id=|peek\s+)([a-zA-Z0-9_-]{{4,40}})\b/i) ||
+		rawText.match(/\[sieve\s+id=([a-zA-Z0-9_-]{{4,40}})\b/i);
+	const sieveId = sieveMatch?.[1];
+	const head = rawText.slice(0, 140).replace(/\s+/g, " ").trim();
+	const tail = rawText.slice(-110).replace(/\s+/g, " ").trim();
+	const recovery = sieveId
+		? `(Recover full output via ap_sieve(action="peek", id="${{sieveId}}").)`
+		: "(Re-run or narrow with ap_read(symbol/outline) / ap_search if needed.)";
+	const sieveTag = sieveId ? ` | sieve=${{sieveId}}` : "";
+	return `${{MASK_PREFIX}} ${{toolName}} (${{rawText.length}} chars, ${{lineCount}} lines)${{sieveTag}}]\nhead: ${{head}}\ntail: ${{tail}}\n${{recovery}}`;
+}}
+
+export interface ObservationMaskPlan {{
+	edits: ContextEditEntryDraft[];
+	maskedCount: number;
+	reclaimedChars: number;
+	reason: string;
+}}
+
+export interface ObservationMaskOptions {{
+	usagePercent?: number | null;
+	usageTokens?: number | null;
+	keepRecentEntries?: number;
+	minEntryChars?: number;
+	highWaterPercent?: number;
+	highWaterTokens?: number;
+	staleCharsFallback?: number;
+	minBatchEntries?: number;
+	minReclaimedChars?: number;
+}}
+
+/**
+ * Plan a single KV-cache-friendly batch of Pi v1.5 `context_edit` drafts to mask stale
+ * oversized `toolResult` entries outside the recent active tail.
+ * Never touches assistant messages, thinking/reasoning_content blocks, user turns, or images.
+ */
+export function planObservationMasking(
+	contextEntries: readonly ProjectedSessionEntry[],
+	options: ObservationMaskOptions = {{}},
+): ObservationMaskPlan {{
+	const keepRecent = options.keepRecentEntries ?? MASK_KEEP_RECENT_ENTRIES;
+	const minChars = options.minEntryChars ?? MASK_MIN_ENTRY_CHARS;
+	const highPct = options.highWaterPercent ?? MASK_HIGH_WATER_PCT;
+	const highTok = options.highWaterTokens ?? MASK_HIGH_WATER_TOKENS;
+	const staleFallback = options.staleCharsFallback ?? MASK_STALE_CHARS_FALLBACK;
+	const minEntries = options.minBatchEntries ?? MASK_MIN_BATCH_ENTRIES;
+	const minReclaimed = options.minReclaimedChars ?? MASK_MIN_RECLAIMED_CHARS;
+
+	if (!Array.isArray(contextEntries) || contextEntries.length <= keepRecent) {{
+		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "too-few-entries" }};
+	}}
+
+	const scanLimit = contextEntries.length - keepRecent;
+	const candidates: Array<{{ targetId: string; toolName: string; rawText: string }}> = [];
+	let totalStaleChars = 0;
+
+	for (let i = 0; i < scanLimit; i++) {{
+		const proj = contextEntries[i];
+		const src = proj?.sourceEntry as {{ id?: string; type?: string }} | undefined;
+		if (!src || src.type !== "message" || typeof src.id !== "string" || !src.id) continue;
+		if (!Array.isArray(proj.messages) || proj.messages.length !== 1) continue;
+		const msg = proj.messages[0] as {{
+			role?: string;
+			toolName?: string;
+			content?: Array<{{ type?: string; text?: string }}>;
+		}};
+		if (msg?.role !== "toolResult" || !Array.isArray(msg.content) || msg.content.length === 0) {{
+			continue;
+		}}
+		// Keep multimodal/image tool results untouched
+		if (msg.content.some((b) => b?.type !== "text")) continue;
+		const rawText = msg.content.map((b) => (typeof b.text === "string" ? b.text : "")).join("\n");
+		if (rawText.length < minChars || rawText.startsWith(MASK_PREFIX)) continue;
+
+		candidates.push({{
+			targetId: src.id,
+			toolName: typeof msg.toolName === "string" && msg.toolName ? msg.toolName : "tool",
+			rawText,
+		}});
+		totalStaleChars += rawText.length;
+	}}
+
+	if (candidates.length < minEntries) {{
+		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "below-min-entries" }};
+	}}
+
+	const pct = typeof options.usagePercent === "number" ? options.usagePercent : null;
+	const tok = typeof options.usageTokens === "number" ? options.usageTokens : null;
+	const pctTriggered = pct !== null && pct >= highPct;
+	const tokTriggered = tok !== null && tok >= highTok;
+	const fallbackTriggered = totalStaleChars >= staleFallback && candidates.length >= 4;
+
+	if (!pctTriggered && !tokTriggered && !fallbackTriggered) {{
+		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "below-high-water" }};
+	}}
+
+	const edits: ContextEditEntryDraft[] = [];
+	let reclaimedChars = 0;
+	for (const c of candidates) {{
+		const stub = formatMaskedToolResult(c.toolName, c.rawText);
+		const saved = c.rawText.length - stub.length;
+		if (saved < 1000) continue;
+		edits.push({{
+			type: "context_edit",
+			targetId: c.targetId,
+			replacement: {{ content: [{{ type: "text", text: stub }}] }},
+		}});
+		reclaimedChars += saved;
+	}}
+
+	if (edits.length < minEntries || reclaimedChars < minReclaimed) {{
+		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "savings-too-small" }};
+	}}
+
+	const reason = tokTriggered
+		? "high-water-tokens"
+		: pctTriggered
+			? "high-water-percent"
+			: "stale-payload-fallback";
+	return {{ edits, maskedCount: edits.length, reclaimedChars, reason }};
+}}
+
 export default function (pi: ExtensionAPI) {{
 	const recentShellFps: string[] = [];
 	const unchangedReads = new Map<string, number>();
 	let stagnantHeavyTurns = 0;
 	let pendingThinkingNudge = false;
+	let largeReadTipShown = false;
+	let lastMaskTurn = -MASK_COOLDOWN_TURNS;
 	let sievedCount = 0;
+	let maskedCount = 0;
 	let guardsTriggered = 0;
 
 	const resetTransientState = () => {{
@@ -950,29 +1103,50 @@ export default function (pi: ExtensionAPI) {{
 		unchangedReads.clear();
 		stagnantHeavyTurns = 0;
 		pendingThinkingNudge = false;
+		lastMaskTurn = -MASK_COOLDOWN_TURNS;
 	}};
 
 	const updateHud = (ctx?: ExtensionContext) => {{
 		if (!ctx || !ctx.hasUI) return;
 		const usage = ctx.getContextUsage?.();
 		const pct = typeof usage?.percent === "number" ? Math.round(usage.percent) : null;
+		const tok = typeof usage?.tokens === "number" ? usage.tokens : null;
+		const tokLabel = tok !== null ? `${{Math.round(tok / 1000)}}k` : null;
 		const parts: string[] = [];
 		if (sievedCount > 0) parts.push(`${{sievedCount}} sieved`);
+		if (maskedCount > 0) parts.push(`${{maskedCount}} masked`);
 		if (guardsTriggered > 0) parts.push(`${{guardsTriggered}} guarded`);
-		if (pct !== null && pct >= 75) parts.push(`CTX HIGH ${{pct}}%`);
-		else if (pct !== null && pct >= 55 && parts.length > 0) parts.push(`ctx ${{pct}}%`);
+		const highWater =
+			(pct !== null && pct >= MASK_HIGH_WATER_PCT) ||
+			(tok !== null && tok >= MASK_HIGH_WATER_TOKENS);
+		if (highWater) {{
+			parts.push(
+				tokLabel && pct !== null
+					? `CTX HIGH ${{tokLabel}} (${{pct}}%)`
+					: pct !== null
+						? `CTX HIGH ${{pct}}%`
+						: `CTX HIGH ${{tokLabel}}`,
+			);
+		}} else if ((pct !== null && pct >= 55) || (tok !== null && tok >= 120000)) {{
+			if (parts.length > 0 || (tok !== null && tok >= 120000)) {{
+				parts.push(tokLabel && pct !== null ? `ctx ${{tokLabel}} (${{pct}}%)` : `ctx ${{pct ?? tokLabel}}`);
+			}}
+		}}
 		ctx.ui.setStatus("ap", parts.length > 0 ? `ap: ${{parts.join(" | ")}}` : undefined);
 	}};
 
 	pi.on("session_start", (_event, ctx) => {{
 		resetTransientState();
+		largeReadTipShown = false;
 		sievedCount = 0;
+		maskedCount = 0;
 		guardsTriggered = 0;
 		updateHud(ctx);
 	}});
 
 	pi.on("session_before_switch", () => {{
 		resetTransientState();
+		largeReadTipShown = false;
 	}});
 
 	pi.on("session_compact", (_event, ctx) => {{
@@ -1059,6 +1233,29 @@ export default function (pi: ExtensionAPI) {{
 				stagnantHeavyTurns = Math.max(0, stagnantHeavyTurns - 1);
 			}}
 		}}
+
+		// Native Pi v1.5 batch observation masking at high-water mark with cooldown (KV-cache preserving)
+		const turnIdx = typeof event.turnIndex === "number" ? event.turnIndex : 0;
+		const contextEntries = event.context?.contextEntries;
+		if (
+			Array.isArray(contextEntries) &&
+			turnIdx - lastMaskTurn >= MASK_COOLDOWN_TURNS
+		) {{
+			const usage = ctx?.getContextUsage?.();
+			const plan = planObservationMasking(contextEntries, {{
+				usagePercent: usage?.percent ?? null,
+				usageTokens: usage?.tokens ?? null,
+			}});
+			if (plan.edits.length > 0) {{
+				lastMaskTurn = turnIdx;
+				maskedCount += plan.maskedCount;
+				updateHud(ctx);
+				return {{
+					entries: [...(event.entries ?? []), ...plan.edits],
+				}};
+			}}
+		}}
+
 		updateHud(ctx);
 		return undefined;
 	}});
@@ -1096,7 +1293,7 @@ export default function (pi: ExtensionAPI) {{
 		let outText = textBlock.text;
 		let mutated = false;
 
-		// A. Built-in `read` redundant re-read guard (resets automatically on any write/edit/compaction)
+		// A. Built-in `read` redundant re-read guard + one-time large code file AST tip
 		if (event.toolName === "read" && !event.isError) {{
 			const p = String(event.input?.path ?? event.input?.file_path ?? "");
 			const off = String(event.input?.offset ?? "");
@@ -1109,6 +1306,10 @@ export default function (pi: ExtensionAPI) {{
 					outText += `\n[ap reread-guard] Exact unchanged slice (${{p}}) read ${{hits}}x already in this session. Avoid re-reading; use ap_search/ap_locate or proceed directly to edits.`;
 					guardsTriggered += 1;
 					mutated = true;
+				}} else if (!largeReadTipShown && outText.length >= LARGE_CODE_READ_CHARS && CODE_FILE_EXT.test(p)) {{
+					outText += `\n[ap read-tip] Large code file loaded; use ap_read(outline=true) or ap_read(symbol="...") for AST-exact slices (~85% fewer tokens).`;
+					largeReadTipShown = true;
+					mutated = true;
 				}}
 			}}
 		}}
@@ -1116,6 +1317,15 @@ export default function (pi: ExtensionAPI) {{
 		// B. Built-in `edit` error self-healing tip (guides DeepSeek straight to fuzzy/AST recovery)
 		if (event.toolName === "edit" && event.isError) {{
 			outText += `\n[ap edit-tip] Patch target missed; use ap_edit (4-tier indentation/blank-line fuzzy match + AST symbols) or ap splice view for exact lines.`;
+			mutated = true;
+		}}
+
+		// B2. Pi `codemode` error self-healing tip (eliminates blind MCP name/schema guessing loops)
+		if (
+			event.toolName === "codemode" &&
+			(event.isError || outText.includes("Script failed") || outText.includes("is not a function"))
+		) {{
+			outText += `\n[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs & structuredContent fields.`;
 			mutated = true;
 		}}
 
@@ -1853,6 +2063,137 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
     0
 }
 
+fn inspect_pi_runtime(home: &Path) -> Value {
+    let pi_agent = home.join(".pi").join("agent");
+    if !pi_agent.is_dir() {
+        return json!({
+            "detected": false,
+            "hints": []
+        });
+    }
+
+    let accel_path = pi_agent.join("extensions").join("zz-ap-accelerator.ts");
+    let accel_txt = fs::read_to_string(&accel_path).ok();
+    let accelerator_present = accel_txt.is_some();
+    let accelerator_up_to_date = accel_txt
+        .as_deref()
+        .map(|s| {
+            s.contains("planObservationMasking")
+                && s.contains("extractDsmlToolCalls")
+                && s.contains("session_before_compact")
+        })
+        .unwrap_or(false);
+
+    let mcp_path = pi_agent.join("mcp.json");
+    let mcp_json = fs::read_to_string(&mcp_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let mcp_server = mcp_json
+        .as_ref()
+        .and_then(|v| v.pointer("/mcpServers/agent-primitives"));
+    let mcp_codemode_wired = mcp_server
+        .and_then(|v| v.get("exposure"))
+        .and_then(Value::as_str)
+        == Some("codemode");
+
+    let settings_json = fs::read_to_string(pi_agent.join("settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let default_provider = settings_json
+        .as_ref()
+        .and_then(|v| v.get("defaultProvider"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let default_model_id = settings_json
+        .as_ref()
+        .and_then(|v| v.get("defaultModel"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let default_model = match (&default_provider, &default_model_id) {
+        (Some(p), Some(m)) => Some(format!("{p}/{m}")),
+        (None, Some(m)) => Some(m.clone()),
+        _ => None,
+    };
+    let codemode_enabled = settings_json
+        .as_ref()
+        .and_then(|v| v.get("defaultTools"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .any(|t| t == "+codemode" || t == "codemode")
+        })
+        .unwrap_or(false);
+    let compaction_reserve_tokens = settings_json
+        .as_ref()
+        .and_then(|v| v.pointer("/compaction/reserveTokens"))
+        .and_then(Value::as_u64);
+
+    let models_json = fs::read_to_string(pi_agent.join("models.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let deepseek_mid_convo_system = models_json
+        .as_ref()
+        .and_then(|v| {
+            default_model_id
+                .as_deref()
+                .and_then(|mid| {
+                    v.pointer(&format!(
+                        "/providers/deepseek/modelOverrides/{mid}/compat/supportsMidConvoSystemMessages"
+                    ))
+                })
+                .or_else(|| {
+                    v.pointer(
+                        "/providers/deepseek/modelOverrides/deepseek-flash/compat/supportsMidConvoSystemMessages",
+                    )
+                })
+        })
+        .and_then(Value::as_bool);
+
+    let mut hints: Vec<String> = Vec::new();
+    if !accelerator_present || !accelerator_up_to_date {
+        hints.push(
+            "Run `ap init -a pi --with-hooks --no-rules` to install/upgrade zz-ap-accelerator.ts (DSML recovery, doom-loop breaker & Pi v1.5 native context_edit batch observation masking)."
+                .to_string(),
+        );
+    }
+    if mcp_server.is_some() && !mcp_codemode_wired {
+        hints.push(
+            "Set `\"exposure\": \"codemode\"` for agent-primitives in ~/.pi/agent/mcp.json to keep provider tool schemas deferred and preserve KV-cache hits."
+                .to_string(),
+        );
+    }
+    if mcp_codemode_wired && !codemode_enabled {
+        hints.push(
+            "Add `\"+codemode\"` to `defaultTools` in ~/.pi/agent/settings.json so Pi can invoke deferred MCP tools in QuickJS scripts."
+                .to_string(),
+        );
+    }
+    let is_deepseek = default_provider.as_deref() == Some("deepseek")
+        || default_model_id
+            .as_deref()
+            .map(|m| m.contains("deepseek"))
+            .unwrap_or(false);
+    if is_deepseek && deepseek_mid_convo_system != Some(true) {
+        hints.push(
+            "Consider enabling `compat.supportsMidConvoSystemMessages: true` under providers.deepseek.modelOverrides in ~/.pi/agent/models.json to keep DeepSeek prefix KV-cache intact."
+                .to_string(),
+        );
+    }
+
+    json!({
+        "detected": true,
+        "accelerator_present": accelerator_present,
+        "accelerator_up_to_date": accelerator_up_to_date,
+        "mcp_codemode_wired": mcp_codemode_wired,
+        "codemode_enabled": codemode_enabled,
+        "default_model": default_model,
+        "compaction_reserve_tokens": compaction_reserve_tokens,
+        "deepseek_mid_convo_system": deepseek_mid_convo_system,
+        "hints": hints,
+    })
+}
+
 pub fn cmd_doctor(as_json: bool) -> i32 {
     let mut ok = true;
     let fts5_ok = Connection::open_in_memory()
@@ -1964,6 +2305,8 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
         }
     }
 
+    let pi_runtime = inspect_pi_runtime(&home);
+
     if as_json {
         println!(
             "{}",
@@ -1982,6 +2325,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
                 "wired_hooks_count": wired_hooks_count,
                 "sieve_archives": sieve_archives,
                 "sieve_kb": ((sieve_bytes as f64 / 1024.0) * 10.0).round() / 10.0,
+                "pi_runtime": pi_runtime,
             }))
             .unwrap_or_default()
         );
@@ -2036,6 +2380,30 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
         global_bin_version.as_deref().unwrap_or("not installed"),
         sieve_bytes as f64 / 1024.0
     );
+    if pi_runtime["detected"].as_bool() == Some(true) {
+        let accel_ok = pi_runtime["accelerator_up_to_date"].as_bool() == Some(true);
+        let mcp_ok = pi_runtime["mcp_codemode_wired"].as_bool() == Some(true);
+        let cm_ok = pi_runtime["codemode_enabled"].as_bool() == Some(true);
+        let model = pi_runtime["default_model"]
+            .as_str()
+            .unwrap_or("unset");
+        let badge = if accel_ok && mcp_ok && cm_ok {
+            "[OK]"
+        } else {
+            "[WARN]"
+        };
+        println!(
+            "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
+            if cm_ok { "on" } else { "off" },
+            if mcp_ok { "yes" } else { "no" },
+            if accel_ok { "v2.10+ (context_edit masking + DSML + guards)" } else { "stale/missing" }
+        );
+        if let Some(hints) = pi_runtime["hints"].as_array() {
+            for h in hints.iter().filter_map(Value::as_str) {
+                println!("         -> {h}");
+            }
+        }
+    }
     println!(
         "  Tip: Run `ap stats` (or `ap stats --since-hours 24`) anytime to view saved tokens & prevented crashes."
     );
