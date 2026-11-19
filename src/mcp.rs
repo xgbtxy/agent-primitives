@@ -335,6 +335,74 @@ fn mcp_tools_schema() -> Value {
         }
     },
     {
+        "name": "ap_ws",
+        "description": "Deadline-bounded RFC 6455 non-CDP WebSocket (`ws://`) send/recv probe (never hangs on recv).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "Target ws://host:port/path URL" },
+                "send": { "type": "array", "items": { "type": "string" }, "description": "Text frames to send after handshake" },
+                "headers": { "type": "array", "items": { "type": "string" }, "description": "Optional extra HTTP upgrade headers" },
+                "wait_ms": { "type": "integer", "description": "Max receive window in ms (default: 1000)" }
+            },
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "ap_tls",
+        "description": "Cross-platform TLS protocol & X.509 certificate Subject/Issuer/Expiry/SHA-256 inspector.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "addr": { "type": "string", "description": "Target host:port (e.g. 'example.com:443')" },
+                "sni": { "type": "string", "description": "Optional SNI hostname override" },
+                "timeout": { "type": "integer", "description": "Timeout in seconds (default: 6)" }
+            },
+            "required": ["addr"]
+        }
+    },
+    {
+        "name": "ap_baton_claim",
+        "description": "Atomic multi-agent resource lease manager (claim/release/list shared VMs, servers, ports with TTL expiry; exit 2 if actively held by another agent).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "description": "'claim', 'release', or 'list'" },
+                "resource": { "type": "string", "description": "Resource key (e.g. 'win10-vm', 'cdp-9222')" },
+                "owner": { "type": "string", "description": "Agent/workspace owner identifier" },
+                "ttl": { "type": "integer", "description": "Lease TTL in seconds (default: 900)" },
+                "note": { "type": "string", "description": "Optional short lease note" }
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "ap_baton_dedup",
+        "description": "Sub-15ms hybrid BM25 + CJK bigram + camelCase semantic near-duplicate finder across Markdown ledgers, notes & JSON/JSONL indexes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Candidate title, component, or effect summary to check" },
+                "files": { "type": "array", "items": { "type": "string" }, "description": "Paths to ledger/index/markdown files" },
+                "top_k": { "type": "integer", "description": "Max near-duplicate hits (default: 8)" }
+            },
+            "required": ["query", "files"]
+        }
+    },
+    {
+        "name": "ap_guard_pack",
+        "description": "Deterministic deliverable/evidence bundle verifier: validates full 64-hex SHA-256 artifact manifests, scans secret/absolute-path leaks, and checks required headers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dir": { "type": "string", "description": "Bundle directory to verify" },
+                "max_lines": { "type": "integer", "description": "Optional max non-empty narrative lines budget" },
+                "require_headers": { "type": "array", "items": { "type": "string" }, "description": "Optional required header prefixes" }
+            },
+            "required": ["dir"]
+        }
+    },
+    {
         "name": "ap_diff_audit",
         "description": "Semantic git diff self-audit: catches test-weakening cheating (deleted assertions), newly added debug leftovers (debugger/breakpoint/dbg!), and silent mass deletions.",
         "inputSchema": {
@@ -1170,6 +1238,135 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             {
                 cli.push("--run".into());
                 cli.push(rc.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_ws" => {
+            let url = args.get("url").and_then(Value::as_str).unwrap_or("").trim();
+            if url.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `url` (ws://...) to `ap_ws`.".to_string(),
+                );
+            }
+            let mut cli = vec!["probe".into(), "ws".into(), url.to_string()];
+            if let Some(arr) = args.get("send").and_then(Value::as_array) {
+                for m in arr.iter().filter_map(Value::as_str) {
+                    cli.push("--send".into());
+                    cli.push(m.to_string());
+                }
+            }
+            if let Some(hdrs) = args.get("headers").and_then(Value::as_array) {
+                for h in hdrs.iter().filter_map(Value::as_str) {
+                    cli.push("-H".into());
+                    cli.push(h.to_string());
+                }
+            }
+            if let Some(wm) = args.get("wait_ms").and_then(Value::as_u64) {
+                cli.push("--wait-ms".into());
+                cli.push(wm.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_tls" => {
+            let addr = args
+                .get("addr")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if addr.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `addr` (host:port) to `ap_tls`.".to_string(),
+                );
+            }
+            let mut cli = vec!["probe".into(), "tls".into(), addr.to_string()];
+            if let Some(s) = args
+                .get("sni")
+                .and_then(Value::as_str)
+                .filter(|x| !x.is_empty())
+            {
+                cli.push("--sni".into());
+                cli.push(s.to_string());
+            }
+            if let Some(t) = args.get("timeout").and_then(Value::as_u64) {
+                cli.push("--timeout".into());
+                cli.push(t.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_baton_claim" => {
+            let act = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("list")
+                .to_ascii_lowercase();
+            let mut cli = vec!["baton".into()];
+            match act.as_str() {
+                "claim" => {
+                    let res = args.get("resource").and_then(Value::as_str).unwrap_or("");
+                    let own = args.get("owner").and_then(Value::as_str).unwrap_or("");
+                    if res.is_empty() || own.is_empty() {
+                        return (
+                            false,
+                            "Pass `resource` and `owner` for action='claim'.".into(),
+                        );
+                    }
+                    cli.extend(["claim".into(), res.into(), "--owner".into(), own.into()]);
+                    if let Some(ttl) = args.get("ttl").and_then(Value::as_u64) {
+                        cli.extend(["--ttl".into(), ttl.to_string()]);
+                    }
+                    if let Some(note) = args.get("note").and_then(Value::as_str) {
+                        cli.extend(["--note".into(), note.into()]);
+                    }
+                }
+                "release" => {
+                    let res = args.get("resource").and_then(Value::as_str).unwrap_or("");
+                    if res.is_empty() {
+                        return (false, "Pass `resource` for action='release'.".into());
+                    }
+                    cli.extend(["release".into(), res.into()]);
+                    if let Some(own) = args.get("owner").and_then(Value::as_str) {
+                        cli.extend(["--owner".into(), own.into()]);
+                    }
+                }
+                _ => cli.push("claims".into()),
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_baton_dedup" => {
+            let q = args
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let files: Vec<&str> = args
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if q.is_empty() || files.is_empty() {
+                return (false, "Pass non-empty `query` and `files` array.".into());
+            }
+            let mut cli = vec!["baton".into(), "dedup".into(), q.to_string()];
+            for f in files {
+                cli.push(f.to_string());
+            }
+            if let Some(k) = args.get("top_k").and_then(Value::as_u64) {
+                cli.extend(["-k".into(), k.to_string()]);
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_guard_pack" => {
+            let dir = args.get("dir").and_then(Value::as_str).unwrap_or(".");
+            let mut cli = vec!["guard".into(), "pack".into(), dir.to_string()];
+            if let Some(ml) = args.get("max_lines").and_then(Value::as_u64) {
+                cli.extend(["--max-lines".into(), ml.to_string()]);
+            }
+            if let Some(hdrs) = args.get("require_headers").and_then(Value::as_array) {
+                for h in hdrs.iter().filter_map(Value::as_str) {
+                    cli.extend(["--require-header".into(), h.to_string()]);
+                }
             }
             run_self_captured(&cli, None)
         }

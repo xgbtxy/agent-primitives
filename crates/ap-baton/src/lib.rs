@@ -1,3 +1,4 @@
+pub mod coord;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -113,6 +114,42 @@ enum SubCmd {
     },
     /// Reset active baton capsule (archives prior snapshot)
     Clear,
+    /// Atomically claim a shared multi-agent resource with TTL expiry (exit 2 if held by another agent)
+    Claim {
+        resource: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long, default_value_t = 900)]
+        ttl: u64,
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Release a claimed shared resource
+    Release {
+        resource: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List active & expired multi-agent resource claims
+    Claims {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sub-15ms hybrid BM25 + CJK bigram semantic near-duplicate finder across ledgers, markdown & JSON indexes
+    Dedup {
+        query: String,
+        files: Vec<PathBuf>,
+        #[arg(short = 'k', long, default_value_t = 8)]
+        top_k: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -464,5 +501,25 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             0
         }
+        SubCmd::Claim {
+            resource,
+            owner,
+            ttl,
+            note,
+            json,
+        } => coord::run_claim(&resource, &owner, ttl, &note, json),
+        SubCmd::Release {
+            resource,
+            owner,
+            force,
+            json,
+        } => coord::run_release(&resource, owner.as_deref(), force, json),
+        SubCmd::Claims { json } => coord::run_claims_list(json),
+        SubCmd::Dedup {
+            query,
+            files,
+            top_k,
+            json,
+        } => coord::run_dedup(&query, &files, top_k, json),
     }
 }

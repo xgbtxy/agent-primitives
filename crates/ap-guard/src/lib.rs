@@ -1,6 +1,7 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
 pub mod diff_audit;
+pub mod pack;
 pub mod rules;
 pub mod sec;
 use regex::Regex;
@@ -81,6 +82,17 @@ enum SubCmd {
     Diff {
         #[arg(default_value = ".")]
         cwd: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deterministic deliverable/evidence bundle gate: verifies full 64-hex SHA-256 manifests, scans secret/absolute-path leaks & required headers
+    Pack {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        max_lines: Option<usize>,
+        #[arg(long = "require-header")]
+        require_headers: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1384,5 +1396,11 @@ pub fn run_cli(args: &[String]) -> i32 {
                 0
             }
         },
+        SubCmd::Pack {
+            dir,
+            max_lines,
+            require_headers,
+            json,
+        } => pack::run_pack_audit(&dir, max_lines, &require_headers, json),
     }
 }

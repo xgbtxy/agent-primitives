@@ -3140,3 +3140,244 @@ fn test_pe_imports_exports_hex_ps_fs_diff_tcp_and_listen() {
         .unwrap_or("")
         .contains("/hook?tok=V23_OK"));
 }
+
+#[test]
+fn test_multi_agent_claims_dedup_pack_ws_and_pi_codemode_wiring() {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v24_home");
+
+    // 1. Atomic Multi-Agent Resource Claims (`ap baton claim` / `release` / `claims`)
+    let c1 = run_ap(
+        root,
+        &[
+            "baton",
+            "claim",
+            "test-vm-01",
+            "--owner",
+            "agent-alpha",
+            "--ttl",
+            "60",
+            "--note",
+            "repro-run",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(c1.status.success());
+    let c2_conflict = run_ap(
+        root,
+        &[
+            "baton",
+            "claim",
+            "test-vm-01",
+            "--owner",
+            "agent-beta",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert_eq!(
+        c2_conflict.status.code(),
+        Some(2),
+        "Expected exit 2 when resource held by another owner"
+    );
+    let rel_ok = run_ap(
+        root,
+        &[
+            "baton",
+            "release",
+            "test-vm-01",
+            "--owner",
+            "agent-alpha",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(rel_ok.status.success());
+    let c3_now_free = run_ap(
+        root,
+        &[
+            "baton",
+            "claim",
+            "test-vm-01",
+            "--owner",
+            "agent-beta",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(c3_now_free.status.success());
+
+    // 2. Hybrid BM25 + CJK Bigram Semantic Near-Duplicate Matcher (`ap baton dedup`)
+    let ledger = root.join("ledger.md");
+    fs::write(
+        &ledger,
+        "- 插件更新器校验绕过导致任意文件覆盖\n- 账单导出接口未校验租户隔离\n- IPC bridge command injection in desktop launcher\n",
+    )
+    .unwrap();
+    let dd = run_ap(
+        root,
+        &[
+            "baton",
+            "dedup",
+            "插件更新器文件覆盖校验绕过",
+            ledger.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(dd.status.success());
+    let dd_j: Value = serde_json::from_slice(&dd.stdout).unwrap();
+    assert!(
+        dd_j["matches"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("插件更新器校验绕过"),
+        "Expected CJK semantic top-1 hit, got: {dd_j}"
+    );
+
+    // 3. Deterministic Bundle Verifier (`ap guard pack`): passes valid SHA-256, blocks mismatch & secret leak
+    let pack_dir = root.join("bundle_ok");
+    fs::create_dir_all(pack_dir.join("evidence")).unwrap();
+    let ev_bytes = b"verified-output-payload-v24\n";
+    fs::write(pack_dir.join("evidence/run.log"), ev_bytes).unwrap();
+    let mut h = Sha256::new();
+    h.update(ev_bytes);
+    let full_sha: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    fs::write(
+        pack_dir.join("report.md"),
+        format!("Origin: automated-test\nWorkspace: W24\n\n- evidence/run.log  {full_sha}\n"),
+    )
+    .unwrap();
+    let pk_ok = run_ap(
+        root,
+        &[
+            "guard",
+            "pack",
+            pack_dir.to_str().unwrap(),
+            "--require-header",
+            "Origin:",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        pk_ok.status.success(),
+        "Expected clean bundle pass: {}{}",
+        String::from_utf8_lossy(&pk_ok.stdout),
+        String::from_utf8_lossy(&pk_ok.stderr)
+    );
+    let pk_j: Value = serde_json::from_slice(&pk_ok.stdout).unwrap();
+    assert_eq!(pk_j["verified_sha256"], 1);
+
+    // Corrupt artifact & inject an accidental secret -> must fail with exit 2
+    fs::write(pack_dir.join("evidence/run.log"), b"tampered!\n").unwrap();
+    fs::write(
+        pack_dir.join("leak.txt"),
+        "token=ghp_1234567890abcdef1234567890abcdef1234\n",
+    )
+    .unwrap();
+    let pk_bad = run_ap(
+        root,
+        &["guard", "pack", pack_dir.to_str().unwrap(), "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert_eq!(pk_bad.status.code(), Some(2));
+    let pk_bj: Value = serde_json::from_slice(&pk_bad.stdout).unwrap();
+    let issues_s = pk_bj["issues"].to_string();
+    assert!(
+        issues_s.contains("SHA256-MISMATCH") && issues_s.contains("SECRET-LEAK"),
+        "Expected SHA256-MISMATCH & SECRET-LEAK, got: {issues_s}"
+    );
+
+    // 4. Generic RFC 6455 WebSocket Probe (`ap probe ws`) against ephemeral Rust WS echo server
+    let ws_srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ws_port = ws_srv.local_addr().unwrap().port();
+    let ws_thr = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = ws_srv.accept() {
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let hs = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+            let _ = s.write_all(hs.as_bytes());
+            // Read 1 client frame, then send unmasked text frame "WS_ECHO_V24"
+            let mut fbuf = [0u8; 256];
+            let _ = s.read(&mut fbuf);
+            let reply = b"WS_ECHO_V24";
+            let mut frame = vec![0x81u8, reply.len() as u8];
+            frame.extend_from_slice(reply);
+            let _ = s.write_all(&frame);
+        }
+    });
+    let ws_out = run_ap(
+        root,
+        &[
+            "probe",
+            "ws",
+            &format!("ws://127.0.0.1:{ws_port}/stream"),
+            "--send",
+            "hello",
+            "--wait-ms",
+            "600",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    let _ = ws_thr.join();
+    assert!(
+        ws_out.status.success(),
+        "ap probe ws failed: {}{}",
+        String::from_utf8_lossy(&ws_out.stdout),
+        String::from_utf8_lossy(&ws_out.stderr)
+    );
+    let ws_j: Value = serde_json::from_slice(&ws_out.stdout).unwrap();
+    assert!(ws_j["messages"].to_string().contains("WS_ECHO_V24"));
+
+    // 5. Native Pi `mcp.json` (`exposure: "codemode"`) & `zz-ap-accelerator.ts` wiring + clean uninstall
+    let pi_home = root.join("fake_pi_home");
+    fs::create_dir_all(pi_home.join(".pi/agent")).unwrap();
+    assert!(run_ap(
+        root,
+        &[
+            "init",
+            "--agent",
+            "pi",
+            "--with-hooks",
+            "--home",
+            pi_home.to_str().unwrap(),
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    )
+    .status
+    .success());
+    let pi_mcp = pi_home.join(".pi/agent/mcp.json");
+    let pi_ext = pi_home.join(".pi/agent/extensions/zz-ap-accelerator.ts");
+    assert!(pi_mcp.is_file(), "Expected ~/.pi/agent/mcp.json created");
+    assert!(pi_ext.is_file(), "Expected zz-ap-accelerator.ts created");
+    assert!(fs::read_to_string(&pi_mcp)
+        .unwrap()
+        .contains("\"exposure\": \"codemode\""));
+
+    assert!(run_ap(
+        root,
+        &["uninstall", "--home", pi_home.to_str().unwrap()],
+        None,
+        &[("AP_HOME", &ap_home)],
+    )
+    .status
+    .success());
+    assert!(!pi_mcp.exists());
+    assert!(!pi_ext.exists());
+}

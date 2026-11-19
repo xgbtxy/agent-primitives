@@ -416,3 +416,320 @@ pub fn run_listen_cli(
         0
     }
 }
+
+fn ws_write_text_frame(stream: &mut TcpStream, text: &str) -> Result<(), String> {
+    let payload = text.as_bytes();
+    let len = payload.len();
+    let mask = [0x42u8, 0x9a, 0x11, 0x7e];
+    let mut frame = Vec::with_capacity(len + 14);
+    frame.push(0x81); // FIN + Text
+    if len <= 125 {
+        frame.push(0x80 | (len as u8));
+    } else if len <= 65535 {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(&mask);
+    for (i, b) in payload.iter().enumerate() {
+        frame.push(b ^ mask[i & 3]);
+    }
+    stream
+        .write_all(&frame)
+        .map_err(|e| format!("ws write failed: {e}"))
+}
+
+fn ws_read_one_frame(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
+    let mut hdr = [0u8; 2];
+    stream
+        .read_exact(&mut hdr)
+        .map_err(|e| format!("ws hdr: {e}"))?;
+    let opcode = hdr[0] & 0x0F;
+    let masked = (hdr[1] & 0x80) != 0;
+    let mut len = (hdr[1] & 0x7F) as usize;
+    if len == 126 {
+        let mut b = [0u8; 2];
+        stream
+            .read_exact(&mut b)
+            .map_err(|e| format!("ws len16: {e}"))?;
+        len = u16::from_be_bytes(b) as usize;
+    } else if len == 127 {
+        let mut b = [0u8; 8];
+        stream
+            .read_exact(&mut b)
+            .map_err(|e| format!("ws len64: {e}"))?;
+        len = (u64::from_be_bytes(b) as usize).min(2 * 1024 * 1024);
+    }
+    let mut mask = [0u8; 4];
+    if masked {
+        stream
+            .read_exact(&mut mask)
+            .map_err(|e| format!("ws mask: {e}"))?;
+    }
+    let mut data = vec![0u8; len];
+    if len > 0 {
+        stream
+            .read_exact(&mut data)
+            .map_err(|e| format!("ws body: {e}"))?;
+    }
+    if masked {
+        for (i, b) in data.iter_mut().enumerate() {
+            *b ^= mask[i & 3];
+        }
+    }
+    Ok((opcode, data))
+}
+
+/// Deadline-bounded non-CDP RFC 6455 WebSocket (`ws://`) send/recv diagnostic client (zero hangs).
+pub fn run_ws_cli(
+    url: &str,
+    send_msgs: &[String],
+    headers: &[String],
+    wait_ms: u64,
+    as_json: bool,
+) -> i32 {
+    let t0 = Instant::now();
+    let Some(rest) = url.strip_prefix("ws://") else {
+        eprintln!("[probe ws] Only plaintext `ws://host:port/path` is supported natively (pass `ws://...`)");
+        return 2;
+    };
+    let (host_port, req_path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let connect_target = if host_port.contains(':') {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:80")
+    };
+    let Ok(mut addrs) = connect_target.to_socket_addrs() else {
+        eprintln!("[probe ws] Failed to resolve `{connect_target}`");
+        return 2;
+    };
+    let Some(sa) = addrs.next() else {
+        eprintln!("[probe ws] No address resolved for `{connect_target}`");
+        return 2;
+    };
+    let mut stream = match TcpStream::connect_timeout(&sa, Duration::from_secs(4)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[probe ws] Connect failed (`{url}`): {e}");
+            return 1;
+        }
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+
+    let mut req = format!(
+        "GET {req_path} HTTP/1.1\r\nHost: {host_port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+    );
+    for h in headers {
+        req.push_str(h.trim());
+        req.push_str("\r\n");
+    }
+    req.push_str("\r\n");
+    if let Err(e) = stream.write_all(req.as_bytes()) {
+        eprintln!("[probe ws] Handshake write error: {e}");
+        return 1;
+    }
+
+    let mut hbuf = Vec::new();
+    let mut b1 = [0u8; 1];
+    while hbuf.len() < 8192 {
+        match stream.read(&mut b1) {
+            Ok(1) => {
+                hbuf.push(b1[0]);
+                if hbuf.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let htxt = String::from_utf8_lossy(&hbuf).to_string();
+    let status_line = htxt.lines().next().unwrap_or("").trim().to_string();
+    if !status_line.contains("101") {
+        eprintln!("[probe ws] Handshake rejected: `{status_line}`");
+        return 1;
+    }
+
+    for msg in send_msgs {
+        if let Err(e) = ws_write_text_frame(&mut stream, msg) {
+            eprintln!("[probe ws] {e}");
+            return 1;
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(wait_ms.clamp(100, 12_000));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(60)));
+    let mut messages: Vec<String> = Vec::new();
+    while Instant::now() < deadline && messages.len() < 40 {
+        let mut peek_b = [0u8; 1];
+        match stream.peek(&mut peek_b) {
+            Ok(0) => break,
+            Ok(_) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+                let fr = ws_read_one_frame(&mut stream);
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(60)));
+                match fr {
+                    Ok((8, _)) => break, // Close frame
+                    Ok((1 | 2, data)) => {
+                        messages.push(String::from_utf8_lossy(&data).chars().take(2000).collect());
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+
+    let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0).round();
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "url": url,
+                "handshake": status_line,
+                "elapsed_ms": elapsed_ms,
+                "received_count": messages.len(),
+                "messages": messages,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "[probe ws] CONNECTED `{url}` ({status_line} | {elapsed_ms}ms | {} msg(s)):",
+            messages.len()
+        );
+        for (i, m) in messages.iter().enumerate() {
+            println!("  {}. {m}", i + 1);
+        }
+    }
+    0
+}
+
+/// Cross-platform TLS protocol & X.509 certificate inspector (uses native .NET SslStream on Windows / openssl on Unix).
+pub fn run_tls_cli(addr_str: &str, sni: Option<&str>, timeout_sec: u64, as_json: bool) -> i32 {
+    let t0 = Instant::now();
+    let (host, port) = match addr_str.rsplit_once(':') {
+        Some((h, p)) => (h.trim(), p.trim().parse::<u16>().unwrap_or(443)),
+        None => (addr_str.trim(), 443),
+    };
+    let server_name = sni.filter(|s| !s.trim().is_empty()).unwrap_or(host);
+    let _tmo = timeout_sec.clamp(1, 30);
+
+    #[cfg(windows)]
+    let info_res: Result<serde_json::Value, String> = {
+        let h_esc = host.replace('\'', "''");
+        let sni_esc = server_name.replace('\'', "''");
+        let ms = _tmo * 1000;
+        let ps_code = format!(
+            "$ErrorActionPreference='Stop'; $c=New-Object System.Net.Sockets.TcpClient; $ar=$c.BeginConnect('{h_esc}',{port},$null,$null); if(-not $ar.AsyncWaitHandle.WaitOne({ms},$false)){{ throw 'TCP connect timeout' }}; $c.EndConnect($ar); $s=New-Object System.Net.Security.SslStream($c.GetStream(),$false,({{param($a,$b,$ce,$e)$true}})); $s.ReadTimeout={ms}; $s.AuthenticateAsClient('{sni_esc}'); $cert=New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($s.RemoteCertificate); $sha=[BitConverter]::ToString($cert.GetCertHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)).Replace('-','').ToLower(); $out=[ordered]@{{protocol=$s.SslProtocol.ToString();subject=$cert.Subject;issuer=$cert.Issuer;not_before=$cert.NotBefore.ToUniversalTime().ToString('o');not_after=$cert.NotAfter.ToUniversalTime().ToString('o');sha256=$sha;expired=($cert.NotAfter.ToUniversalTime() -lt [DateTime]::UtcNow)}}; $s.Close(); $c.Close(); $out | ConvertTo-Json -Compress"
+        );
+        let out = ["pwsh.exe", "powershell.exe"].into_iter().find_map(|bin| {
+            Command::new(bin)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &ps_code,
+                ])
+                .output()
+                .ok()
+        });
+        match out {
+            Some(o) if o.status.success() => {
+                serde_json::from_slice(&o.stdout).map_err(|e| format!("TLS JSON parse: {e}"))
+            }
+            Some(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            None => Err("PowerShell unavailable".to_string()),
+        }
+    };
+
+    #[cfg(not(windows))]
+    let info_res: Result<serde_json::Value, String> = {
+        let sh_cmd = format!(
+            "echo | openssl s_client -servername '{}' -connect '{}:{}' 2>/dev/null | openssl x509 -noout -subject -issuer -dates -fingerprint -sha256",
+            server_name.replace('\'', ""),
+            host.replace('\'', ""),
+            port
+        );
+        match Command::new("sh").args(["-c", &sh_cmd]).output() {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                let txt = String::from_utf8_lossy(&o.stdout);
+                let mut subject = String::new();
+                let mut issuer = String::new();
+                let mut not_before = String::new();
+                let mut not_after = String::new();
+                let mut sha256 = String::new();
+                for ln in txt.lines() {
+                    if let Some(v) = ln.strip_prefix("subject=") {
+                        subject = v.trim().to_string();
+                    } else if let Some(v) = ln.strip_prefix("issuer=") {
+                        issuer = v.trim().to_string();
+                    } else if let Some(v) = ln.strip_prefix("notBefore=") {
+                        not_before = v.trim().to_string();
+                    } else if let Some(v) = ln.strip_prefix("notAfter=") {
+                        not_after = v.trim().to_string();
+                    } else if let Some((_, v)) = ln.split_once("Fingerprint=") {
+                        sha256 = v.trim().replace(':', "").to_ascii_lowercase();
+                    }
+                }
+                Ok(json!({
+                    "protocol": "TLS",
+                    "subject": subject,
+                    "issuer": issuer,
+                    "not_before": not_before,
+                    "not_after": not_after,
+                    "sha256": sha256,
+                }))
+            }
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Err(e) => Err(format!("openssl spawn error: {e}")),
+        }
+    };
+
+    let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0).round();
+    match info_res {
+        Ok(val) => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": true,
+                        "target": format!("{host}:{port}"),
+                        "sni": server_name,
+                        "elapsed_ms": elapsed_ms,
+                        "tls": val,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("[probe tls] OK `{host}:{port}` (sni={server_name} | {elapsed_ms}ms):");
+                if let Some(obj) = val.as_object() {
+                    for (k, v) in obj {
+                        println!("  - {k}: {}", v.to_string().trim_matches('"'));
+                    }
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("[probe tls] FAIL `{host}:{port}` ({elapsed_ms}ms): {e}");
+            1
+        }
+    }
+}

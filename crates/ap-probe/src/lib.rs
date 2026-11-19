@@ -292,6 +292,28 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Deadline-bounded RFC 6455 generic WebSocket (`ws://`) send/recv diagnostic client (zero hangs)
+    Ws {
+        url: String,
+        #[arg(long = "send")]
+        send: Vec<String>,
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        #[arg(long, default_value_t = 1000)]
+        wait_ms: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cross-platform TLS protocol & X.509 certificate Subject/Issuer/Expiry/SHA-256 inspector
+    Tls {
+        addr: String,
+        #[arg(long)]
+        sni: Option<String>,
+        #[arg(long, default_value_t = 6)]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -573,5 +595,18 @@ pub fn run_cli(args: &[String]) -> i32 {
             run.as_deref(),
             json,
         ),
+        SubCmd::Ws {
+            url,
+            send,
+            headers,
+            wait_ms,
+            json,
+        } => net_probe::run_ws_cli(&url, &send, &headers, wait_ms, json),
+        SubCmd::Tls {
+            addr,
+            sni,
+            timeout,
+            json,
+        } => net_probe::run_tls_cli(&addr, sni.as_deref(), timeout, json),
     }
 }

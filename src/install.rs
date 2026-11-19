@@ -750,6 +750,161 @@ fn remove_mcp_servers_json(cfg_path: &Path) {
     }
 }
 
+fn merge_pi_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
+    let mut data: Value = if cfg_path.exists() {
+        fs::read_to_string(cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    if !data.is_object() {
+        data = json!({});
+    }
+    let servers = data
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}));
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+    servers.as_object_mut().unwrap().insert(
+        "agent-primitives".to_string(),
+        json!({
+            "command": ap_bin_posix,
+            "args": ["mcp"],
+            "exposure": "codemode",
+            "description": "Fast Pure-Rust batch read/search, PE/ELF/asar/SourceMap/SQLite/Office parsing, live CDP watch, batch HTTP/TCP/WS/TLS/listen, process tree, atomic FS diff & multi-agent claims/dedup"
+        }),
+    );
+    if let Some(p) = cfg_path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let _ = fs::write(
+        cfg_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        ),
+    );
+    posix(cfg_path)
+}
+
+pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
+    let escaped = ap_bin_posix.replace('\\', "/").replace('"', "\\\"");
+    format!(
+        r#"// Managed by agent-primitives (`ap init`). Zero system-prompt token overhead.
+// Safely accelerates slow bash patterns and sieves >28KB noisy direct-to-LLM outputs
+// while leaving destructive commands, write/edit tools, and codemode child calls untouched.
+import {{ spawnSync }} from "node:child_process";
+import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
+
+const AP_BIN = "{escaped}";
+const DESTRUCTIVE_OR_WRITE =
+	/\b(?:Remove-Item|rm|del|erase|rmdir|rd|Move-Item|Rename-Item|mv|ren|Set-Content|Add-Content|Clear-Content|Out-File|Copy-Item|cpi|copy)\b|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|\.rmdir\(|\bgit(?:\.exe)?\b[\s\S]{{0,80}}?\bclean\b/i;
+const BARE_SLOW_GREP =
+	/^\s*grep\s+-[rR][nwiEH]*\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$/;
+const PY_INVOKE = /(?:^|[;&|]\s*)(?:python3?|py)\b/i;
+const HAS_UTF8_ENV = /PYTHONUTF8|PYTHONIOENCODING/i;
+const PY_WIN_BS = /\b(?:python3?|py)\s+-c\s+.*['"][A-Za-z]:\\/;
+const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
+
+function healCommand(raw: string, toolName: string): string | undefined {{
+	if (!raw || DESTRUCTIVE_OR_WRITE.test(raw)) return undefined;
+	let cmd = raw;
+	let changed = false;
+
+	// 1. Bare recursive GNU `grep -rn <pat> [path]` -> `<50ms` `ap search`
+	if (!/[|;&>]/.test(cmd)) {{
+		const gm = cmd.match(BARE_SLOW_GREP);
+		if (gm) {{
+			const pat = (gm[1] || gm[2] || gm[3] || "").replace(/"/g, '\\"');
+			const target = gm[4] || gm[5] || gm[6] || ".";
+			const prefix = toolName === "powershell" ? "& " : "";
+			return `${{prefix}}"${{AP_BIN}}" search "${{pat}}" "${{target}}"`;
+		}}
+	}}
+
+	// 2. Prevent accidental literal `NUL` file creation in Git Bash
+	if (toolName === "bash" && REDIR_NUL.test(cmd)) {{
+		cmd = cmd.replace(REDIR_NUL, "$1 /dev/null");
+		changed = true;
+	}}
+
+	// 3. Auto-fix unescaped Windows drive backslashes inside `python -c` string literals
+	if (PY_WIN_BS.test(cmd)) {{
+		cmd = cmd.replace(/([A-Za-z]:)(\\[^\s'"]+)/g, (_m, drv: string, rest: string) => drv + rest.replace(/\\/g, "/"));
+		changed = true;
+	}}
+
+	// 4. Auto-lock UTF-8 for Python invocations in bash to eliminate GBK codec crashes
+	if (toolName === "bash" && PY_INVOKE.test(cmd) && !HAS_UTF8_ENV.test(cmd)) {{
+		cmd = `PYTHONUTF8=1 PYTHONIOENCODING=utf-8 ${{cmd}}`;
+		changed = true;
+	}}
+
+	return changed ? cmd : undefined;
+}}
+
+export default function (pi: ExtensionAPI) {{
+	pi.on("tool_call", (event) => {{
+		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
+		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
+		const healed = healCommand(cmd, event.toolName);
+		if (healed && healed !== cmd) {{
+			event.input.command = healed;
+		}}
+		return undefined;
+	}});
+
+	pi.on("tool_result", (event) => {{
+		// Leave codemode child calls (`parentToolCallId`) untouched so JS scripts keep raw structuredContent!
+		if (event.parentToolCallId) return undefined;
+		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
+		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
+		if (cmd.includes("ap.exe") || /\bap\s+(?:read|search|query|atlas|probe|guard|sieve|baton)\b/.test(cmd)) {{
+			return undefined;
+		}}
+		if (!Array.isArray(event.content) || event.content.length === 0) return undefined;
+		const textBlock = event.content.find((c: {{ type?: string; text?: string }}) => c?.type === "text" && typeof c.text === "string");
+		if (!textBlock || typeof textBlock.text !== "string") return undefined;
+		const rawText = textBlock.text;
+		const hasGiantLine = rawText.split("\n").some((l: string) => l.length > 4500);
+		if (rawText.length < 28000 && !hasGiantLine) return undefined;
+
+		const res = spawnSync(AP_BIN, ["sieve", "--stdin", "--label", "pi-bash"], {{
+			input: rawText,
+			encoding: "utf8",
+			timeout: 4000,
+			windowsHide: true,
+		}});
+		if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < rawText.length * 0.8) {{
+			return {{
+				content: event.content.map((c: {{ type?: string; text?: string }}) =>
+					c === textBlock ? {{ ...c, text: res.stdout }} : c,
+				),
+			}};
+		}}
+		return undefined;
+	}});
+}}
+"#
+    )
+}
+
+fn install_pi_accelerator_extension(ext_dir: &Path, ap_bin_posix: &str) -> String {
+    let _ = fs::create_dir_all(ext_dir);
+    let dst = ext_dir.join("zz-ap-accelerator.ts");
+    let _ = fs::write(&dst, render_pi_accelerator_ts(ap_bin_posix));
+    posix(&dst)
+}
+
+fn remove_pi_accelerator_extension(ext_dir: &Path) {
+    let _ = fs::remove_file(ext_dir.join("zz-ap-accelerator.ts"));
+}
+
 fn merge_vscode_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
     let mut data: Value = if cfg_path.exists() {
         fs::read_to_string(cfg_path)
@@ -996,6 +1151,21 @@ pub fn cmd_init(
                 &ap_abs_here,
             ));
         }
+        if with_mcp
+            || (explicit_agents && harnesses.contains(&"pi"))
+            || repo_dir.join(".pi").is_dir()
+        {
+            mcp_paths.push(merge_pi_mcp(
+                &repo_dir.join(".pi").join("mcp.json"),
+                &ap_abs_here,
+            ));
+            if with_hooks {
+                hook_paths.push(install_pi_accelerator_extension(
+                    &repo_dir.join(".pi").join("extensions"),
+                    &ap_abs_here,
+                ));
+            }
+        }
         if with_mcp {
             mcp_paths.push(merge_mcp_servers_json(
                 &repo_dir.join(".mcp.json"),
@@ -1134,10 +1304,22 @@ pub fn cmd_init(
                 hook_paths.push(hp);
             }
         }
+        if harnesses.contains(&"pi") {
+            hook_paths.push(install_pi_accelerator_extension(
+                &home.join(".pi").join("agent").join("extensions"),
+                &global_bin_posix,
+            ));
+        }
     }
 
-    // Zero-flag automatic MCP registration for free/open coding agents (OpenCode, Qwen Code, Gemini CLI)
+    // Zero-flag automatic MCP registration for free/open coding agents (OpenCode, Qwen Code, Gemini CLI, Pi codemode)
     let mut mcp_paths = Vec::new();
+    if harnesses.contains(&"pi") {
+        mcp_paths.push(merge_pi_mcp(
+            &home.join(".pi").join("agent").join("mcp.json"),
+            &global_bin_posix,
+        ));
+    }
     if harnesses.contains(&"opencode") {
         mcp_paths.push(merge_opencode_mcp(
             &home.join(".config").join("opencode").join("opencode.json"),
@@ -1278,6 +1460,8 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
         remove_vscode_mcp(&repo_dir.join(".vscode").join("mcp.json"));
         remove_mcp_servers_json(&repo_dir.join(".qwen").join("settings.json"));
         remove_mcp_servers_json(&repo_dir.join(".gemini").join("settings.json"));
+        remove_mcp_servers_json(&repo_dir.join(".pi").join("mcp.json"));
+        remove_pi_accelerator_extension(&repo_dir.join(".pi").join("extensions"));
 
         for dot in [
             ".agents", ".pi", ".claude", ".codex", ".grok", ".qwen", ".gemini", ".cursor",
@@ -1343,6 +1527,8 @@ pub fn cmd_uninstall(here: bool, dir_opt: Option<&str>, home_opt: Option<&str>) 
     remove_opencode_mcp(&home.join(".config").join("opencode").join("opencode.json"));
     remove_mcp_servers_json(&home.join(".qwen").join("settings.json"));
     remove_mcp_servers_json(&home.join(".gemini").join("settings.json"));
+    remove_mcp_servers_json(&home.join(".pi").join("agent").join("mcp.json"));
+    remove_pi_accelerator_extension(&home.join(".pi").join("agent").join("extensions"));
     remove_mcp_servers_json(&home.join(".cursor").join("mcp.json"));
     remove_mcp_servers_json(
         &home
