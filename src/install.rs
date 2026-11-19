@@ -880,7 +880,6 @@ const MASK_TIER2_KEEP_RECENT = 10;
 const MASK_TIER2_MIN_RECLAIMED = 10000;
 const MASK_STALE_CHARS_FALLBACK = 120000;
 const FREE_MASK_MIN_TOKENS = 80000;
-const FREE_MASK_STALE_CHARS = 40000;
 const MASK_KEEP_RECENT_ENTRIES = 12;
 const MASK_MIN_ENTRY_CHARS = 4500;
 const MASK_MIN_BATCH_ENTRIES = 2;
@@ -1879,12 +1878,69 @@ export function normCmdFingerprint(raw: string): string {{
 		.slice(0, 180);
 }}
 
+export function formatPostEditLineShiftTip(
+	input: Record<string, unknown> | undefined,
+	details?: {{ firstChangedLine?: number }} | undefined,
+): string | undefined {{
+	if (!input || typeof input !== "object") return undefined;
+	const items: Array<{{ oldText?: string; newText?: string }}> = Array.isArray(input.edits)
+		? (input.edits as Array<{{ oldText?: string; newText?: string }}>)
+		: typeof input.oldText === "string" && typeof input.newText === "string"
+			? [{{ oldText: input.oldText, newText: input.newText }}]
+			: [];
+	if (items.length === 0) return undefined;
+	let delta = 0;
+	for (const it of items) {{
+		if (typeof it?.oldText !== "string" || typeof it?.newText !== "string") continue;
+		const oldLines = it.oldText.replace(/\r\n/g, "\n").split("\n").length;
+		const newLines = it.newText.replace(/\r\n/g, "\n").split("\n").length;
+		delta += newLines - oldLines;
+	}}
+	if (delta === 0) return undefined;
+	const sign = delta > 0 ? `+${{delta}}` : `${{delta}}`;
+	const anchor =
+		typeof details?.firstChangedLine === "number" && details.firstChangedLine > 0
+			? ` below L${{details.firstChangedLine}}`
+			: "";
+	return `[ap edit-lines] Net line shift: ${{sign}} line(s)${{anchor}} (subsequent line numbers shifted by ${{sign}}).`;
+}}
+
+function rewriteSlowRecursiveGrep(cmd: string, toolName: string): string | undefined {{
+	// Match optional leading `cd <dir> && `, recursive `grep -r... [--include="*.ext"] <pat> [path]`,
+	// and optional safe read-only pipe suffix (`| head/tail/wc/sort/cut ...`).
+	if (/[;>]/.test(cmd)) return undefined;
+	const m = cmd.match(
+		/^(\s*cd\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*&&\s*)?\s*grep\s+-([rRnwiEHlc]+)(?:\s+--include=(?:'([^']+)'|"([^"]+)"|([^\s]+)))?\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?(\s*\|\s*(?:head|tail|wc|sort|cut)\b[^;&|>]*)?\s*$/,
+	);
+	if (!m || !/[rR]/.test(m[2])) return undefined;
+	const cdPrefix = m[1] || "";
+	const flags = m[2];
+	const incGlob = m[3] || m[4] || m[5] || "";
+	const pat = (m[6] || m[7] || m[8] || "").replace(/"/g, '\\"');
+	if (!pat) return undefined;
+	const target = m[9] || m[10] || m[11] || ".";
+	const pipeSuffix = m[12] || "";
+	let extFlag = "";
+	if (incGlob) {{
+		const em = incGlob.match(/^\*\.([A-Za-z0-9]+)$/);
+		if (!em) return undefined; // leave complex globs untouched
+		extFlag = ` -e ${{em[1]}}`;
+	}}
+	const prefix = toolName === "powershell" ? "& " : "";
+	const extra = flags.includes("l") ? " -l" : flags.includes("c") ? " -c" : "";
+	return `${{cdPrefix}}${{prefix}}"${{AP_BIN}}" search${{extra}}${{extFlag}} "${{pat}}" "${{target}}"${{pipeSuffix}}`;
+}}
+
 export function healCommand(raw: string, toolName: string): string | undefined {{
 	if (!raw || DESTRUCTIVE_OR_WRITE.test(raw)) return undefined;
 	let cmd = raw;
 	let changed = false;
 
-	// 1. Bare recursive GNU `grep -r[nwiEHlc] <pat> [path]` -> `<50ms` parallel `ap search`
+	// 1. Recursive GNU `grep -r[nwiEHlc] [--include=*.ext] <pat> [path]` (bare, `cd &&`, or `| head/tail/wc`) -> `<50ms` parallel `ap search`
+	const fastGrep = rewriteSlowRecursiveGrep(cmd, toolName);
+	if (fastGrep) {{
+		return fastGrep;
+	}}
 	if (!/[|;&>]/.test(cmd)) {{
 		const gm = cmd.match(BARE_SLOW_GREP);
 		if (gm && /[rR]/.test(gm[1])) {{
@@ -2616,7 +2672,23 @@ export default function (pi: ExtensionAPI) {{
 					String(m.id ?? "").toLowerCase().includes("flash-auto")),
 		);
 		if (isDs && Array.isArray(event?.systemPromptOptions?.promptGuidelines)) {{
-			injectDeepSeekGuidelines(event.systemPromptOptions.promptGuidelines);
+			const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+			const hasPriorAssistant =
+				Array.isArray(branch) &&
+				branch.some(
+					(e: {{ type?: string; message?: {{ role?: string }} }}) =>
+						e?.type === "message" && e.message?.role === "assistant",
+				);
+			const compatMid =
+				(m as {{ compat?: {{ supportsMidConvoSystemMessages?: boolean }} }})?.compat
+					?.supportsMidConvoSystemMessages === true;
+			const alreadyHasApRule = event.systemPromptOptions.promptGuidelines.some(
+				(g: string) => typeof g === "string" && g.includes("In codemode (QuickJS sandbox"),
+			);
+			// Inject on Turn 0 directly into messages[0]; on resumed sessions never emit redundant `rules` diffs!
+			if (!hasPriorAssistant || (compatMid && !alreadyHasApRule)) {{
+				injectDeepSeekGuidelines(event.systemPromptOptions.promptGuidelines);
+			}}
 		}}
 		return undefined;
 	}});
@@ -3150,7 +3222,7 @@ export default function (pi: ExtensionAPI) {{
 			usage?: {{ input?: number; cacheRead?: number }};
 		}} | undefined;
 		let turnPrompt = 0;
-		let coldCacheWindow = false;
+		let justRebuiltColdCache = false;
 		if (msg?.role === "assistant" && Array.isArray(msg.content)) {{
 			// Live DeepSeek 50x KV-cache hit-rate telemetry & unexpected drop alarm
 			const uIn = typeof msg.usage?.input === "number" ? msg.usage.input : 0;
@@ -3166,7 +3238,7 @@ export default function (pi: ExtensionAPI) {{
 					lastCacheDropPct = null;
 				}}
 				if (turnPrompt >= FREE_MASK_MIN_TOKENS && turnHitPct < 55 && !expectedCacheReset) {{
-					coldCacheWindow = true;
+					justRebuiltColdCache = true;
 				}}
 				expectedCacheReset = false;
 			}}
@@ -3226,26 +3298,19 @@ export default function (pi: ExtensionAPI) {{
 		}}
 
 		// Native Pi v1.5 batch observation masking using monotonic sessionTurnCount
-		// (Pi resets event.turnIndex=0 on each agent_start) + free cold-cache opportunistic window
+		// (Pi resets event.turnIndex=0 on each agent_start). Protect a brand-new cache right after
+		// a cold turn paid full price to rebuild it (eliminates double-cold-prefill), unless >=240k Peak-IQ guard!
 		const contextEntries = event.context?.contextEntries;
 		const cooldownReady = sessionTurnCount - lastMaskTurn >= MASK_COOLDOWN_TURNS;
-		if (Array.isArray(contextEntries) && (cooldownReady || coldCacheWindow)) {{
-			const usage = ctx?.getContextUsage?.();
-			const effTokens = usage?.tokens ?? (turnPrompt > 0 ? turnPrompt : null);
-			const plan = planObservationMasking(
-				contextEntries,
-				coldCacheWindow && !cooldownReady
-					? {{
-							usagePercent: usage?.percent ?? null,
-							usageTokens: effTokens,
-							highWaterTokens: FREE_MASK_MIN_TOKENS,
-							staleCharsFallback: FREE_MASK_STALE_CHARS,
-						}}
-					: {{
-							usagePercent: usage?.percent ?? null,
-							usageTokens: effTokens,
-						}},
-			);
+		const usage = ctx?.getContextUsage?.();
+		const effTokens = usage?.tokens ?? (turnPrompt > 0 ? turnPrompt : null);
+		const protectFreshColdRebuild =
+			justRebuiltColdCache && (effTokens === null || effTokens < MASK_TIER2_TOKENS);
+		if (Array.isArray(contextEntries) && cooldownReady && !protectFreshColdRebuild) {{
+			const plan = planObservationMasking(contextEntries, {{
+				usagePercent: usage?.percent ?? null,
+				usageTokens: effTokens,
+			}});
 			if (plan.edits.length > 0) {{
 				lastMaskTurn = sessionTurnCount;
 				maskedCount += plan.maskedCount;
@@ -3675,6 +3740,17 @@ export default function (pi: ExtensionAPI) {{
 						textMutated = true;
 						mutated = true;
 					}}
+				}}
+			}}
+			if (event.toolName === "edit") {{
+				const shiftTip = formatPostEditLineShiftTip(
+					event.input as Record<string, unknown> | undefined,
+					event.details as {{ firstChangedLine?: number }} | undefined,
+				);
+				if (shiftTip) {{
+					outText += `\n${{shiftTip}}`;
+					textMutated = true;
+					mutated = true;
 				}}
 			}}
 		}}
@@ -4662,6 +4738,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         .and_then(|v| v.get("cacheWarming"))
         .and_then(Value::as_str)
         .unwrap_or("idle");
+    let provider_timeout_ms = settings_json
+        .as_ref()
+        .and_then(|v| v.pointer("/retry/provider/timeoutMs"))
+        .and_then(Value::as_u64);
 
     let mut hints: Vec<String> = Vec::new();
     if !accelerator_present || !accelerator_up_to_date {
@@ -4736,6 +4816,12 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 .to_string(),
         );
     }
+    if is_deepseek && provider_timeout_ms.is_some_and(|t| t > 300_000) {
+        recommendations.push(
+            "Remove `retry.provider.timeoutMs` (currently >5m) in ~/.pi/agent/settings.json — in Pi sdk.js it overrides `httpIdleTimeoutMs` and causes long zombie stream hangs."
+                .to_string(),
+        );
+    }
     if is_deepseek
         && models_json.is_some()
         && cache_warming_mode != "off"
@@ -4761,6 +4847,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "retry_max_retries": retry_max_retries,
         "retry_base_delay_ms": retry_base_delay_ms,
         "http_idle_timeout_ms": http_idle_timeout_ms,
+        "provider_timeout_ms": provider_timeout_ms,
         "cache_warming_mode": cache_warming_mode,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
         "deepseek_prompt_cache_ttl_s": deepseek_prompt_cache_ttl_s,

@@ -5758,3 +5758,91 @@ fn test_v223_sieve_error_storm_cap_codemode_err_sieve_and_hashline_overlap_merge
         assert!(accel_ts.contains(needle), "Missing v2.23 feature '{needle}'");
     }
 }
+
+#[test]
+fn test_v224_no_double_cold_mask_post_edit_line_shift_piped_grep_and_provider_timeout_doctor() {
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v224");
+    let ap_home = root.join("ap_home_v224");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function formatPostEditLineShiftTip",
+        "[ap edit-lines] Net line shift:",
+        "function rewriteSlowRecursiveGrep",
+        "const protectFreshColdRebuild =",
+        "const alreadyHasApRule =",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.24 feature '{needle}'");
+    }
+
+    // Verify ap doctor flags retry.provider.timeoutMs=3600000 shadowing httpIdleTimeoutMs, and clears when removed
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6, "baseDelayMs": 1000, "provider": { "timeoutMs": 3600000 } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let d1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(d1.status.success());
+    let v1: Value = serde_json::from_slice(&d1.stdout).unwrap();
+    assert_eq!(v1["pi_runtime"]["provider_timeout_ms"], 3600000);
+    assert!(v1["pi_runtime"]["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str().unwrap_or("").contains("retry.provider.timeoutMs")));
+
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6, "baseDelayMs": 1000, "provider": { "maxRetries": 0 } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let d2 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(d2.status.success());
+    let v2: Value = serde_json::from_slice(&d2.stdout).unwrap();
+    assert!(v2["pi_runtime"]["provider_timeout_ms"].is_null());
+    assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+}
