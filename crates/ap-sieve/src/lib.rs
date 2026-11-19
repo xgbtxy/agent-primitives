@@ -11,7 +11,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_MAX_STORE_BYTES: u64 = 50 * 1024 * 1024;
 pub const PASSTHROUGH_BYTES: usize = 1200;
@@ -147,6 +147,7 @@ pub fn store_dir(cwd: &Path) -> PathBuf {
 fn index_archive(store: &Path, item_id: &str, label: &str, raw_text: &str) {
     let db_path = store.join("index.sqlite");
     if let Ok(conn) = Connection::open(db_path) {
+        let _ = conn.busy_timeout(Duration::from_millis(2000));
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(id UNINDEXED, label, content);",
@@ -783,10 +784,35 @@ fn summarize_log(raw: &str) -> String {
             if !seen_sigs.insert(sig) {
                 continue;
             }
-            let snippet = (s..=e)
-                .map(|k| format!("L{}: {}", k + 1, trunc_chars(lines[k], 160)))
-                .collect::<Vec<_>>()
-                .join("\n    ");
+            const MAX_BLOCK_LINES: usize = 14;
+            let span_len = e.saturating_sub(s) + 1;
+            let snippet = if span_len <= MAX_BLOCK_LINES {
+                (s..=e)
+                    .map(|k| format!("L{}: {}", k + 1, trunc_chars(lines[k], 160)))
+                    .collect::<Vec<_>>()
+                    .join("\n    ")
+            } else {
+                let head_n = 10usize;
+                let tail_n = 3usize;
+                let omitted_mid = span_len.saturating_sub(head_n + tail_n);
+                let mut parts: Vec<String> = (s..s + head_n)
+                    .map(|k| format!("L{}: {}", k + 1, trunc_chars(lines[k], 160)))
+                    .collect();
+                parts.push(format!(
+                    "... ({omitted_mid} lines omitted in L{}-L{}; inspect via ap sieve peek)",
+                    s + head_n + 1,
+                    e + 1 - tail_n
+                ));
+                for (k, line) in lines
+                    .iter()
+                    .enumerate()
+                    .take(e + 1)
+                    .skip(e + 1 - tail_n)
+                {
+                    parts.push(format!("L{}: {}", k + 1, trunc_chars(line, 160)));
+                }
+                parts.join("\n    ")
+            };
             kept_blocks.push(format!("  [L{}-L{}]\n    {snippet}", s + 1, e + 1));
             if kept_blocks.len() >= 4 {
                 break;

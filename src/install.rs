@@ -996,7 +996,8 @@ export function extractAllToolResultText(
 
 /**
  * Losslessly auto-sieve oversized `codemode` multi-block body text (content[1..N]) while keeping
- * the `Script completed` header (content[0]) and any `image` / non-text blocks 100% intact.
+ * the `Script completed`/`Script failed` header (content[0]), any trailing `Script error:` diagnostic,
+ * and any `image` / non-text blocks 100% intact.
  */
 export function sieveCodemodeContentBlocks(
 	content: ReadonlyArray<{{ type?: string; text?: string; [k: string]: unknown }}>,
@@ -1023,14 +1024,28 @@ export function sieveCodemodeContentBlocks(
 	if (!combinedBody || combinedBody.includes("[sieve id=") || !shouldAutoSieveShellOutput(combinedBody)) {{
 		return undefined;
 	}}
-	const digested = sieveFn(combinedBody);
-	if (!digested || digested.length <= 40 || digested.length >= combinedBody.length * 0.78) {{
+	// Preserve any trailing `Script error:` block verbatim so error diagnostics + classifiers keep full fidelity
+	let sieveInput = combinedBody;
+	let errorTail = "";
+	const errIdx = combinedBody.lastIndexOf("\nScript error:\n");
+	if (errIdx > 0) {{
+		sieveInput = combinedBody.slice(0, errIdx);
+		errorTail = combinedBody.slice(errIdx + 1).slice(0, 2400);
+	}} else if (combinedBody.startsWith("Script error:\n")) {{
 		return undefined;
 	}}
+	if (!shouldAutoSieveShellOutput(sieveInput)) {{
+		return undefined;
+	}}
+	const digested = sieveFn(sieveInput);
+	if (!digested || digested.length <= 40 || digested.length >= sieveInput.length * 0.78) {{
+		return undefined;
+	}}
+	const finalText = errorTail ? `${{digested.trimEnd()}}\n\n${{errorTail}}` : digested;
 	const out: Array<{{ type?: string; text?: string; [k: string]: unknown }}> = [];
 	if (hasHeader) out.push(first);
 	out.push(...preservedNonText);
-	out.push({{ type: "text", text: digested }});
+	out.push({{ type: "text", text: finalText }});
 	return out;
 }}
 
@@ -1121,8 +1136,8 @@ export function injectDeepSeekGuidelines(guidelines: string[]): boolean {{
 
 /**
  * Calibrate Pi v1.5+ native `CacheWarmer` for DeepSeek V4.1 Flash economics ($0.006/1M cacheRead vs
- * $0.30/1M cold miss = 49x ROI). Overrides Pi's Opus-calibrated $0.05 floor when missCost >= $0.024
- * (~82k+ tokens) and ROI >= 20x so long tool runs & brief pauses stay at ~99% KV-cache hit rate.
+ * $0.30/1M cold miss = 49x ROI). Overrides Pi's Opus-calibrated $0.05 floor when missCost >= $0.015
+ * (~51k+ tokens) and ROI >= 20x so long tool runs & brief pauses stay at ~99% KV-cache hit rate.
  */
 export function decideDeepSeekCacheWarming(input: {{
 	provider?: string;
@@ -1137,7 +1152,7 @@ export function decideDeepSeekCacheWarming(input: {{
 	if (!isDs) return undefined;
 	const warm = typeof input.warmCost === "number" ? input.warmCost : 0;
 	const miss = typeof input.missCost === "number" ? input.missCost : 0;
-	if (warm > 0 && miss >= 0.024 && miss / warm >= 20) {{
+	if (warm > 0 && miss >= 0.015 && miss / warm >= 20) {{
 		return {{ action: "warm" }};
 	}}
 	return undefined;
@@ -1362,17 +1377,20 @@ function stripHashlinePrefixes(lines: readonly string[]): string[] {{
 	}});
 }}
 
-/**
- * Tier-0A Hashline anchor resolution: supports BOTH single-line AND multi-line `L:HH|...` anchors,
- * verifies exact 1-based line number + 2-hex FNV hash against disk (zero stale-edit risk), and
- * symmetrically auto-expands surrounding context lines when the target slice occurs multiple times!
- */
-function resolveHashlineAnchorEdit(
+interface ParsedHashlineRange {{
+	startIdx: number;
+	endIdx: number;
+	effectiveNew: string;
+	expandedLo: number;
+	expandedHi: number;
+}}
+
+function parseHashlineAnchorRange(
 	lfFile: string,
 	fileLines: readonly string[],
 	rawOldLines: readonly string[],
 	lfNew: string,
-): {{ oldText: string; newText: string; strategy: string }} | undefined {{
+): ParsedHashlineRange | undefined {{
 	const hlRe = /^\s*(\d+):([0-9a-f]{{2}})\|(.*)$/;
 	const parsed: Array<{{ lineNum: number; hash: string; body: string }} | null> = [];
 	let firstLineNum = -1;
@@ -1390,7 +1408,6 @@ function resolveHashlineAnchorEdit(
 		if (firstLineNum < 0) {{
 			firstLineNum = num;
 		}} else if (num !== lastLineNum + 1) {{
-			// Allow blank lines between sequential anchored lines only if exact index aligns
 			return undefined;
 		}}
 		const diskLine = fileLines[num - 1];
@@ -1405,35 +1422,140 @@ function resolveHashlineAnchorEdit(
 	const startIdx = firstLineNum - 1;
 	const endIdx = lastLineNum; // exclusive
 	const matchedDisk = fileLines.slice(startIdx, endIdx);
-	const rawOldSlice = matchedDisk.join("\n");
 	const strippedOldBodies = parsed.filter((p): p is NonNullable<typeof p> => p !== null).map((p) => p.body);
 	const cleanNew = stripHashlinePrefixes(lfNew.split("\n")).join("\n");
 	const effectiveNew = reindentReplacement(cleanNew, strippedOldBodies, matchedDisk);
-
-	if (countSubstringOccurrences(lfFile, rawOldSlice) === 1) {{
-		return {{
-			oldText: rawOldSlice,
-			newText: effectiveNew,
-			strategy: "hashline-anchor-unique",
-		}};
-	}}
-	// Duplicate line(s) on disk! Symmetrically expand with adjacent disk lines around the verified anchor until 100% unique
-	for (let pad = 1; pad <= 8; pad++) {{
+	for (let pad = 0; pad <= 8; pad++) {{
 		const lo = Math.max(0, startIdx - pad);
 		const hi = Math.min(fileLines.length, endIdx + pad);
 		const candOld = fileLines.slice(lo, hi).join("\n");
 		if (countSubstringOccurrences(lfFile, candOld) === 1) {{
-			const prefix = fileLines.slice(lo, startIdx);
-			const suffix = fileLines.slice(endIdx, hi);
-			const candNew = [...prefix, effectiveNew, ...suffix].join("\n");
-			return {{
-				oldText: candOld,
-				newText: candNew,
-				strategy: "hashline-anchor-expanded",
-			}};
+			return {{ startIdx, endIdx, effectiveNew, expandedLo: lo, expandedHi: hi }};
 		}}
 	}}
 	return undefined;
+}}
+
+/**
+ * Tier-0A Hashline anchor resolution: supports BOTH single-line AND multi-line `L:HH|...` anchors,
+ * verifies exact 1-based line number + 2-hex FNV hash against disk (zero stale-edit risk), and
+ * symmetrically auto-expands surrounding context lines when the target slice occurs multiple times!
+ */
+function resolveHashlineAnchorEdit(
+	lfFile: string,
+	fileLines: readonly string[],
+	rawOldLines: readonly string[],
+	lfNew: string,
+): {{ oldText: string; newText: string; strategy: string }} | undefined {{
+	const r = parseHashlineAnchorRange(lfFile, fileLines, rawOldLines, lfNew);
+	if (!r) return undefined;
+	const candOld = fileLines.slice(r.expandedLo, r.expandedHi).join("\n");
+	const prefix = fileLines.slice(r.expandedLo, r.startIdx);
+	const suffix = fileLines.slice(r.endIdx, r.expandedHi);
+	const candNew = [...prefix, r.effectiveNew, ...suffix].join("\n");
+	const expanded = r.expandedLo < r.startIdx || r.expandedHi > r.endIdx;
+	return {{
+		oldText: candOld,
+		newText: candNew,
+		strategy: expanded ? "hashline-anchor-expanded" : "hashline-anchor-unique",
+	}};
+}}
+
+/**
+ * Resolve multi-hunk `edit.edits[]` arrays where 2+ disjoint Hashline-anchored hunks would overlap
+ * after symmetric context expansion (e.g. editing two adjacent duplicate lines in one `edit` call),
+ * automatically merging overlapping expanded clusters into single unique non-overlapping blocks.
+ */
+export function resolveAndMergeHashlineEdits(
+	fileContent: string,
+	edits: ReadonlyArray<{{ oldText?: string; newText?: string }}>,
+): {{ edits: Array<{{ oldText: string; newText: string }}>; healed: number }} | undefined {{
+	if (!fileContent || !Array.isArray(edits) || edits.length < 2) return undefined;
+	const lfFile = fileContent.replace(/\r\n/g, "\n");
+	const fileLines = lfFile.split("\n");
+	const parsed: Array<{{ origIdx: number; range: ParsedHashlineRange }}> = [];
+	const others: Array<{{ oldText: string; newText: string }}> = [];
+	for (let i = 0; i < edits.length; i++) {{
+		const it = edits[i];
+		if (typeof it?.oldText !== "string" || typeof it?.newText !== "string") return undefined;
+		const r = parseHashlineAnchorRange(
+			lfFile,
+			fileLines,
+			it.oldText.replace(/\r\n/g, "\n").split("\n"),
+			it.newText.replace(/\r\n/g, "\n"),
+		);
+		if (r) {{
+			parsed.push({{ origIdx: i, range: r }});
+		}} else {{
+			others.push({{ oldText: it.oldText, newText: it.newText }});
+		}}
+	}}
+	if (parsed.length < 2) return undefined;
+	parsed.sort((a, b) => a.range.startIdx - b.range.startIdx);
+	// Bail safely if raw Hashline target ranges themselves overlap (let Pi surface the genuine overlap error)
+	for (let i = 1; i < parsed.length; i++) {{
+		if (parsed[i - 1].range.endIdx > parsed[i].range.startIdx) return undefined;
+	}}
+	// Group items whose expanded unique windows overlap
+	const clusters: Array<Array<ParsedHashlineRange>> = [[parsed[0].range]];
+	let clusterHi = parsed[0].range.expandedHi;
+	let hasMergedCluster = false;
+	for (let i = 1; i < parsed.length; i++) {{
+		const cur = parsed[i].range;
+		if (cur.expandedLo < clusterHi) {{
+			clusters[clusters.length - 1].push(cur);
+			clusterHi = Math.max(clusterHi, cur.expandedHi);
+			hasMergedCluster = true;
+		}} else {{
+			clusters.push([cur]);
+			clusterHi = cur.expandedHi;
+		}}
+	}}
+	if (!hasMergedCluster) return undefined;
+
+	const outEdits: Array<{{ oldText: string; newText: string }}> = [];
+	for (const group of clusters) {{
+		const minStart = group[0].startIdx;
+		const maxEnd = group[group.length - 1].endIdx;
+		const midLines: string[] = [];
+		let cursor = minStart;
+		for (const g of group) {{
+			if (g.startIdx > cursor) {{
+				midLines.push(...fileLines.slice(cursor, g.startIdx));
+			}}
+			midLines.push(g.effectiveNew);
+			cursor = g.endIdx;
+		}}
+		const mergedBodyNew = midLines.join("\n");
+		let resolved: {{ oldText: string; newText: string }} | undefined;
+		for (let pad = 0; pad <= 8; pad++) {{
+			const lo = Math.max(0, minStart - pad);
+			const hi = Math.min(fileLines.length, maxEnd + pad);
+			const candOld = fileLines.slice(lo, hi).join("\n");
+			if (countSubstringOccurrences(lfFile, candOld) === 1) {{
+				const prefix = fileLines.slice(lo, minStart);
+				const suffix = fileLines.slice(maxEnd, hi);
+				resolved = {{
+					oldText: candOld,
+					newText: [...prefix, mergedBodyNew, ...suffix].join("\n"),
+				}};
+				break;
+			}}
+		}}
+		if (!resolved) return undefined;
+		outEdits.push(resolved);
+	}}
+	let healed = parsed.length;
+	for (const o of others) {{
+		const fixed = healEditBlock(fileContent, o.oldText, o.newText);
+		if (fixed) {{
+			outEdits.push({{ oldText: fixed.oldText, newText: fixed.newText }});
+			healed += 1;
+		}} else {{
+			outEdits.push(o);
+		}}
+	}}
+	return {{ edits: outEdits, healed }};
 }}
 
 function stripSequentialLineNumbers(lines: readonly string[]): string[] | undefined {{
@@ -3304,13 +3426,19 @@ export default function (pi: ExtensionAPI) {{
 							const content = readFileSync(absPath, "utf8");
 							if (content.length <= 2_000_000) {{
 								if (Array.isArray(inp.edits)) {{
-									for (const item of inp.edits) {{
-										if (typeof item?.oldText === "string" && typeof item?.newText === "string") {{
-											const fixed = healEditBlock(content, item.oldText, item.newText);
-											if (fixed) {{
-												item.oldText = fixed.oldText;
-												item.newText = fixed.newText;
-												healedEditsCount += 1;
+									const merged = resolveAndMergeHashlineEdits(content, inp.edits);
+									if (merged) {{
+										inp.edits = merged.edits;
+										healedEditsCount += merged.healed;
+									}} else {{
+										for (const item of inp.edits) {{
+											if (typeof item?.oldText === "string" && typeof item?.newText === "string") {{
+												const fixed = healEditBlock(content, item.oldText, item.newText);
+												if (fixed) {{
+													item.oldText = fixed.oldText;
+													item.newText = fixed.newText;
+													healedEditsCount += 1;
+												}}
 											}}
 										}}
 									}}
@@ -3381,8 +3509,8 @@ export default function (pi: ExtensionAPI) {{
 		}}>;
 		let mutated = false;
 
-		// 0. Lossless multi-block auto-sieve for oversized `codemode` dumps (content[1..N]; preserves header & images)
-		if (event.toolName === "codemode" && !event.isError) {{
+		// 0. Lossless multi-block auto-sieve for oversized `codemode` dumps (content[1..N]; preserves header, Script error & images)
+		if (event.toolName === "codemode") {{
 			const sieved = sieveCodemodeContentBlocks(workingContent, (rawBody) => {{
 				const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-codemode"], {{
 					input: rawBody,
@@ -4614,7 +4742,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         && deepseek_prompt_cache_ttl_s.is_none()
     {
         recommendations.push(
-            "Add `\"promptCache\": { \"short\": 120 }` under providers.deepseek.modelOverrides.deepseek-flash in ~/.pi/agent/models.json to activate Pi's native CacheWarmer (108s keep-warm ping, 49x ROI)."
+            "Add `\"promptCache\": { \"short\": 90 }` under providers.deepseek.modelOverrides.deepseek-flash in ~/.pi/agent/models.json to activate Pi's native CacheWarmer (80s keep-warm ping, beating 95-120s eviction at 49x ROI)."
                 .to_string(),
         );
     }

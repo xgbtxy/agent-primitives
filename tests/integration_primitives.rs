@@ -5673,3 +5673,88 @@ fn test_v222_hashline_read_anchor_expand_edit_and_noncode_outline() {
     let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
 }
+
+#[test]
+fn test_v223_sieve_error_storm_cap_codemode_err_sieve_and_hashline_overlap_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v223");
+    let ap_home = root.join("ap_home_v223");
+    let sieve_home = root.join("sieve_home_v223");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    // 1. Regression test for ap-sieve summarize_log merged giant error-window blowup bug (previously 41KB -> 46KB = 110%!)
+    let mut storm = String::new();
+    for i in 0..300 {
+        storm.push_str(&format!(
+            "L{i}: check error_handler_{i} status=failed code={i} detail={}\n",
+            "a".repeat(80)
+        ));
+    }
+    let sv = run_ap(
+        root,
+        &["sieve", "pipe", "--label", "pi-codemode", "--json"],
+        Some(&storm),
+        &[("SIEVE_HOME", &sieve_home), ("AP_HOME", &ap_home)],
+    );
+    assert!(sv.status.success());
+    let sv_j: Value = serde_json::from_slice(&sv.stdout).unwrap();
+    let raw_bytes = sv_j["raw_bytes"].as_u64().unwrap();
+    let digest_bytes = sv_j["digest_bytes"].as_u64().unwrap();
+    let rendered = sv_j["rendered"].as_str().unwrap();
+    assert!(
+        digest_bytes * 5 < raw_bytes,
+        "Expected >80% compression on 300-line all-error storm, got {digest_bytes}/{raw_bytes} bytes:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("lines omitted in L"),
+        "Expected capped block omission marker in digest:\n{rendered}"
+    );
+    // Verify archive remains 100% losslessly peekable
+    let sid = sv_j["id"].as_str().unwrap();
+    let peek = run_ap(
+        root,
+        &["sieve", "peek", sid, "--grep", "error_handler_177"],
+        None,
+        &[("SIEVE_HOME", &sieve_home), ("AP_HOME", &ap_home)],
+    );
+    assert!(
+        peek.status.success()
+            && String::from_utf8_lossy(&peek.stdout).contains("error_handler_177"),
+        "Expected lossless peek hit for mid-storm line"
+    );
+
+    // 2. Verify v2.23 Pi accelerator features: multi-hunk Hashline overlap auto-merger, isError codemode sieving & 51k CacheWarmer floor
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function resolveAndMergeHashlineEdits",
+        "const errIdx = combinedBody.lastIndexOf(\"\\nScript error:\\n\")",
+        "miss >= 0.015",
+        "if (event.toolName === \"codemode\") {",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.23 feature '{needle}'");
+    }
+}
