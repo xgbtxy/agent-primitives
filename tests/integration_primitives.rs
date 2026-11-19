@@ -5414,3 +5414,103 @@ fn test_v219_tool_prefix_sort_codemode_heal_edit_guard_multi_and_enoent_tip() {
     let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
 }
+
+#[test]
+fn test_v220_codemode_multiblock_sieve_typeerror_instant_syntax_and_timeout_cap() {
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v220");
+    let ap_home = root.join("ap_home_v220");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function extractAllToolResultText",
+        "export function sieveCodemodeContentBlocks",
+        "export function formatInstantSyntaxAlert",
+        "[ap syntax-alert]",
+        "tools.bash(...) resolves to an OBJECT",
+        "pi-codemode",
+        "currentTimeout > 120",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.20 feature '{needle}'");
+    }
+
+    // Verify ap doctor flags retry.baseDelayMs=2000 on DeepSeek and clears when lowered to 1000
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6, "baseDelayMs": 2000 },
+            "compaction": {
+                "modelOverrides": {
+                    "deepseek/deepseek-flash": { "reserveTokens": 720000, "keepRecentTokens": 64000 }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let d1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(d1.status.success());
+    let v1: Value = serde_json::from_slice(&d1.stdout).unwrap();
+    assert_eq!(v1["pi_runtime"]["retry_base_delay_ms"], 2000);
+    assert!(v1["pi_runtime"]["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str().unwrap_or("").contains("retry.baseDelayMs")));
+
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6, "baseDelayMs": 1000 },
+            "compaction": {
+                "modelOverrides": {
+                    "deepseek/deepseek-flash": { "reserveTokens": 720000, "keepRecentTokens": 64000 }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let d2 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(d2.status.success());
+    let v2: Value = serde_json::from_slice(&d2.stdout).unwrap();
+    assert_eq!(v2["pi_runtime"]["retry_base_delay_ms"], 1000);
+    assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+}

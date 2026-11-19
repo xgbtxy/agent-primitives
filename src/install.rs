@@ -901,13 +901,17 @@ const LONG_BUILD_TEST_RE =
 	/\b(?:cargo|rustc|npm|pnpm|yarn|bun|pytest|vitest|jest|go\s+test|make|cmake|gradle|mvn|docker|pip\s+install|uv\s+sync)\b/i;
 
 /**
- * Guard unbounded read-only shell probes with a 90s default timeout when omitted so a hung
+ * Guard unbounded OR overly long (>120s) read-only shell probes with a 90s timeout so a hung
  * search/HTTP call fails fast BEFORE crossing DeepSeek's 2-5m KV-cache eviction cliff.
+ * Never shortens <=120s explicit timeouts or touches build/test/write commands.
  */
 export function resolveSafeShellTimeout(cmd: string, currentTimeout: unknown): number | undefined {{
-	if (currentTimeout !== undefined && currentTimeout !== null) return undefined;
 	if (!cmd || LONG_BUILD_TEST_RE.test(cmd) || DESTRUCTIVE_OR_WRITE.test(cmd)) return undefined;
-	if (READONLY_PROBE_TIMEOUT_RE.test(cmd)) return 90;
+	if (!READONLY_PROBE_TIMEOUT_RE.test(cmd)) return undefined;
+	if (currentTimeout === undefined || currentTimeout === null) return 90;
+	if (typeof currentTimeout === "number" && Number.isFinite(currentTimeout) && currentTimeout > 120) {{
+		return 90;
+	}}
 	return undefined;
 }}
 
@@ -976,11 +980,103 @@ export function healCodemodeSource(code: string): string | undefined {{
 }}
 
 /**
+ * Aggregate all text blocks from a Pi `tool_result` content array (critical for multi-block
+ * `codemode` results where content[0] is the "Script completed/failed" header and content[1..N]
+ * hold the actual script output and "Script error: ..." diagnostics).
+ */
+export function extractAllToolResultText(
+	content: ReadonlyArray<{{ type?: string; text?: string }}>,
+): string {{
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((c) => c?.type === "text" && typeof c.text === "string")
+		.map((c) => c.text as string)
+		.join("\n");
+}}
+
+/**
+ * Losslessly auto-sieve oversized `codemode` multi-block body text (content[1..N]) while keeping
+ * the `Script completed` header (content[0]) and any `image` / non-text blocks 100% intact.
+ */
+export function sieveCodemodeContentBlocks(
+	content: ReadonlyArray<{{ type?: string; text?: string; [k: string]: unknown }}>,
+	sieveFn: (rawBody: string) => string | undefined,
+): Array<{{ type?: string; text?: string; [k: string]: unknown }}> | undefined {{
+	if (!Array.isArray(content) || content.length === 0) return undefined;
+	const first = content[0];
+	const hasHeader =
+		first?.type === "text" &&
+		typeof first.text === "string" &&
+		/^Script (?:completed|failed)\b/.test(first.text);
+	const startIdx = hasHeader ? 1 : 0;
+	const bodyTexts: string[] = [];
+	const preservedNonText: Array<{{ type?: string; text?: string; [k: string]: unknown }}> = [];
+	for (let i = startIdx; i < content.length; i++) {{
+		const blk = content[i];
+		if (blk?.type === "text" && typeof blk.text === "string") {{
+			bodyTexts.push(blk.text);
+		}} else {{
+			preservedNonText.push(blk);
+		}}
+	}}
+	const combinedBody = bodyTexts.join("\n");
+	if (!combinedBody || combinedBody.includes("[sieve id=") || !shouldAutoSieveShellOutput(combinedBody)) {{
+		return undefined;
+	}}
+	const digested = sieveFn(combinedBody);
+	if (!digested || digested.length <= 40 || digested.length >= combinedBody.length * 0.78) {{
+		return undefined;
+	}}
+	const out: Array<{{ type?: string; text?: string; [k: string]: unknown }}> = [];
+	if (hasHeader) out.push(first);
+	out.push(...preservedNonText);
+	out.push({{ type: "text", text: digested }});
+	return out;
+}}
+
+/**
+ * Format an instant (<12ms) post-edit Tree-sitter/JSON/TOML syntax alert from `ap splice check --json`.
+ * Returns `undefined` whenever syntax is clean (`ok !== false`) so zero bytes are added on valid edits.
+ */
+export function formatInstantSyntaxAlert(
+	rawPath: string,
+	checkStdout: string,
+	cwd?: string,
+): string | undefined {{
+	const trimmed = (checkStdout || "").trim();
+	if (!trimmed.startsWith("{{")) return undefined;
+	try {{
+		const parsed = JSON.parse(trimmed) as {{
+			ok?: boolean;
+			issues?: Array<string | {{ file?: string; line?: number; message?: string; detail?: string }}>;
+		}};
+		if (parsed.ok !== false || !Array.isArray(parsed.issues) || parsed.issues.length === 0) {{
+			return undefined;
+		}}
+		const lines = parsed.issues.slice(0, 3).map((iss) =>
+			typeof iss === "string"
+				? `- ${{iss.slice(0, 180)}}`
+				: `- ${{iss.file ?? normRelPath(rawPath, cwd)}}${{iss.line ? `:${{iss.line}}` : ""}} ${{(iss.message ?? iss.detail ?? "syntax error").slice(0, 180)}}`,
+		);
+		return `[ap syntax-alert] Immediate syntax error in ${{normRelPath(rawPath, cwd)}}:\n${{lines.join("\n")}}\nFix this syntax error now before moving to other files or tests.`;
+	}} catch {{
+		return undefined;
+	}}
+}}
+
+/**
  * Targeted QuickJS `codemode` failure recovery classifier (addresses live ReferenceError/TypeError/Timeout/Syntax/OOM errors).
  */
 export function classifyCodemodeFailureTip(outText: string): string {{
 	if (/\bReferenceError\b|is not defined/i.test(outText)) {{
 		return `[ap codemode-tip] QuickJS sandbox has NO Node APIs (fs/path/require/process/fetch/Buffer/setTimeout). Call tools via tools.<name>(args) (e.g. tools.read, tools.bash, tools.mcp__agent_primitives__ap_search) or inspect ALL_TOOLS.`;
+	}}
+	if (
+		/\bTypeError\b|(?:split|trim|match|replace|includes|slice|indexOf|toLowerCase|toUpperCase|startsWith|endsWith)\s+is not a function|cannot read propert|not iterable|unexpected token.*\[object Object\]/i.test(
+			outText,
+		)
+	) {{
+		return `[ap codemode-tip] TypeError: tools.bash(...) resolves to an OBJECT {{ output, exit_code, truncated, full_output_path }} (use res.output, NOT res.split/match!), tools.read(...) resolves to a string, and tools.mcp__* resolves to {{ content, structuredContent, isError }} (already parsed; do NOT JSON.parse). Run await describeTool("<name>") to verify exact fields.`;
 	}}
 	if (/\bSyntaxError\b|options line/i.test(outText)) {{
 		return `[ap codemode-tip] Pass raw JS body only (no markdown code fences); // @options: {{...}} must be line 1 if used.`;
@@ -3009,13 +3105,51 @@ export default function (pi: ExtensionAPI) {{
 		// Leave codemode child calls (`parentToolCallId`) untouched so JS scripts keep raw structuredContent!
 		if (event.parentToolCallId) return undefined;
 		if (!Array.isArray(event.content) || event.content.length === 0) return undefined;
-		const textBlock = event.content.find(
-			(c: {{ type?: string; text?: string }}) => c?.type === "text" && typeof c.text === "string",
-		);
-		if (!textBlock || typeof textBlock.text !== "string") return undefined;
 
-		let outText = textBlock.text;
+		let workingContent: Array<{{ type?: string; text?: string; [k: string]: unknown }}> = event.content as Array<{{
+			type?: string;
+			text?: string;
+			[k: string]: unknown;
+		}}>;
 		let mutated = false;
+
+		// 0. Lossless multi-block auto-sieve for oversized `codemode` dumps (content[1..N]; preserves header & images)
+		if (event.toolName === "codemode" && !event.isError) {{
+			const sieved = sieveCodemodeContentBlocks(workingContent, (rawBody) => {{
+				const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-codemode"], {{
+					input: rawBody,
+					encoding: "utf8",
+					timeout: 4000,
+					windowsHide: true,
+					env: {{ ...process.env, SIEVE_HOME }},
+				}});
+				return res.status === 0 && res.stdout ? res.stdout : undefined;
+			}});
+			if (sieved) {{
+				workingContent = sieved;
+				sievedCount += 1;
+				mutated = true;
+			}}
+		}}
+
+		let lastTextIdx = -1;
+		for (let i = workingContent.length - 1; i >= 0; i--) {{
+			if (workingContent[i]?.type === "text" && typeof workingContent[i].text === "string") {{
+				lastTextIdx = i;
+				break;
+			}}
+		}}
+		if (lastTextIdx < 0) {{
+			if (!mutated) return undefined;
+			updateHud(ctx);
+			return event.structuredContent !== undefined
+				? {{ content: workingContent, structuredContent: event.structuredContent }}
+				: {{ content: workingContent }};
+		}}
+
+		const fullText = extractAllToolResultText(workingContent);
+		let outText = workingContent[lastTextIdx].text as string;
+		let textMutated = false;
 
 		// A. Built-in `read` redundant re-read guard + truncated code file AST outline injection (<15ms)
 		if (event.toolName === "read" && !event.isError) {{
@@ -3095,21 +3229,51 @@ export default function (pi: ExtensionAPI) {{
 			mutated = true;
 		}}
 
-		// B1. Large full-file overwrite tip on `write` (rate-limited: once per 15 turns)
+		// B1. Instant <12ms post-edit Tree-sitter/JSON/TOML syntax alert (oh-my-pi / Claude Code PostToolUse pattern)
+		//     + large full-file overwrite tip on `write` (rate-limited: once per 15 turns)
+		if ((event.toolName === "edit" || event.toolName === "write") && !event.isError) {{
+			const rawEditPath = String(event.input?.path ?? event.input?.file_path ?? "").trim();
+			if (rawEditPath && CHECKABLE_CODE_EXT.test(rawEditPath)) {{
+				const cwd = ctx?.cwd || process.cwd();
+				const absEditPath = isAbsolute(rawEditPath) ? rawEditPath : resolve(cwd, rawEditPath);
+				if (existsSync(absEditPath)) {{
+					const chk = spawnSync(AP_BIN, ["splice", "check", "--json", absEditPath], {{
+						cwd,
+						encoding: "utf8",
+						timeout: 2000,
+						windowsHide: true,
+					}});
+					const alert = formatInstantSyntaxAlert(rawEditPath, chk.stdout || "", cwd);
+					if (alert) {{
+						outText += `\n${{alert}}`;
+						guardsTriggered += 1;
+						textMutated = true;
+						mutated = true;
+					}}
+				}}
+			}}
+		}}
 		if (event.toolName === "write" && !event.isError && typeof event.toolCallId === "string") {{
 			if (largeOverwriteCallIds.delete(event.toolCallId)) {{
 				if (sessionTurnCount - lastWriteTipTurn >= WRITE_TIP_COOLDOWN_TURNS) {{
 					lastWriteTipTurn = sessionTurnCount;
 					outText += `\n[ap write-tip] Full-file overwrite (>=4KB) on existing file. Prefer surgical \`edit\` (supports multi-hunk edits[]) or \`ap_edit\` to save output tokens & generation time.`;
+					textMutated = true;
 					mutated = true;
 				}}
 			}}
 		}}
 
-		// B2. Pi `codemode` targeted error self-healing classifier + one-time Promise.allSettled parallelism tip
+		// B2. Pi `codemode` targeted error self-healing classifier (inspects ALL multi-block text!) + parallelism tip
 		if (event.toolName === "codemode") {{
-			if (event.isError || outText.includes("Script failed") || outText.includes("is not a function")) {{
-				outText += `\n${{classifyCodemodeFailureTip(outText)}}`;
+			if (
+				event.isError ||
+				fullText.includes("Script failed") ||
+				fullText.includes("Script error:") ||
+				fullText.includes("is not a function")
+			) {{
+				outText += `\n${{classifyCodemodeFailureTip(fullText)}}`;
+				textMutated = true;
 				mutated = true;
 			}} else if (!codemodeParallelTipShown) {{
 				const code = typeof event.input?.code === "string" ? event.input.code : "";
@@ -3117,6 +3281,7 @@ export default function (pi: ExtensionAPI) {{
 				if (awaitCount >= 3 && !/Promise\.all(?:Settled)?\s*\(/.test(code)) {{
 					outText += `\n[ap codemode-parallel] Sequential awaits detected (${{awaitCount}}x); batch independent calls with Promise.allSettled([...]) inside codemode for 3-5x faster multi-step runs.`;
 					codemodeParallelTipShown = true;
+					textMutated = true;
 					mutated = true;
 				}}
 			}}
@@ -3192,9 +3357,10 @@ export default function (pi: ExtensionAPI) {{
 
 		if (!mutated) return undefined;
 		updateHud(ctx);
-		const patchedContent = event.content.map((c: {{ type?: string; text?: string }}) =>
-			c === textBlock ? {{ ...c, text: outText }} : c,
-		);
+		const patchedContent =
+			textMutated || outText !== workingContent[lastTextIdx].text
+				? workingContent.map((c, idx) => (idx === lastTextIdx ? {{ ...c, text: outText }} : c))
+				: workingContent;
 		return event.structuredContent !== undefined
 			? {{ content: patchedContent, structuredContent: event.structuredContent }}
 			: {{ content: patchedContent }};
@@ -3911,6 +4077,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("healCodemodeSource")
                 && s.contains("normalizeEditArgs")
                 && s.contains("findAllEditOccurrenceLines")
+                && s.contains("extractAllToolResultText")
+                && s.contains("sieveCodemodeContentBlocks")
+                && s.contains("formatInstantSyntaxAlert")
                 && s.contains("before_provider_request")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
@@ -4000,6 +4169,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
     let retry_max_retries = settings_json
         .as_ref()
         .and_then(|v| v.pointer("/retry/maxRetries"))
+        .and_then(Value::as_u64);
+    let retry_base_delay_ms = settings_json
+        .as_ref()
+        .and_then(|v| v.pointer("/retry/baseDelayMs"))
         .and_then(Value::as_u64);
     // Pi v1.5 default is 300_000ms (5 min); "disabled" => 0
     let http_idle_timeout_ms: u64 = settings_json
@@ -4098,6 +4271,12 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 .to_string(),
         );
     }
+    if is_deepseek && retry_base_delay_ms.is_some_and(|d| d > 1500) {
+        recommendations.push(
+            "Lower `retry.baseDelayMs` to 1000 in ~/.pi/agent/settings.json so transient socket/TLS retries finish inside DeepSeek's 2-minute 98.7% KV-cache hot zone."
+                .to_string(),
+        );
+    }
     if is_deepseek && (http_idle_timeout_ms == 0 || http_idle_timeout_ms > 150_000) {
         recommendations.push(
             "Set `\"httpIdleTimeoutMs\": 120000` in ~/.pi/agent/settings.json (default 300s lets stalled TCP streams cross DeepSeek's 2-5m KV-cache eviction cliff before retrying)."
@@ -4117,6 +4296,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "show_cache_miss_notices": show_cache_miss_notices,
         "flash_auto_enabled": flash_auto_enabled,
         "retry_max_retries": retry_max_retries,
+        "retry_base_delay_ms": retry_base_delay_ms,
         "http_idle_timeout_ms": http_idle_timeout_ms,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
         "hints": hints,
