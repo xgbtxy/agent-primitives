@@ -1,8 +1,9 @@
+use base64::Engine;
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ pub struct CdpSession {
     stream: TcpStream,
     next_id: u64,
     pub js_errors: Vec<String>,
+    pub network_errors: Vec<String>,
 }
 
 fn free_port() -> Result<u16, String> {
@@ -202,10 +204,12 @@ impl CdpSession {
             stream,
             next_id: 1,
             js_errors: Vec::new(),
+            network_errors: Vec::new(),
         };
         let _ = sess.call("Page.enable", json!({}));
         let _ = sess.call("Runtime.enable", json!({}));
         let _ = sess.call("Log.enable", json!({}));
+        let _ = sess.call("Network.enable", json!({}));
         Ok(sess)
     }
 
@@ -256,6 +260,32 @@ impl CdpSession {
                     self.js_errors
                         .push(format!("[console.error] {}", parts.join(" ")));
                 }
+            }
+        } else if ev == "Network.responseReceived" {
+            let status = params
+                .pointer("/response/status")
+                .and_then(Value::as_u64)
+                .unwrap_or(200);
+            let url = params
+                .pointer("/response/url")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if status >= 400 && !url.ends_with("/favicon.ico") && !url.starts_with("data:") {
+                self.network_errors
+                    .push(format!("[network {status}] {url}"));
+            }
+        } else if ev == "Network.loadingFailed" {
+            let err_txt = params
+                .get("errorText")
+                .and_then(Value::as_str)
+                .unwrap_or("load failed");
+            let canceled = params
+                .get("canceled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !canceled && !err_txt.contains("ERR_ABORTED") {
+                self.network_errors
+                    .push(format!("[network failed] {err_txt}"));
             }
         }
     }
@@ -410,5 +440,81 @@ impl CdpSession {
             )
         };
         self.eval_js(&script)
+    }
+
+    pub fn set_viewport(&mut self, width: u32, height: u32, mobile: bool) -> Result<(), String> {
+        let _ = self.call(
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": 1,
+                "mobile": mobile
+            }),
+        )?;
+        thread::sleep(Duration::from_millis(120));
+        Ok(())
+    }
+
+    pub fn capture_screenshot(&mut self, out_path: &Path) -> Result<usize, String> {
+        let res = self.call(
+            "Page.captureScreenshot",
+            json!({ "format": "png", "fromSurface": true }),
+        )?;
+        let b64 = res
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "CDP Page.captureScreenshot returned no data".to_string())?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("decode screenshot base64: {e}"))?;
+        if let Some(parent) = out_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(out_path, &bytes).map_err(|e| format!("write screenshot: {e}"))?;
+        Ok(bytes.len())
+    }
+
+    pub fn audit_layout(&mut self, width: u32, height: u32) -> Result<Value, String> {
+        self.set_viewport(width, height, width <= 500)?;
+        let js = r#"(() => {
+            const issues = [];
+            const vw = window.innerWidth, vh = window.innerHeight;
+            const sw = document.documentElement ? document.documentElement.scrollWidth : 0;
+            const textLen = (document.body ? document.body.innerText : '').trim().length;
+            if (textLen === 0) issues.push('Blank page: document.body.innerText is empty');
+            if (sw > vw + 4) issues.push(`Horizontal overflow at ${vw}x${vh}: scrollWidth=${sw} > innerWidth=${vw}`);
+            const brokenImgs = Array.from(document.querySelectorAll('img'))
+                .filter(img => img.complete && img.naturalWidth === 0)
+                .map(img => img.getAttribute('src') || '(no src)');
+            if (brokenImgs.length) issues.push(`Broken <img> (${brokenImgs.length}): ${brokenImgs.slice(0, 4).join(', ')}`);
+            const ctrls = Array.from(document.querySelectorAll('button, a[href], input:not([type="hidden"]), select, textarea'));
+            let visibleCtrls = 0;
+            for (const el of ctrls.slice(0, 80)) {
+                const st = window.getComputedStyle(el);
+                if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) === 0) continue;
+                const r = el.getBoundingClientRect();
+                const lbl = (el.id ? '#' + el.id : el.tagName.toLowerCase()) + (el.innerText ? ` "${el.innerText.trim().slice(0, 24)}"` : '');
+                if (r.width < 2 || r.height < 2) {
+                    issues.push(`Zero-size control ${lbl} (${Math.round(r.width)}x${Math.round(r.height)})`);
+                    continue;
+                }
+                visibleCtrls++;
+                if (r.right > vw + 4 || r.left < -4) {
+                    issues.push(`Offscreen/clipped control ${lbl} at ${vw}x${vh} (left=${Math.round(r.left)}, right=${Math.round(r.right)})`);
+                }
+                if (r.top >= 0 && r.bottom <= vh && r.left >= 0 && r.right <= vw) {
+                    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                    const hit = document.elementFromPoint(cx, cy);
+                    if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) {
+                        const blocker = hit.id ? '#' + hit.id : (hit.className ? hit.tagName.toLowerCase() + '.' + String(hit.className).trim().split(/\s+/)[0] : hit.tagName.toLowerCase());
+                        issues.push(`Overlapped/blocked control ${lbl} covered by <${blocker}> at (${Math.round(cx)},${Math.round(cy)})`);
+                    }
+                }
+            }
+            return JSON.stringify({ viewport: `${vw}x${vh}`, textLen, visibleCtrls, issues });
+        })()"#;
+        let raw = self.eval_js(js)?;
+        serde_json::from_str::<Value>(&raw).map_err(|e| format!("parse layout audit JSON: {e}"))
     }
 }

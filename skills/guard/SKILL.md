@@ -1,24 +1,23 @@
 ---
 name: guard
-description: Enforce sub-2ms `exit 2` anti-slop code rules (`rule`/`verify`), completion Stop-gates (`stop-gate`), 3x loop breakers (`run`), and secret/blast-radius shields (`shield`).
+description: Run 1-call fused 6-gate deep verification (`verify --deep`: OWASP `sec`, contracts, anti-slop, non-vacuous tests, API fuzz, UI & AST mutation), `rule`, `stop-gate`, and `shield`.
 ---
 
-# Guard — Sub-2ms Exit-2 Anti-Slop Rules, Verification Gate & Blast Shield
+# Guard — 6-in-1 Deep Verification Gate, OWASP Scanner & Anti-Slop Shield
 
-Prose rules in `AGENTS.md` get ignored; deterministic **`exit 2`** code gates cannot be bypassed. `guard` enforces anti-slop code hygiene (`0` `any`/`@ts-ignore`/empty `catch {}`), project tests, `.agents/smoke.ap` live smoke gates, 3x loop breaking, and secret shields.
+One command replaces manual multi-turn test/browser/security scripts with deterministic **`exit 2`** gates and a full verified proof receipt.
 
 ## Usage
 
 ```bash
-# 1. Run full anti-slop rules + auto-detected tests + .agents/smoke.ap (exit 2 on any violation)
-ap guard verify
+# 1. Recommended before delivery: 6-in-1 Deep Gate (OWASP Sec + Contracts + Anti-Slop + Non-Vacuous Tests + API Chaos Fuzz + Desktop/Mobile UI + AST Mutation)
+ap guard verify --cwd . --deep
 
-# 2. Turn any past agent mistake into a permanent deterministic rule in .agents/guard.json
-ap guard rule init
-ap guard rule add --id no-legacy-import --glob "src/*.ts" --forbid "old_csv_dump" --msg "Use RFC4180 src/csv.ts"
+# 2. Standalone <5ms OWASP Security Audit (SQLi, Path Traversal, Cmd Injection, DOM XSS, TLS/Debug)
+ap guard sec .
 
-# 3. Pre-execution shield, 3x loop breaker & Stop-hook gate
+# 3. Custom deterministic rules, pre-exec blast shield & 3x loop breaker
+ap guard rule add --id no-legacy --glob "src/*.ts" --forbid "old_dump" --msg "Use new exporter"
 ap guard shield --text "git push --force origin main"
 ap guard run --max-repeats 3 -- npm test
-ap guard stop-gate
 ```

@@ -4,17 +4,17 @@
     "atlas_map_tokens_est": 483,
     "orientation_reduction_pct": 98.9,
     "raw_corpus_tokens_est": 42338,
-    "scan_latency_ms": 18.3,
+    "scan_latency_ms": 22.8,
     "scanned_files": 64,
     "scanned_target": "sdk_corpus (64 Rust modules via Tree-sitter)"
   },
-  "engine": "agent-primitives v1.8.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
-  "generated_at": "2026-11-18T13:34:14Z",
+  "engine": "agent-primitives v1.9.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
+  "generated_at": "2026-11-19T00:04:45Z",
   "idle_frontmatter_tokens_per_folder": {
-    "atlas": 48,
+    "atlas": 49,
     "baton": 60,
-    "guard": 49,
-    "probe": 55,
+    "guard": 51,
+    "probe": 58,
     "recall": 58,
     "sieve": 59,
     "splice": 61
@@ -24,12 +24,12 @@
     "dead_code_pruned_pct": 62.5,
     "pruned_dead_files": 15,
     "reachable_files": 9,
-    "slice_latency_ms": 6.54,
+    "slice_latency_ms": 7.75,
     "total_code_files": 24
   },
   "recall_benchmark_200_rules": {
     "avg_injected_tokens_top2": 47.0,
-    "median_query_latency_ms": 3.31,
+    "median_query_latency_ms": 3.39,
     "monolithic_agents_md_tokens": 6880,
     "token_reduction_pct": 99.3,
     "top1_recall_accuracy": "20/20 (100%)",
@@ -37,7 +37,7 @@
   },
   "sieve_benchmarks": [
     {
-      "latency_ms": 28.1,
+      "latency_ms": 29.39,
       "out_bytes": 2072,
       "out_tokens_est": 518,
       "raw_bytes": 172075,
@@ -47,7 +47,7 @@
       "workload": "sieve: 2,500-line CI/pytest log (Coding Agent)"
     },
     {
-      "latency_ms": 15.97,
+      "latency_ms": 14.73,
       "out_bytes": 417,
       "out_tokens_est": 105,
       "raw_bytes": 107906,
@@ -57,8 +57,8 @@
       "workload": "sieve: 400-record JSON API dump (Personal/Coding Agent)"
     },
     {
-      "fts5_search_latency_ms": 5.85,
-      "latency_ms": 12.99,
+      "fts5_search_latency_ms": 6.41,
+      "latency_ms": 11.71,
       "out_bytes": 582,
       "out_tokens_est": 146,
       "raw_bytes": 19100,
@@ -68,7 +68,7 @@
       "workload": "sieve: 300-record JSONL stream + bundled FTS5 search"
     },
     {
-      "latency_ms": 14.15,
+      "latency_ms": 12.27,
       "out_bytes": 792,
       "out_tokens_est": 198,
       "raw_bytes": 48174,
@@ -78,7 +78,7 @@
       "workload": "sieve: Noisy HTML page w/ JS+CSS + <table> (Personal Agent)"
     },
     {
-      "latency_ms": 12.81,
+      "latency_ms": 11.81,
       "out_bytes": 118,
       "out_tokens_est": 30,
       "raw_bytes": 70,
@@ -89,13 +89,13 @@
     }
   ],
   "splice_surgeon_benchmark": {
-    "atomic_apply_latency_ms": 2.34,
+    "atomic_apply_latency_ms": 2.65,
     "crlf_preserved": true,
     "full_module_tokens_est": 1048,
-    "repo_ast_check_latency_ms": 5.26,
+    "repo_ast_check_latency_ms": 6.5,
     "symbol_read_reduction_pct": 95.4,
     "symbol_view_tokens_est": 48,
-    "view_latency_ms": 0.66,
+    "view_latency_ms": 0.86,
     "zero_escaping_atomic_apply_ok": true
   }
 }

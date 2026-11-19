@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
 pub mod impact;
+pub mod locate;
 pub mod product;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -169,6 +170,17 @@ enum SubCmd {
         symbol: String,
         #[arg(default_value = ".")]
         root: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hierarchical Agentless/AutoCodeRover fault localizer: ranks Top-K suspect functions + numbered source in <25ms
+    Locate {
+        /// Bug description, symptom keywords, or stack trace text
+        query: String,
+        #[arg(default_value = ".")]
+        root: String,
+        #[arg(short = 'k', long, default_value_t = 5)]
+        top_k: usize,
         #[arg(long)]
         json: bool,
     },
@@ -1402,6 +1414,25 @@ pub fn run_cli(args: &[String]) -> i32 {
                 println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
             } else {
                 println!("{}", impact::render_impact_md(&rep));
+            }
+            return 0;
+        }
+        Some(SubCmd::Locate {
+            query,
+            root,
+            top_k,
+            json,
+        }) => {
+            let root_p = PathBuf::from(&root);
+            if !root_p.exists() {
+                eprintln!("[atlas] path not found: {root}");
+                return 1;
+            }
+            let rep = locate::locate_faults(&root_p, &query, top_k);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+            } else {
+                print!("{}", locate::render_locate_md(&rep));
             }
             return 0;
         }

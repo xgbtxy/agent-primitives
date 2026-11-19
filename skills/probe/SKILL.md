@@ -1,30 +1,34 @@
 ---
 name: probe
-description: Prune dead files & bundle active code (`slice --bundle`), run Windows-safe headless browser/HTTP server smoke journeys (`smoke`), trace heap/mutation bugs (`run`), and run diff oracles (`diff`).
+description: Run headless Edge/Chrome UI layout+network audits (`ui`) & E2E smoke tests (`smoke`), API chaos/race fuzzing (`fuzz`), AST mutation testing (`mutate`), dead-file slicing (`slice`), and diff oracles (`diff`).
 ---
 
-# Probe — Reachability Bundler, Live Server/DOM Smoke Runner & Runtime Microscope
+# Probe — Headless UI Auditor, API Fuzzer, AST Mutator & E2E Smoke Runner
 
-Never read unreferenced slop modules, never burn 20+ interactive browser/curl turns verifying a local web server on Windows, and never guess heap aliasing or rounding behavior in prose.
+Zero Playwright/Node installs, zero orphan processes on Windows.
 
 ## Usage
 
 ```bash
-# 1. Prune dead distractor files AND emit numbered source of active reachable modules in 1 call
-ap probe slice . --bundle
+# 1. Desktop (1280x800) + Mobile (390x844) layout, overflow, button-overlap, JS & 4xx/5xx network audit
+ap probe ui --cwd . --start "node src/server.mjs"
 
-# 2. Windows-safe ephemeral server + headless Edge/Chrome DOM + UTF-8 HTTP E2E smoke test (1 turn, 0 orphan processes):
+# 2. Adversarial API chaos (bad JSON, nulls, negatives, SQLi) + parallel concurrency race fuzzer
+ap probe fuzz --cwd . --start "node src/server.mjs"
+
+# 3. Sub-2s Polyglot Tree-sitter AST mutation testing to prove tests actually catch real bugs
+ap probe mutate src/core.mjs --cwd . --max-mutants 8
+
+# 4. Interactive Headless Edge/Chrome DOM + HTTP E2E smoke test (supports OPEN, VIEWPORT, FILL, CLICK, EVAL, AUDIT_UI, SCREENSHOT)
 @'
-BROWSER /
-EXPECT CONTAINS 待处理
-GET /api/tickets?q=支付
+GET /api/health
 EXPECT STATUS 200
-POST /api/tickets/archive
-BODY {"confirm":true}
-EXPECT JSON stats.done == 0
-'@ | ap probe smoke --cwd . --stdin
-
-# 3. Runtime microscope & differential oracle across Python, TypeScript/JS, or Rust
-ap probe run --cwd . --code "import { Ledger } from './src/ledger.js'; new Ledger().snapshot();"
-ap probe diff --lang rust --fn-a "|x: i64| (x * 250 + 5000) / 10000" --fn-b "|x: i64| ((x as f64 / 100.0) * 2.5).round() as i64"
+OPEN /
+VIEWPORT 390 844
+AUDIT_UI
+FILL #name Alice
+CLICK #submit
+WAIT_MS 300
+EXPECT CONTAINS Alice
+'@ | ap probe smoke --cwd . --start "node src/server.mjs" --stdin
 ```

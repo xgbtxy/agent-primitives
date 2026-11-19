@@ -150,7 +150,7 @@ pub(crate) fn http_request(
     Ok((status, hdr_text, body_text))
 }
 
-fn find_headless_browser() -> Option<PathBuf> {
+pub(crate) fn find_headless_browser() -> Option<PathBuf> {
     let candidates = if cfg!(windows) {
         vec![
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -333,7 +333,10 @@ fn parse_smoke_spec(spec_text: &str) -> Vec<SmokeStepSpec> {
                 | "SELECT"
                 | "EVAL"
                 | "WAIT_MS"
-        ) && !rest.is_empty()
+                | "VIEWPORT"
+                | "SCREENSHOT"
+                | "AUDIT_UI"
+        ) && (!rest.is_empty() || kw == "AUDIT_UI")
         {
             steps.push(SmokeStepSpec {
                 method: kw,
@@ -611,6 +614,50 @@ pub fn run_smoke(
                     ensure_cdp(&mut cdp_opt)
                         .and_then(|cdp| cdp.dom_snapshot().map(|dom| (200, String::new(), dom)))
                 }
+                "VIEWPORT" => {
+                    let (w, h) = sp
+                        .path
+                        .split_once('x')
+                        .or_else(|| sp.path.split_once('X'))
+                        .and_then(|(a, b)| {
+                            Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?))
+                        })
+                        .unwrap_or((1280, 800));
+                    ensure_cdp(&mut cdp_opt).and_then(|cdp| {
+                        cdp.set_viewport(w, h, w <= 500)
+                            .map(|_| (200, String::new(), format!("viewport={w}x{h}")))
+                    })
+                }
+                "SCREENSHOT" => {
+                    let out_p = cwd.join(sp.path.trim());
+                    ensure_cdp(&mut cdp_opt).and_then(|cdp| {
+                        cdp.capture_screenshot(&out_p)
+                            .map(|n| (200, String::new(), format!("screenshot={n}B")))
+                    })
+                }
+                "AUDIT_UI" => {
+                    let (w, h) = sp
+                        .path
+                        .split_once('x')
+                        .or_else(|| sp.path.split_once('X'))
+                        .and_then(|(a, b)| {
+                            Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?))
+                        })
+                        .unwrap_or((1280, 800));
+                    ensure_cdp(&mut cdp_opt).and_then(|cdp| {
+                        let rep = cdp.audit_layout(w, h)?;
+                        let issues = rep
+                            .get("issues")
+                            .and_then(Value::as_array)
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        if issues > 0 {
+                            Err(format!("UI layout issues at {w}x{h}: {}", rep["issues"]))
+                        } else {
+                            Ok((200, String::new(), rep.to_string()))
+                        }
+                    })
+                }
                 _ => http_request(
                     &base_url,
                     &sp.method,
@@ -697,6 +744,7 @@ pub fn run_smoke(
         }
         if let Some(cdp) = cdp_opt.take() {
             cdp_js_errors = cdp.js_errors.clone();
+            cdp_js_errors.extend(cdp.network_errors.clone());
             drop(cdp);
         }
     }

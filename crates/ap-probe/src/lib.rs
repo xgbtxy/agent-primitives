@@ -4,6 +4,7 @@ pub mod mutate;
 pub mod runtime;
 pub mod slice;
 pub mod smoke;
+pub mod ui;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
@@ -15,6 +16,7 @@ use smoke::run_smoke;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use ui::run_ui_audit;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -132,6 +134,23 @@ enum SubCmd {
         test_cmd: Option<String>,
         #[arg(long, default_value_t = 8)]
         max_mutants: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dual-observability headless Edge/Chrome UI auditor (Desktop+Mobile overflow, overlapped/blocked buttons, broken <img>, JS errors & 4xx/5xx network leaks)
+    Ui {
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value = "/")]
+        path: String,
+        #[arg(long, default_value_t = true)]
+        mobile: bool,
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -286,5 +305,22 @@ pub fn run_cli(args: &[String]) -> i32 {
             max_mutants,
             json,
         } => run_mutate(&cwd, &target, test_cmd.as_deref(), max_mutants, json),
+        SubCmd::Ui {
+            cwd,
+            start,
+            url,
+            path,
+            mobile,
+            screenshot,
+            json,
+        } => run_ui_audit(
+            &cwd,
+            start.as_deref(),
+            url.as_deref(),
+            &path,
+            mobile,
+            screenshot.as_deref(),
+            json,
+        ),
     }
 }

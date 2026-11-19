@@ -1921,3 +1921,262 @@ fn test_creation_contract_linker_api_fuzzer_and_ast_mutator() {
         String::from_utf8_lossy(&gv_deep.stderr)
     );
 }
+
+#[test]
+fn test_ui_layout_network_auditor_sec_scanner_and_fault_localizer() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v19_home");
+    fs::create_dir_all(root.join("src")).unwrap();
+
+    // 1. Sub-5ms AI-Code OWASP Security Scanner (`ap guard sec`)
+    fs::write(
+        root.join("src/unsafe_api.mjs"),
+        concat!(
+            "export function findUser(db, id) { return db.exec(`SELECT * FROM users WHERE id = ${id}`); }\n",
+            "export function renderBanner(el, title) { el.innerHTML = `<h1>${title}</h1>`; }\n",
+            "export function serveFile(fs, path, req) { return fs.readFileSync(path.join('./files', req.url)); }\n"
+        ),
+    )
+    .unwrap();
+    let sec_bad = run_ap(
+        root,
+        &["guard", "sec", ".", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(!sec_bad.status.success());
+    let sj: Value = serde_json::from_slice(&sec_bad.stdout).unwrap();
+    let findings = sj["findings"].as_array().unwrap();
+    assert!(findings
+        .iter()
+        .any(|f| f["cwe"].as_str().unwrap().contains("CWE-89")));
+    assert!(findings
+        .iter()
+        .any(|f| f["cwe"].as_str().unwrap().contains("CWE-79")));
+    assert!(findings
+        .iter()
+        .any(|f| f["cwe"].as_str().unwrap().contains("CWE-22")));
+
+    // Fix all 3 vulnerabilities -> `ap guard sec` returns 0!
+    fs::write(
+        root.join("src/unsafe_api.mjs"),
+        concat!(
+            "export function findUser(db, id) { return db.prepare('SELECT * FROM users WHERE id = ?').get(id); }\n",
+            "export function renderBanner(el, title) { el.innerHTML = `<h1>${escapeHtml(title)}</h1>`; }\n",
+            "export function serveFile(fs, path, req) { const p = path.resolve('./files', path.basename(req.url)); if (!p.startsWith(path.resolve('./files'))) throw new Error('bad'); return fs.readFileSync(p); }\n"
+        ),
+    )
+    .unwrap();
+    let sec_ok = run_ap(root, &["guard", "sec", "."], None, &[("AP_HOME", &ap_home)]);
+    assert!(sec_ok.status.success());
+
+    // 2. Hierarchical Agentless/AutoCodeRover Fault Localizer (`ap atlas locate`)
+    fs::write(
+        root.join("src/auth.ts"),
+        "export function verifyJwtToken(token: string) { return token.length > 10; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/shipping.ts"),
+        "export function calcFreightWeight(kg: number) { return kg * 12; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/coupon.ts"),
+        "export function applyCouponRetry(orderId: string, discountRate: number) {\n  // double discount applied on retry!\n  return discountRate * 2;\n}\n",
+    )
+    .unwrap();
+    let loc = run_ap(
+        root,
+        &[
+            "atlas",
+            "locate",
+            "double discount on coupon retry",
+            ".",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(loc.status.success());
+    let lj: Value = serde_json::from_slice(&loc.stdout).unwrap();
+    let top = &lj["hits"].as_array().unwrap()[0];
+    assert_eq!(top["file"], "src/coupon.ts");
+    assert_eq!(top["symbol"], "applyCouponRetry");
+
+    // 3. Dual-Observability Headless UI Auditor (`ap probe ui`: layout overflow + overlapped button + 404 network + PNG screenshot)
+    let has_browser = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .any(|p| Path::new(p).is_file());
+
+    if has_browser {
+        fs::write(
+            root.join("broken_ui.mjs"),
+            concat!(
+                "import http from 'node:http';\n",
+                "http.createServer((req, res) => {\n",
+                "  if (req.url === '/') {\n",
+                "    res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'});\n",
+                "    res.end('<!doctype html><html><body style=\"margin:0\"><div style=\"width:2400px\">Wide</div><button id=\"buy-btn\" style=\"position:fixed;top:20px;left:20px;width:120px;height:40px\">Buy</button><div id=\"blocker\" style=\"position:fixed;top:0;left:0;width:300px;height:200px;z-index:99;background:rgba(0,0,0,0.5)\">Overlay</div><img src=\"/missing.png\"/></body></html>');\n",
+                "    return;\n",
+                "  }\n",
+                "  res.writeHead(404); res.end('missing');\n",
+                "}).listen(Number(process.env.PORT || 0), '127.0.0.1');\n"
+            ),
+        )
+        .unwrap();
+        let ui_bad = run_ap(
+            root,
+            &[
+                "probe",
+                "ui",
+                "--cwd",
+                ".",
+                "--start",
+                "node broken_ui.mjs",
+                "--json",
+            ],
+            None,
+            &[("AP_HOME", &ap_home)],
+        );
+        assert!(!ui_bad.status.success());
+        let uj: Value = serde_json::from_slice(&ui_bad.stdout).unwrap();
+        let vp0_issues = uj["viewports"][0]["issues"].to_string();
+        assert!(
+            vp0_issues.contains("Horizontal overflow"),
+            "Expected overflow: {vp0_issues}"
+        );
+        assert!(
+            vp0_issues.contains("Overlapped/blocked control #buy-btn"),
+            "Expected overlap: {vp0_issues}"
+        );
+        assert!(
+            !uj["network_errors"].as_array().unwrap().is_empty(),
+            "Expected 404 network error: {uj}"
+        );
+
+        fs::write(
+            root.join("clean_ui.mjs"),
+            concat!(
+                "import http from 'node:http';\n",
+                "http.createServer((req, res) => {\n",
+                "  res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'});\n",
+                "  res.end('<!doctype html><html><body style=\"margin:0;padding:16px;box-sizing:border-box\"><h1>Clean Dashboard</h1><button id=\"ok-btn\" style=\"padding:8px 16px\">Submit</button></body></html>');\n",
+                "}).listen(Number(process.env.PORT || 0), '127.0.0.1');\n"
+            ),
+        )
+        .unwrap();
+        let ui_ok = run_ap(
+            root,
+            &[
+                "probe",
+                "ui",
+                "--cwd",
+                ".",
+                "--start",
+                "node clean_ui.mjs",
+                "--screenshot",
+                "snap.png",
+            ],
+            None,
+            &[("AP_HOME", &ap_home)],
+        );
+        assert!(
+            ui_ok.status.success(),
+            "Clean UI should pass probe ui: {}{}",
+            String::from_utf8_lossy(&ui_ok.stdout),
+            String::from_utf8_lossy(&ui_ok.stderr)
+        );
+        assert!(
+            root.join("snap.png").is_file()
+                && fs::metadata(root.join("snap.png")).unwrap().len() > 200
+        );
+    }
+
+    // 4. Multi-line DOM XSS (safe 1st expr, unsafe 2nd expr), Vacuous 0-test detection & Active-file receipt in `guard verify --deep`
+    let vac_dir = tmp.path().join("vac_and_active");
+    fs::create_dir_all(vac_dir.join("src")).unwrap();
+    fs::create_dir_all(vac_dir.join("test")).unwrap();
+    fs::write(
+        vac_dir.join("src/view.js"),
+        "export function render(el, id, user) {\n  el.innerHTML = `\n    <span data-id=\"${Number(id)}\">${user.bio}</span>\n  `;\n}\n",
+    )
+    .unwrap();
+    let sec_ml = run_ap(
+        &vac_dir,
+        &["guard", "sec", "."],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert_eq!(sec_ml.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&sec_ml.stderr).contains("CWE-79 DOM XSS"),
+        "Expected multi-line DOM XSS catch: {}",
+        String::from_utf8_lossy(&sec_ml.stderr)
+    );
+    fs::remove_file(vac_dir.join("src/view.js")).unwrap();
+
+    fs::write(
+        vac_dir.join("package.json"),
+        r#"{"type":"module","scripts":{"test":"node --test test/empty.test.mjs"}}"#,
+    )
+    .unwrap();
+    fs::write(vac_dir.join("test/empty.test.mjs"), "// no tests yet\n").unwrap();
+    let vac_res = run_ap(
+        &vac_dir,
+        &["guard", "verify", "--cwd", "."],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert_eq!(vac_res.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&vac_res.stderr).contains("[VACUOUS TEST RUN]"),
+        "Expected vacuous 0-test catch: {}",
+        String::from_utf8_lossy(&vac_res.stderr)
+    );
+    fs::remove_file(vac_dir.join("test/empty.test.mjs")).unwrap();
+
+    // Untouched distractor `aaa_unused.mjs` must NOT derail `guard verify --deep` when `promo.mjs` is the active tested module
+    fs::write(
+        vac_dir.join("src/aaa_unused.mjs"),
+        "export function helperA(x) { return x > 10 ? x - 1 : x + 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        vac_dir.join("src/promo.mjs"),
+        "export function applyBonus(x, cap) { return x > cap ? cap + 5 : x; }\n",
+    )
+    .unwrap();
+    fs::write(
+        vac_dir.join("package.json"),
+        r#"{"type":"module","scripts":{"test":"node --test test/promo.test.mjs"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        vac_dir.join("test/promo.test.mjs"),
+        "import test from 'node:test'; import assert from 'node:assert/strict'; import { applyBonus } from '../src/promo.mjs';\ntest('bonus', () => { assert.equal(applyBonus(15, 10), 15); assert.equal(applyBonus(10, 10), 10); assert.equal(applyBonus(5, 10), 5); });\n",
+    )
+    .unwrap();
+    let deep_ok = run_ap(
+        &vac_dir,
+        &["guard", "verify", "--cwd", ".", "--deep"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    let deep_out = String::from_utf8_lossy(&deep_ok.stdout);
+    assert!(
+        deep_ok.status.success(),
+        "Expected active-file deep verify PASS: {}{}",
+        deep_out,
+        String::from_utf8_lossy(&deep_ok.stderr)
+    );
+    assert!(deep_out.contains("[sec]") && deep_out.contains("[mutate]"));
+}

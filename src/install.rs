@@ -246,7 +246,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     let mut bullets = Vec::new();
     if sel.contains("probe") || sel.contains("atlas") {
         bullets.push(format!(
-            "1. **Orient & Impact (`atlas`)**: Non-empty dir -> `{ap_cmd} atlas map .` (<15ms Code + `.xlsx`/`.csv`/`.sqlite`/`.gz` X-Ray). Existing web UI -> `{ap_cmd} atlas product .`. Before changing shared symbols -> `{ap_cmd} atlas impact <Sym> .`."
+            "1. **Orient, Locate & Impact (`atlas`)**: Non-empty dir -> `{ap_cmd} atlas map .` (<15ms Code + `.xlsx`/`.csv`/`.sqlite`/`.gz` X-Ray). Bug hunting in multi-file repo -> `{ap_cmd} atlas locate \"<symptom/error>\" .` (<25ms Top-5 suspect functions + numbered source). Before shared symbol edits -> `{ap_cmd} atlas impact <Sym> .`."
         ));
     }
     if sel.contains("splice") {
@@ -256,7 +256,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     }
     if sel.contains("probe") || sel.contains("guard") {
         bullets.push(format!(
-            "3. **1-Call Deep Test & Verify (`guard verify --deep`)**: Run `{ap_cmd} guard verify --cwd . --deep` to execute anti-slop (`.only`/empty-catch/`:any`), cross-file export/arity check, unit tests, API chaos/concurrency fuzzing, and AST mutation audit in ONE pass! (UI DOM clicks: `{ap_cmd} probe smoke --cwd . --stdin` with `OPEN /`, `FILL #id v`, `CLICK #id`, `EXPECT CONTAINS txt`)."
+            "3. **1-Call Deep Test & Verify (`guard verify --deep`)**: Run `{ap_cmd} guard verify --cwd . --deep` to execute OWASP security (SQLi/XSS/Path Traversal), anti-slop (`.only`/empty-catch/`:any`), cross-file export/arity check, unit tests, API chaos/concurrency fuzzing, Desktop+Mobile headless UI layout/network audit (`probe ui`), and AST mutation audit in ONE pass! (Interactive DOM clicks: `{ap_cmd} probe smoke --cwd . --stdin`)."
         ));
     }
     if ["probe", "sieve", "recall", "guard", "baton"]

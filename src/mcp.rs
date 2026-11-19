@@ -172,11 +172,37 @@ fn mcp_tools_schema() -> Value {
                     "test_cmd": { "type": "string", "description": "Optional test command (auto-detected if omitted)" },
                     "max_mutants": { "type": "integer", "description": "Max mutants to evaluate (default: 8)" }
                 },
-                "required": ["target"]
+            "required": ["target"]
+        }
+    },
+    {
+        "name": "ap_ui",
+        "description": "Audit any web UI in real Headless Edge/Chrome across Desktop (1280x800) + Mobile (390x844): catches horizontal overflow, overlapped/blocked buttons via elementFromPoint, broken <img>, JS pageerror/console.error, and silent 4xx/5xx network leaks (0 MB Playwright).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                "start": { "type": "string", "description": "Optional server start command (auto-detected if omitted)" },
+                "path": { "type": "string", "description": "Page path (default: '/')" },
+                "screenshot": { "type": "string", "description": "Optional PNG screenshot output path" }
             }
-        },
-        {
-            "name": "ap_verify",
+        }
+    },
+    {
+        "name": "ap_locate",
+        "description": "Hierarchical Agentless/AutoCodeRover fault localizer (<25ms): ranks Top-K suspect functions across the codebase via Tree-sitter + BM25 + camelCase/CJK splitting and returns exact numbered source lines so you find bugs in 1 call.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Bug description, error message, or symptom keywords" },
+                "path": { "type": "string", "description": "Workspace root directory (default: '.')" },
+                "top_k": { "type": "integer", "description": "Number of suspect functions to return (default: 5)" }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "ap_verify",
             "description": "Run final quality gate before finishing: checks 0 broken HTML #id <-> JS selector or fetch() <-> route contracts, 0 anti-slop violations (:any, @ts-ignore, empty catch {}), and runs project tests.",
             "inputSchema": {
                 "type": "object",
@@ -562,6 +588,67 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             let (ok, out) = run_self_captured(&cli, None);
             crate::stats::record_event("mutate", 0, out.len() as u64, 0, 1, "mcp-mutate");
+            (ok, out)
+        }
+        "ap_ui" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            let mut cli = vec![
+                "probe".to_string(),
+                "ui".to_string(),
+                "--cwd".to_string(),
+                cwd.to_string(),
+            ];
+            if let Some(st) = args
+                .get("start")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--start".to_string());
+                cli.push(st.to_string());
+            }
+            if let Some(p) = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--path".to_string());
+                cli.push(p.to_string());
+            }
+            if let Some(sc) = args
+                .get("screenshot")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--screenshot".to_string());
+                cli.push(sc.to_string());
+            }
+            let (ok, out) = run_self_captured(&cli, None);
+            crate::stats::record_event("ui", 0, out.len() as u64, 0, 1, "mcp-ui");
+            (ok, out)
+        }
+        "ap_locate" => {
+            let q = args
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if q.is_empty() {
+                return (false, "Pass non-empty `query` to `ap_locate`.".to_string());
+            }
+            let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(5);
+            let (ok, out) = run_self_captured(
+                &[
+                    "atlas".into(),
+                    "locate".into(),
+                    q.into(),
+                    root.into(),
+                    "-k".into(),
+                    top_k.to_string(),
+                ],
+                None,
+            );
+            crate::stats::record_event("locate", 0, out.len() as u64, 0, 1, "mcp-locate");
             (ok, out)
         }
         "ap_exec" => {
