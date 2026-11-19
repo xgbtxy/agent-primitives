@@ -4631,7 +4631,7 @@ fn test_v210_pi_native_context_edit_masking_and_doctor_pi_audit() {
         "export function formatMaskedToolResult",
         "export function planObservationMasking",
         "MASK_HIGH_WATER_TOKENS = 180000",
-        "MASK_COOLDOWN_TURNS = 10",
+        "MASK_COOLDOWN_TURNS = 15",
         "type: \"context_edit\"",
         "entries: [...(event.entries ?? []), ...plan.edits]",
         "[ap codemode-tip]",
@@ -4906,4 +4906,81 @@ fn test_v213_pi_handoff_error_preserving_mask_and_xml_tool_call_recovery() {
     assert!(doc.status.success());
     let dj: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dj["pi_runtime"]["accelerator_up_to_date"], true);
+}
+
+#[test]
+fn test_v214_data_calibrated_utf8_quote_tip_split_loop_and_retry_doctor() {
+    use serde_json::json;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let fake_home = root.join("fake_home_v214");
+    let ap_home = root.join("ap_v214_home");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(pi_agent.join("extensions")).unwrap();
+
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "showCacheMissNotices": true,
+            "defaultTools": ["+codemode"],
+            "retry": { "enabled": true, "maxRetries": 3, "baseDelayMs": 2000 },
+            "compaction": {
+                "enabled": true,
+                "modelOverrides": {
+                    "deepseek/deepseek-flash": { "reserveTokens": 650000, "keepRecentTokens": 64000 }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "const LOOP_ERR_THRESHOLD = 3;",
+        "const LOOP_OK_THRESHOLD = 5;",
+        "const MASK_COOLDOWN_TURNS = 15;",
+        "$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8';",
+        "[ap quote-tip]",
+        "customType: \"ap-empty-recover\"",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.14 feature '{needle}'");
+    }
+
+    // Doctor surfaces `retry.maxRetries` recommendation when < 5 for DeepSeek
+    let doc1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc1.status.success());
+    let d1: Value = serde_json::from_slice(&doc1.stdout).unwrap();
+    assert_eq!(d1["pi_runtime"]["effective_compaction_trigger_tokens"], 350000);
+    assert_eq!(d1["pi_runtime"]["retry_max_retries"], 3);
+    assert!(d1["pi_runtime"]["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str().unwrap_or("").contains("retry.maxRetries")));
 }

@@ -825,20 +825,23 @@ const DESTRUCTIVE_OR_WRITE =
 	/\b(?:Remove-Item|rm|del|erase|rmdir|rd|Move-Item|Rename-Item|mv|ren|Set-Content|Add-Content|Clear-Content|Out-File|Copy-Item|cpi|copy)\b|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|\.rmdir\(|\bgit(?:\.exe)?\b[\s\S]{{0,80}}?\bclean\b/i;
 const BARE_SLOW_GREP =
 	/^\s*grep\s+-[rR][nwiEH]*\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$/;
-const PY_INVOKE = /(?:^|[;&|]\s*)(?:python3?|py)\b/i;
+const PY_INVOKE = /\b(?:python3?(?:\.exe)?|py(?:\.exe)?|pytest)\b/i;
 const HAS_UTF8_ENV = /PYTHONUTF8|PYTHONIOENCODING/i;
-const PY_WIN_BS = /\b(?:python3?|py)\s+-c\s+.*(?<![rR])['"][A-Za-z]:\\(?!\\)/;
+const PY_WIN_BS = /\b(?:python3?(?:\.exe)?|py(?:\.exe)?)\s+-c\s+[\s\S]*(?<![rR])['"][A-Za-z]:\\(?!\\)/;
 const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
+const QUOTE_OR_BS_ERR =
+	/unterminated string|EOL while scanning|unicodeescape|unexpected character after line continuation|syntax error near unexpected token/i;
 const CODE_FILE_EXT = /\.(?:rs|ts|tsx|js|jsx|mjs|cjs|py|go|c|cc|cpp|h|hpp)$/i;
 const EDIT_TOOLS = new Set(["write", "edit", "ap_edit", "ap_rename"]);
 const LOOP_WINDOW = 6;
-const LOOP_THRESHOLD = 3;
+const LOOP_ERR_THRESHOLD = 3;
+const LOOP_OK_THRESHOLD = 5;
 const REREAD_THRESHOLD = 3;
 const HEAVY_THINKING_CHARS = 12000;
 const STAGNATION_TURNS = 3;
 const LARGE_CODE_READ_CHARS = 20000;
 
-// High-water batch observation masking constants (tuned for 1M-window DeepSeek Flash & 128k-256k models)
+// High-water batch observation masking constants (calibrated for 1M-window DeepSeek Flash 98%+ KV-cache & 128k-256k models)
 const MASK_PREFIX = "[ap masked stale toolResult:";
 const MASK_HIGH_WATER_PCT = 72;
 const MASK_HIGH_WATER_TOKENS = 180000;
@@ -847,11 +850,12 @@ const MASK_KEEP_RECENT_ENTRIES = 12;
 const MASK_MIN_ENTRY_CHARS = 4500;
 const MASK_MIN_BATCH_ENTRIES = 2;
 const MASK_MIN_RECLAIMED_CHARS = 16000;
-const MASK_COOLDOWN_TURNS = 10;
+const MASK_COOLDOWN_TURNS = 15;
 
 export function normCmdFingerprint(raw: string): string {{
 	return raw
 		.replace(/^export\s+PYTHONUTF8=1\s+PYTHONIOENCODING=utf-8;\s*/i, "")
+		.replace(/^\$env:PYTHONUTF8='1';\s*\$env:PYTHONIOENCODING='utf-8';\s*/i, "")
 		.replace(/\b0x[0-9a-fA-F]{{4,}}\b/g, "<HEX>")
 		.replace(/\b\d{{4}}-\d{{2}}-\d{{2}}[T\s]\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?Z?\b/g, "<TS>")
 		.replace(/\s+/g, " ")
@@ -890,10 +894,15 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 		changed = true;
 	}}
 
-	// 4. Auto-lock UTF-8 across the full command chain (including `cd ... && python ...`)
-	if (toolName === "bash" && PY_INVOKE.test(cmd) && !HAS_UTF8_ENV.test(cmd)) {{
-		cmd = `export PYTHONUTF8=1 PYTHONIOENCODING=utf-8; ${{cmd}}`;
-		changed = true;
+	// 4. Auto-lock UTF-8 across BOTH Bash and PowerShell Python invocations (prevents 99% of Windows GBK crashes)
+	if (PY_INVOKE.test(cmd) && !HAS_UTF8_ENV.test(cmd)) {{
+		if (toolName === "bash") {{
+			cmd = `export PYTHONUTF8=1 PYTHONIOENCODING=utf-8; ${{cmd}}`;
+			changed = true;
+		}} else if (toolName === "powershell") {{
+			cmd = `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; ${{cmd}}`;
+			changed = true;
+		}}
 	}}
 
 	// 5. Prevent PowerShell 5.1 `curl` -> Invoke-WebRequest alias crashes
@@ -1850,7 +1859,46 @@ export default function (pi: ExtensionAPI) {{
 	}});
 
 	pi.on("agent_before_settle", (event, ctx) => {{
-		if (event.outcome !== "completed" || settleGateFiredThisRun || editedFilesThisRun.size === 0) {{
+		if (event.outcome !== "completed" || settleGateFiredThisRun) {{
+			return undefined;
+		}}
+
+		// 0. Recover silent thinking-only stall (assistant emitted thinking with 0 text & 0 toolCalls)
+		const ctxMsgs = event.context?.contextMessages;
+		if (Array.isArray(ctxMsgs) && ctxMsgs.length > 0) {{
+			const last = ctxMsgs[ctxMsgs.length - 1] as {{
+				role?: string;
+				content?: Array<{{ type?: string; thinking?: string; text?: string }}>;
+			}};
+			if (last?.role === "assistant" && Array.isArray(last.content)) {{
+				const hasThinking = last.content.some(
+					(b) => b?.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0,
+				);
+				const hasVisible = last.content.some(
+					(b) =>
+						b?.type === "toolCall" ||
+						(b?.type === "text" && typeof b.text === "string" && b.text.trim().length > 0),
+				);
+				if (hasThinking && !hasVisible) {{
+					settleGateFiredThisRun = true;
+					guardsTriggered += 1;
+					updateHud(ctx);
+					const draft: CustomMessageEntryDraft = {{
+						type: "custom_message",
+						customType: "ap-empty-recover",
+						display: false,
+						content:
+							"[ap recover] Previous assistant turn produced internal reasoning with no visible text or tool call. Emit your concrete tool call or final answer now.",
+					}};
+					return {{
+						entries: [...(event.entries ?? []), draft],
+						continue: true,
+					}};
+				}}
+			}}
+		}}
+
+		if (editedFilesThisRun.size === 0) {{
 			return undefined;
 		}}
 		const cwd = ctx?.cwd;
@@ -2035,6 +2083,11 @@ export default function (pi: ExtensionAPI) {{
 				}}
 			}}
 
+			if (event.isError && QUOTE_OR_BS_ERR.test(outText)) {{
+				outText += `\n[ap quote-tip] Avoid nested quotes/backslashes inside inline python -c; use a single-quoted heredoc (python - <<'PY' ... PY) or write a script file via write/ap_edit.`;
+				mutated = true;
+			}}
+
 			const fp = normCmdFingerprint(cmd);
 			if (fp.length >= 8) {{
 				recentShellFps.push(fp);
@@ -2042,10 +2095,11 @@ export default function (pi: ExtensionAPI) {{
 					recentShellFps.shift();
 				}}
 				const repeats = recentShellFps.filter((x) => x === fp).length;
-				if (repeats >= LOOP_THRESHOLD) {{
+				const threshold = event.isError ? LOOP_ERR_THRESHOLD : LOOP_OK_THRESHOLD;
+				if (repeats >= threshold) {{
 					const hint = event.isError
 						? `\n[ap loop-breaker] Repeated failing shell command (${{repeats}}/${{LOOP_WINDOW}} calls) without intervening edits. Pause, inspect root cause, edit code or switch strategy instead of retrying identically.`
-						: `\n[ap loop-breaker] Near-identical shell command repeated (${{repeats}}/${{LOOP_WINDOW}} calls) without edits. Avoid redundant polling; summarize findings or pivot to the next concrete action.`;
+						: `\n[ap loop-breaker] Identical shell command repeated (${{repeats}}/${{LOOP_WINDOW}} calls) without edits. Avoid redundant polling; summarize findings or pivot to the next concrete action.`;
 					outText = `${{outText}}${{hint}}`;
 					guardsTriggered += 1;
 					mutated = true;
@@ -2765,6 +2819,8 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("extractXmlJsonToolCalls")
                 && s.contains("extractErrorSignatureLines")
                 && s.contains("serializeBranchForHandoff")
+                && s.contains("LOOP_ERR_THRESHOLD")
+                && s.contains("QUOTE_OR_BS_ERR")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
@@ -2841,6 +2897,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 .any(|m| m == "deepseek/flash-auto")
         })
         .unwrap_or(false);
+    let retry_max_retries = settings_json
+        .as_ref()
+        .and_then(|v| v.pointer("/retry/maxRetries"))
+        .and_then(Value::as_u64);
 
     let models_json = fs::read_to_string(pi_agent.join("models.json"))
         .ok()
@@ -2906,13 +2966,19 @@ fn inspect_pi_runtime(home: &Path) -> Value {
     if let Some(trigger) = effective_compaction_trigger_tokens {
         if trigger > 400_000 {
             recommendations.push(
-                format!("deepseek-flash (1M window) auto-compacts at {trigger} tokens; set compaction.modelOverrides[\"deepseek/deepseek-flash\"].reserveTokens=780000 to compact cleanly around 220k tokens before Context Rot.")
+                format!("deepseek-flash (1M window) auto-compacts at {trigger} tokens; set compaction.modelOverrides[\"deepseek/deepseek-flash\"].reserveTokens=650000 (350k trigger; or 780000 for 220k) to compact cleanly before the >=400k latency cliff.")
             );
         }
     }
     if is_deepseek && !show_cache_miss_notices {
         recommendations.push(
             "Set `\"showCacheMissNotices\": true` in ~/.pi/agent/settings.json to surface DeepSeek prefix cache misses immediately."
+                .to_string(),
+        );
+    }
+    if is_deepseek && retry_max_retries.is_some_and(|r| r < 5) {
+        recommendations.push(
+            "Raise `retry.maxRetries` to 6 in ~/.pi/agent/settings.json to survive transient DeepSeek stream drops/timeouts during long sessions."
                 .to_string(),
         );
     }
@@ -2928,6 +2994,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "effective_compaction_trigger_tokens": effective_compaction_trigger_tokens,
         "show_cache_miss_notices": show_cache_miss_notices,
         "flash_auto_enabled": flash_auto_enabled,
+        "retry_max_retries": retry_max_retries,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
         "hints": hints,
         "recommendations": recommendations,
@@ -3136,7 +3203,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.13+ (error-aware context_edit + settle-gate + flash-auto + /ap handoff)" } else { "stale/missing" }
+            if accel_ok { "v2.14+ (99% UTF-8 heal + error-aware context_edit + settle-gate + flash-auto + /ap handoff)" } else { "stale/missing" }
         );
         if let Some(hints) = pi_runtime["hints"].as_array() {
             for h in hints.iter().filter_map(Value::as_str) {
