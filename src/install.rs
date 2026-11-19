@@ -896,6 +896,12 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 		changed = true;
 	}}
 
+	// 5. Prevent PowerShell 5.1 `curl` -> Invoke-WebRequest alias crashes
+	if (toolName === "powershell" && /(?:^|[;&|]\s*)curl(?=\s)/i.test(cmd)) {{
+		cmd = cmd.replace(/(^|[;&|]\s*)curl(?=\s)/gi, "$1curl.exe");
+		changed = true;
+	}}
+
 	return changed ? cmd : undefined;
 }}
 
@@ -1428,6 +1434,71 @@ export default function (pi: ExtensionAPI) {{
 			}});
 		}}
 	}});
+
+	pi.on("session_before_tree", () => {{
+		// Keep branch-switch summaries sharp by preserving verified facts & falsified dead-ends
+		return {{
+			customInstructions:
+				"Preserve exact file paths, symbol names, verified facts, falsified hypotheses/dead-ends, and exact failing error signatures so the target branch never repeats failed attempts.",
+		}};
+	}});
+
+	// Zero-prompt-token interactive `/ap` command inside Pi (`/ap`, `/ap status`, `/ap doctor`, `/ap compact`)
+	if (typeof pi.registerCommand === "function") {{
+		pi.registerCommand("ap", {{
+			description: "Show live ap + DeepSeek KV-cache telemetry, run doctor, or focused compact",
+			getArgumentCompletions(prefix: string) {{
+				const items = [
+					{{ value: "status", label: "status — Live KV-cache, masking & guard telemetry" }},
+					{{ value: "doctor", label: "doctor — Run native ap doctor health check" }},
+					{{ value: "compact", label: "compact — Compact while anchoring verified facts & dead-ends" }},
+				];
+				const p = (prefix || "").trim().toLowerCase();
+				return p ? items.filter((it) => it.value.startsWith(p)) : items;
+			}},
+			async handler(args, ctx) {{
+				const sub = (args || "").trim().toLowerCase() || "status";
+				if (sub === "doctor") {{
+					const res = spawnSync(AP_BIN, ["doctor"], {{
+						cwd: ctx.cwd,
+						encoding: "utf8",
+						timeout: 5000,
+						windowsHide: true,
+					}});
+					const summary = (res.stdout || res.stderr || "ap doctor failed")
+						.trim()
+						.split("\n")
+						.slice(0, 12)
+						.join("\n");
+					ctx.ui.notify(summary, res.status === 0 ? "info" : "warning");
+					return;
+				}}
+				if (sub === "compact") {{
+					ctx.compact({{
+						customInstructions:
+							"Preserve exact file paths, symbol names, verified facts, falsified dead-ends, and exact build/test commands needed to continue cleanly.",
+					}});
+					ctx.ui.notify("[ap] Triggered focused compaction preserving verified facts & dead-ends.", "info");
+					return;
+				}}
+				const usage = ctx.getContextUsage?.();
+				const totalPrompt = sessionInputTokens + sessionCacheReadTokens;
+				const hitPct =
+					totalPrompt > 0 ? ((sessionCacheReadTokens / totalPrompt) * 100).toFixed(1) : "n/a";
+				// DeepSeek V4.1 Flash savings: ($0.30 - $0.006) / 1M = $0.294 per 1M cacheRead tokens
+				const estUsdSaved = ((sessionCacheReadTokens / 1_000_000) * 0.294).toFixed(4);
+				const ctxStr =
+					typeof usage?.tokens === "number"
+						? `${{Math.round(usage.tokens / 1000)}}k (${{Math.round(usage.percent ?? 0)}}%)`
+						: "n/a";
+				const modelStr = ctx.model ? `${{ctx.model.provider}}/${{ctx.model.id}}` : "unknown";
+				ctx.ui.notify(
+					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} guarded=${{guardsTriggered}}`,
+					"info",
+				);
+			}},
+		}});
+	}}
 
 	pi.on("message_end", (event) => {{
 		const msg = event.message as {{
@@ -2457,6 +2528,8 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
+                && s.contains("registerCommand(\"ap\"")
+                && s.contains("session_before_tree")
         })
         .unwrap_or(false);
 
@@ -2502,8 +2575,32 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         .unwrap_or(false);
     let compaction_reserve_tokens = settings_json
         .as_ref()
-        .and_then(|v| v.pointer("/compaction/reserveTokens"))
+        .and_then(|v| {
+            default_model
+                .as_deref()
+                .and_then(|dm| {
+                    v.pointer("/compaction/modelOverrides")
+                        .and_then(|mo| mo.get(dm))
+                        .and_then(|ov| ov.get("reserveTokens"))
+                })
+                .or_else(|| v.pointer("/compaction/reserveTokens"))
+        })
         .and_then(Value::as_u64);
+    let show_cache_miss_notices = settings_json
+        .as_ref()
+        .and_then(|v| v.get("showCacheMissNotices"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let flash_auto_enabled = settings_json
+        .as_ref()
+        .and_then(|v| v.get("enabledModels"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .any(|m| m == "deepseek/flash-auto")
+        })
+        .unwrap_or(false);
 
     let models_json = fs::read_to_string(pi_agent.join("models.json"))
         .ok()
@@ -2557,6 +2654,29 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         );
     }
 
+    let effective_compaction_trigger_tokens = if is_deepseek
+        && default_model_id.as_deref() == Some("deepseek-flash")
+    {
+        compaction_reserve_tokens.map(|r| 1_000_000u64.saturating_sub(r))
+    } else {
+        None
+    };
+
+    let mut recommendations: Vec<String> = Vec::new();
+    if let Some(trigger) = effective_compaction_trigger_tokens {
+        if trigger > 400_000 {
+            recommendations.push(
+                format!("deepseek-flash (1M window) auto-compacts at {trigger} tokens; set compaction.modelOverrides[\"deepseek/deepseek-flash\"].reserveTokens=780000 to compact cleanly around 220k tokens before Context Rot.")
+            );
+        }
+    }
+    if is_deepseek && !show_cache_miss_notices {
+        recommendations.push(
+            "Set `\"showCacheMissNotices\": true` in ~/.pi/agent/settings.json to surface DeepSeek prefix cache misses immediately."
+                .to_string(),
+        );
+    }
+
     json!({
         "detected": true,
         "accelerator_present": accelerator_present,
@@ -2565,8 +2685,12 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "codemode_enabled": codemode_enabled,
         "default_model": default_model,
         "compaction_reserve_tokens": compaction_reserve_tokens,
+        "effective_compaction_trigger_tokens": effective_compaction_trigger_tokens,
+        "show_cache_miss_notices": show_cache_miss_notices,
+        "flash_auto_enabled": flash_auto_enabled,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
         "hints": hints,
+        "recommendations": recommendations,
     })
 }
 
@@ -2772,11 +2896,16 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.11+ (context_edit + settle-gate + flash-auto + KV-cache HUD)" } else { "stale/missing" }
+            if accel_ok { "v2.12+ (context_edit + settle-gate + flash-auto + /ap + KV-cache HUD)" } else { "stale/missing" }
         );
         if let Some(hints) = pi_runtime["hints"].as_array() {
             for h in hints.iter().filter_map(Value::as_str) {
                 println!("         -> {h}");
+            }
+        }
+        if let Some(recs) = pi_runtime["recommendations"].as_array() {
+            for r in recs.iter().filter_map(Value::as_str) {
+                println!("         [tune] {r}");
             }
         }
     }

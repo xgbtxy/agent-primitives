@@ -4756,3 +4756,105 @@ fn test_v211_pi_settle_gate_virtual_effort_router_and_codemode_prompt() {
         .unwrap();
     assert!(prompt_txt.contains("Promise.allSettled") && prompt_txt.contains("store("));
 }
+
+#[test]
+fn test_v212_pi_slash_ap_command_tree_hook_ps_curl_and_1m_compaction_doctor() {
+    use serde_json::json;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let fake_home = root.join("fake_home_v212");
+    let ap_home = root.join("ap_v212_home");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(pi_agent.join("extensions")).unwrap();
+
+    // 1. Seed DeepSeek Flash 1M-window config WITHOUT modelOverrides -> doctor flags 967k recommendation
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "defaultTools": ["+codemode"],
+            "compaction": { "enabled": true, "reserveTokens": 32768, "keepRecentTokens": 32000 }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "pi.registerCommand(\"ap\"",
+        "pi.on(\"session_before_tree\"",
+        "curl.exe",
+        "[ap telemetry]",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.12 feature '{needle}'");
+    }
+
+    let doc1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc1.status.success());
+    let d1: Value = serde_json::from_slice(&doc1.stdout).unwrap();
+    assert_eq!(d1["pi_runtime"]["accelerator_up_to_date"], true);
+    assert_eq!(
+        d1["pi_runtime"]["effective_compaction_trigger_tokens"],
+        967232
+    );
+    assert!(d1["pi_runtime"]["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str().unwrap_or("").contains("220k")));
+
+    // 2. Apply optimal DeepSeek Flash settings -> 220k trigger, showCacheMissNotices=true, flash-auto enabled, 0 recommendations!
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "enabledModels": ["deepseek/deepseek-flash", "deepseek/flash-auto"],
+            "showCacheMissNotices": true,
+            "defaultTools": ["+codemode"],
+            "compaction": {
+                "enabled": true,
+                "reserveTokens": 32768,
+                "keepRecentTokens": 32000,
+                "modelOverrides": {
+                    "deepseek/deepseek-flash": { "reserveTokens": 780000, "keepRecentTokens": 48000 }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let doc2 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc2.status.success());
+    let d2: Value = serde_json::from_slice(&doc2.stdout).unwrap();
+    assert_eq!(
+        d2["pi_runtime"]["effective_compaction_trigger_tokens"],
+        220000
+    );
+    assert_eq!(d2["pi_runtime"]["show_cache_miss_notices"], true);
+    assert_eq!(d2["pi_runtime"]["flash_auto_enabled"], true);
+    assert_eq!(d2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+}
