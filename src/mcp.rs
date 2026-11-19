@@ -71,7 +71,8 @@ fn mcp_tools_schema() -> Value {
                     "block": { "type": "boolean", "description": "Emit full enclosing Tree-sitter AST function/class block around each hit" },
                     "context": { "type": "integer", "description": "Show N surrounding lines before & after each match (like `rg -C N`)" },
                     "files_only": { "type": "boolean", "description": "Return only unique matching file paths (like `rg -l`)" },
-                    "count": { "type": "boolean", "description": "Return per-file match counts (like `rg -c`)" }
+                    "count": { "type": "boolean", "description": "Return per-file match counts (like `rg -c`)" },
+                    "json": { "type": "boolean", "description": "Emit structured JSON populated into structuredContent (matches/files/counts) for zero-parse codemode pipelines" }
                 }
             }
         },
@@ -696,6 +697,128 @@ fn tool_annotations_for(name: &str) -> (&'static str, bool, bool, bool, bool) {
     }
 }
 
+fn tool_output_schema_for(name: &str) -> Value {
+    match name {
+        "ap_search" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "elapsed_ms": { "type": "number" },
+                "scanned_files": { "type": "integer" },
+                "total_matches": { "type": "integer" },
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": { "type": "string" },
+                            "line": { "type": "integer" },
+                            "symbol": { "type": "string" },
+                            "snippet": { "type": "string" }
+                        },
+                        "additionalProperties": true
+                    }
+                },
+                "files": { "type": "array", "items": { "type": "string" } },
+                "counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        "ap_query" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "elapsed_ms": { "type": "number" },
+                "row_count": { "type": "integer" },
+                "columns": { "type": "array", "items": { "type": "string" } },
+                "rows": { "type": "array", "items": { "type": "array" } },
+                "records": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                "tables": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        "ap_diff_audit" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "is_git_repo": { "type": "boolean" },
+                "files_scanned": { "type": "integer" },
+                "added_lines": { "type": "integer" },
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string" },
+                            "file": { "type": "string" },
+                            "line": { "type": "integer" },
+                            "detail": { "type": "string" }
+                        },
+                        "additionalProperties": true
+                    }
+                },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        "ap_edit" | "ap_rename" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "modified_files": { "type": "array", "items": { "type": "string" } },
+                "replacements": { "type": "integer" },
+                "rolled_back": { "type": "boolean" },
+                "issues": { "type": "array" },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        "ap_verify" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "passed": { "type": "boolean" },
+                "findings": { "type": "array" },
+                "issues": { "type": "array" },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        "ap_locate" | "ap_trace" | "ap_changes" | "ap_impact" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "files": { "type": "array", "items": { "type": "string" } },
+                "symbols": { "type": "array" },
+                "callers": { "type": "array" },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        "ap_sieve" | "ap_baton" | "ap_recall" | "ap_read" | "ap_orient" | "ap_exec" => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "id": { "type": "string" },
+                "items": { "type": "array" },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "items": { "type": "array" },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": true
+        }),
+    }
+}
+
 fn annotate_mcp_tools(mut tools: Value) -> Value {
     if let Value::Array(ref mut arr) = tools {
         for item in arr.iter_mut() {
@@ -718,6 +841,7 @@ fn annotate_mcp_tools(mut tools: Value) -> Value {
                         "openWorldHint": open
                     }),
                 );
+                obj.insert("outputSchema".to_string(), tool_output_schema_for(&name));
             }
         }
     }
@@ -1003,6 +1127,9 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             if args.get("count").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--count".to_string());
+            }
+            if args.get("json").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--json".to_string());
             }
             run_self_captured(&cli, None)
         }
@@ -2418,7 +2545,7 @@ fn get_mcp_prompt(name: &str, args: &Value) -> Result<Value, String> {
                     "role": "user",
                     "content": {
                         "type": "text",
-                        "text": format!("Execute `{task}` inside Pi `codemode` in minimal turns while protecting DeepSeek KV-cache:\n1. Batch discovery in ONE `codemode` call via `Promise.allSettled([tools.mcp__agent_primitives__ap_orient({{}}), tools.mcp__agent_primitives__ap_search({{patterns:[...]}}), tools.mcp__agent_primitives__ap_read({{targets:[...], outline:true}})])`.\n2. Filter/slice noisy results inside QuickJS and `return` only compact structured findings (<2KB); persist key cursors/plans across calls with `store('plan', ...)` / `load('plan')`.\n3. Apply changes atomically via `tools.mcp__agent_primitives__ap_edit` (or `ap_rename`) with `run_tests: true`.\n4. Finish with `ap_changes` + `ap_diff_audit` + `ap_verify` in one final verification script.")
+                        "text": format!("Execute `{task}` inside Pi `codemode` in minimal turns while protecting DeepSeek KV-cache:\n1. Batch discovery in ONE `codemode` call via `Promise.allSettled([tools.mcp__agent_primitives__ap_orient({{}}), tools.mcp__agent_primitives__ap_search({{patterns:[...], json:true}}), tools.mcp__agent_primitives__ap_read({{targets:[...], outline:true}})])` — all `ap_*` MCP tools declare typed `outputSchema`, so read `res.structuredContent.matches` / `.records` / `.findings` directly with zero `JSON.parse`.\n2. Run noisy shell commands via `tools.bash({{command}})` INSIDE `codemode` (up to 1 MiB output, never throws on non-zero exit_code), filter/slice in QuickJS, and `return` only compact findings (<2KB). Persist branch-safe, compaction-proof plans/cursors with `store('plan', ...)` / `load('plan')`.\n3. Apply changes atomically via `tools.mcp__agent_primitives__ap_edit` (or `ap_rename`) with `run_tests: true`.\n4. Finish with `ap_changes` + `ap_diff_audit` + `ap_verify` in one final verification script.")
                     }
                 }]
             }))
@@ -2524,18 +2651,24 @@ fn handle_rpc_request(req: &Value) -> Option<Value> {
             });
             if ok {
                 let trimmed = text.trim();
+                let mut populated = false;
                 if trimmed.starts_with('{') || trimmed.starts_with('[') {
                     if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
                         match parsed {
                             Value::Object(_) => {
                                 result["structuredContent"] = parsed;
+                                populated = true;
                             }
                             Value::Array(_) => {
-                                result["structuredContent"] = json!({ "items": parsed });
+                                result["structuredContent"] = json!({ "ok": true, "items": parsed });
+                                populated = true;
                             }
                             _ => {}
                         }
                     }
+                }
+                if !populated {
+                    result["structuredContent"] = json!({ "ok": true, "text": text });
                 }
             }
             Some(json!({

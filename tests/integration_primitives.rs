@@ -4834,6 +4834,7 @@ fn test_v212_pi_slash_ap_command_tree_hook_ps_curl_and_1m_compaction_doctor() {
             "defaultModel": "deepseek-flash",
             "enabledModels": ["deepseek/deepseek-flash", "deepseek/flash-auto"],
             "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
             "defaultTools": ["+codemode"],
             "compaction": {
                 "enabled": true,
@@ -5062,4 +5063,202 @@ fn test_v215_pi_monotonic_masking_dual_sieve_heredoc_heal_and_audit() {
     assert_eq!(agg["shell_timeouts"], 1);
     assert_eq!(agg["path_translation_errors"], 1);
     assert_eq!(agg["kv_cache_cold_drops"], 1);
+}
+
+#[test]
+fn test_v216_mcp_output_schema_pi_edit_guard_review_and_http_idle_doctor() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v216");
+    let ap_home = root.join("ap_home_v216");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+    let sample_rs = root.join("demo.rs");
+    fs::write(
+        &sample_rs,
+        "pub fn compute_delta(x: i32) -> i32 {\n    x + 42\n}\n",
+    )
+    .unwrap();
+
+    // 1. Verify MCP `tools/list` declares typed `outputSchema` on all 34 tools + `ap_search(json=true)` + `ap_read` structuredContent + `pi-codemode-pipeline`
+    let rpc_in = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).to_string(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "ap_search",
+                "arguments": {
+                    "pattern": "compute_delta",
+                    "path": root.to_str().unwrap(),
+                    "json": true
+                }
+            }
+        })
+        .to_string(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "ap_read",
+                "arguments": {
+                    "target": sample_rs.to_str().unwrap(),
+                    "outline": true
+                }
+            }
+        })
+        .to_string(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "prompts/get",
+            "params": {
+                "name": "pi-codemode-pipeline",
+                "arguments": { "task": "audit module" }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n")
+        + "\n";
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let mcp_out = run_ap(root, &["mcp"], Some(&rpc_in), &env_vars);
+    assert!(mcp_out.status.success(), "mcp stdio failed");
+    let lines: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 4);
+
+    let tools = lines[0]["result"]["tools"].as_array().unwrap();
+    assert!(tools.len() >= 34);
+    for t in tools {
+        assert_eq!(
+            t["outputSchema"]["type"], "object",
+            "Tool {} missing MCP 2025-06-18 outputSchema",
+            t["name"]
+        );
+    }
+    let ap_search_tool = tools.iter().find(|t| t["name"] == "ap_search").unwrap();
+    assert!(ap_search_tool["outputSchema"]["properties"]["matches"].is_object());
+    assert!(ap_search_tool["inputSchema"]["properties"]["json"].is_object());
+
+    // Typed structuredContent.matches from ap_search(json=true)
+    assert_eq!(lines[1]["result"]["isError"], false);
+    assert_eq!(lines[1]["result"]["structuredContent"]["ok"], true);
+    assert!(!lines[1]["result"]["structuredContent"]["matches"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Plain/Markdown tool (ap_read) still populates valid structuredContent.text
+    assert_eq!(lines[2]["result"]["isError"], false);
+    assert_eq!(lines[2]["result"]["structuredContent"]["ok"], true);
+    assert!(lines[2]["result"]["structuredContent"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("compute_delta"));
+
+    // Upgraded pi-codemode-pipeline prompt mentions outputSchema & 1 MiB
+    let prompt_txt = lines[3]["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(prompt_txt.contains("outputSchema"));
+    assert!(prompt_txt.contains("1 MiB"));
+
+    // 2. Verify Pi accelerator v2.16 features + `ap doctor` httpIdleTimeoutMs & flash-auto 1M trigger
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function healEditBlock",
+        "export function findClosestEditWindow",
+        "export function countCodemodeStoreKeys",
+        "if (sub === \"review\")",
+        "[ap edit-closest]",
+        "healedEdits=",
+        "storeKeys=",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.16 feature '{needle}'");
+    }
+
+    // Default unset httpIdleTimeoutMs (300s) triggers DeepSeek KV-cache cliff recommendation
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "enabledModels": ["deepseek/deepseek-flash", "deepseek/flash-auto"],
+            "showCacheMissNotices": true,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6 },
+            "compaction": {
+                "modelOverrides": {
+                    "deepseek/deepseek-flash": { "reserveTokens": 650000, "keepRecentTokens": 64000 }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let doc1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc1.status.success());
+    let d1: Value = serde_json::from_slice(&doc1.stdout).unwrap();
+    assert_eq!(d1["pi_runtime"]["http_idle_timeout_ms"], 300000);
+    assert!(d1["pi_runtime"]["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str().unwrap_or("").contains("httpIdleTimeoutMs")));
+
+    // Switching to flash-auto + httpIdleTimeoutMs=120000 => 350k trigger & 0 recommendations!
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "flash-auto",
+            "enabledModels": ["deepseek/deepseek-flash", "deepseek/flash-auto"],
+            "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6 },
+            "compaction": {
+                "modelOverrides": {
+                    "deepseek/deepseek-flash": { "reserveTokens": 650000, "keepRecentTokens": 64000 },
+                    "deepseek/flash-auto": { "reserveTokens": 650000, "keepRecentTokens": 64000 }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let doc2 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc2.status.success());
+    let d2: Value = serde_json::from_slice(&doc2.stdout).unwrap();
+    assert_eq!(d2["pi_runtime"]["effective_compaction_trigger_tokens"], 350000);
+    assert_eq!(d2["pi_runtime"]["http_idle_timeout_ms"], 120000);
+    assert_eq!(d2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
 }

@@ -808,7 +808,7 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
 // - Native Pi v1.5 `agent_before_settle` closed-loop syntax + diff blocker gate (max 1 retry/run)
 // - Opt-in `deepseek/flash-auto` virtual model (dynamic low/high/max effort, zero cache-bust switch)
 import {{ spawnSync }} from "node:child_process";
-import {{ existsSync }} from "node:fs";
+import {{ existsSync, readFileSync }} from "node:fs";
 import {{ homedir }} from "node:os";
 import {{ isAbsolute, join, resolve }} from "node:path";
 import type {{
@@ -906,6 +906,190 @@ export function classifyShellFailureTip(
 		}}
 	}}
 	return undefined;
+}}
+
+function reindentReplacement(
+	newStr: string,
+	oldLines: readonly string[],
+	matchedDiskLines: readonly string[],
+): string {{
+	const oldFirst = oldLines.find((l) => l.trim().length > 0);
+	const diskFirst = matchedDiskLines.find((l) => l.trim().length > 0);
+	if (oldFirst === undefined || diskFirst === undefined) return newStr;
+	const oldLead = oldFirst.match(/^[ \t]*/)?.[0] ?? "";
+	const diskLead = diskFirst.match(/^[ \t]*/)?.[0] ?? "";
+	if (oldLead === diskLead) return newStr;
+	return newStr
+		.split("\n")
+		.map((line) => {{
+			if (line.trim().length === 0) return "";
+			if (oldLead.length > 0 && line.startsWith(oldLead)) {{
+				return diskLead + line.slice(oldLead.length);
+			}}
+			if (oldLead.length === 0) {{
+				return diskLead + line;
+			}}
+			return line;
+		}})
+		.join("\n");
+}}
+
+/**
+ * Proactive pre-execution indent/blank-line repair for Pi's built-in `edit` tool
+ * (complements Pi's edit-diff.js which normalizes trailing spaces/smart-quotes but not leading indent).
+ * Strictly requires a 100% unique match on disk — returns `undefined` if already valid or ambiguous.
+ */
+export function healEditBlock(
+	fileContent: string,
+	oldText: string,
+	newText: string,
+): {{ oldText: string; newText: string; strategy: string }} | undefined {{
+	if (!fileContent || !oldText) return undefined;
+	const lfFile = fileContent.replace(/\r\n/g, "\n");
+	const lfOld = oldText.replace(/\r\n/g, "\n");
+	const lfNew = newText.replace(/\r\n/g, "\n");
+	if (lfFile.includes(lfOld)) return undefined;
+	const trimEndAll = (s: string) =>
+		s
+			.split("\n")
+			.map((l) => l.trimEnd())
+			.join("\n");
+	if (trimEndAll(lfFile).includes(trimEndAll(lfOld))) return undefined;
+
+	const fileLines = lfFile.split("\n");
+	const oldLines = lfOld.split("\n");
+	const nonBlankOld = oldLines.filter((l) => l.trim().length > 0);
+	if (nonBlankOld.length === 0 || !nonBlankOld.some((l) => l.trim().length >= 4)) {{
+		return undefined;
+	}}
+
+	// Tier 1: Exact-length dedented line-block unique match (handles 2<->4 space / Tab<->space / shifted indent)
+	const n = oldLines.length;
+	const exactHits: number[] = [];
+	for (let i = 0; i <= fileLines.length - n; i++) {{
+		let ok = true;
+		for (let k = 0; k < n; k++) {{
+			if (fileLines[i + k].trim() !== oldLines[k].trim()) {{
+				ok = false;
+				break;
+			}}
+		}}
+		if (ok) {{
+			exactHits.push(i);
+			if (exactHits.length > 1) break;
+		}}
+	}}
+	if (exactHits.length === 1) {{
+		const matched = fileLines.slice(exactHits[0], exactHits[0] + n);
+		const healedOld = matched.join("\n");
+		if (healedOld !== lfOld) {{
+			return {{
+				oldText: healedOld,
+				newText: reindentReplacement(lfNew, oldLines, matched),
+				strategy: "indent-unique",
+			}};
+		}}
+	}}
+
+	// Tier 2: Blank-line-tolerant dedented unique match (requires >=2 non-blank lines)
+	if (nonBlankOld.length >= 2) {{
+		const spans: Array<[number, number]> = [];
+		const firstTrim = nonBlankOld[0].trim();
+		for (let i = 0; i < fileLines.length; i++) {{
+			if (fileLines[i].trim() !== firstTrim) continue;
+			let cur = i + 1;
+			let matchedAll = true;
+			let lastIdx = i;
+			for (let k = 1; k < nonBlankOld.length; k++) {{
+				let skippedBlanks = 0;
+				while (cur < fileLines.length && fileLines[cur].trim().length === 0 && skippedBlanks < 2) {{
+					cur++;
+					skippedBlanks++;
+				}}
+				if (cur >= fileLines.length || fileLines[cur].trim() !== nonBlankOld[k].trim()) {{
+					matchedAll = false;
+					break;
+				}}
+				lastIdx = cur;
+				cur++;
+			}}
+			if (matchedAll) {{
+				spans.push([i, lastIdx]);
+				if (spans.length > 1) break;
+			}}
+		}}
+		if (spans.length === 1) {{
+			const [s0, s1] = spans[0];
+			const matched = fileLines.slice(s0, s1 + 1);
+			const healedOld = matched.join("\n");
+			if (healedOld !== lfOld) {{
+				return {{
+					oldText: healedOld,
+					newText: reindentReplacement(lfNew, oldLines, matched),
+					strategy: "blankline-unique",
+				}};
+			}}
+		}}
+	}}
+	return undefined;
+}}
+
+/**
+ * Compute a compact numbered Top-1 closest matching line window when built-in `edit` fails,
+ * eliminating the ~47% wasted post-error full-file `read` round-trip.
+ */
+export function findClosestEditWindow(fileContent: string, oldText: string): string | undefined {{
+	if (!fileContent || !oldText) return undefined;
+	const tokenize = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9_]{{2,}}/g) ?? []);
+	const qToks = tokenize(oldText);
+	if (qToks.size < 2) return undefined;
+	const lines = fileContent.replace(/\r\n/g, "\n").split("\n");
+	if (lines.length === 0) return undefined;
+	const oldCount = oldText.replace(/\r\n/g, "\n").split("\n").length;
+	const win = Math.max(3, Math.min(14, oldCount + 2));
+	const maxScan = Math.min(lines.length, 6000);
+	const step = maxScan > 2000 ? 2 : 1;
+	let bestScore = 0;
+	let bestStart = -1;
+	for (let i = 0; i < maxScan; i += step) {{
+		const end = Math.min(lines.length, i + win);
+		const wToks = tokenize(lines.slice(i, end).join("\n"));
+		if (wToks.size === 0) continue;
+		let inter = 0;
+		for (const t of qToks) {{
+			if (wToks.has(t)) inter++;
+		}}
+		const dice = (2 * inter) / (qToks.size + wToks.size);
+		if (dice > bestScore) {{
+			bestScore = dice;
+			bestStart = i;
+		}}
+	}}
+	if (bestStart < 0 || bestScore < 0.3) return undefined;
+	const end = Math.min(lines.length, bestStart + win);
+	const body = lines
+		.slice(bestStart, end)
+		.map((l, idx) => `${{bestStart + idx + 1}}: ${{l}}`)
+		.join("\n")
+		.slice(0, 850);
+	return `[ap edit-closest] Closest lines on disk (L${{bestStart + 1}}-L${{end}}):\n${{body}}`;
+}}
+
+export function countCodemodeStoreKeys(branch: ReadonlyArray<Record<string, unknown>>): number {{
+	const keys = new Set<string>();
+	if (!Array.isArray(branch)) return 0;
+	for (const e of branch) {{
+		if (e?.type === "custom" && e.customType === "codemode-store" && e.data && typeof e.data === "object") {{
+			const d = e.data as {{ set?: Record<string, unknown>; delete?: string[] }};
+			if (d.set && typeof d.set === "object") {{
+				for (const k of Object.keys(d.set)) keys.add(k);
+			}}
+			if (Array.isArray(d.delete)) {{
+				for (const k of d.delete) keys.delete(k);
+			}}
+		}}
+	}}
+	return keys.size;
 }}
 
 export function normCmdFingerprint(raw: string): string {{
@@ -1483,6 +1667,9 @@ export default function (pi: ExtensionAPI) {{
 	let sievedCount = 0;
 	let maskedCount = 0;
 	let guardsTriggered = 0;
+	let healedEditsCount = 0;
+	let totalToolTurns = 0;
+	let serialSingleTotalTurns = 0;
 
 	const resetRunState = () => {{
 		editedFilesThisRun.clear();
@@ -1619,6 +1806,9 @@ export default function (pi: ExtensionAPI) {{
 		sievedCount = 0;
 		maskedCount = 0;
 		guardsTriggered = 0;
+		healedEditsCount = 0;
+		totalToolTurns = 0;
+		serialSingleTotalTurns = 0;
 		updateHud(ctx);
 	}});
 
@@ -1664,13 +1854,14 @@ export default function (pi: ExtensionAPI) {{
 	// Zero-prompt-token interactive `/ap` command inside Pi (`/ap`, `status`, `doctor`, `compact`, `handoff <goal>`)
 	if (typeof pi.registerCommand === "function") {{
 		pi.registerCommand("ap", {{
-			description: "Live ap + DeepSeek KV-cache telemetry, doctor, focused compact, or clean-session handoff",
+			description: "Live ap + DeepSeek KV-cache telemetry, doctor, focused compact, clean-session handoff, or independent diff review",
 			getArgumentCompletions(prefix: string) {{
 				const items = [
-					{{ value: "status", label: "status — Live KV-cache, masking & guard telemetry" }},
+					{{ value: "status", label: "status — Live KV-cache, masking, edit-heal & codemode-store telemetry" }},
 					{{ value: "doctor", label: "doctor — Run native ap doctor health check" }},
 					{{ value: "compact", label: "compact — Compact while anchoring verified facts & dead-ends" }},
 					{{ value: "handoff ", label: "handoff <goal> — Transfer context cleanly to a fresh 0-rot session" }},
+					{{ value: "review", label: "review [focus] — Independent clean-context diff review (0 parent bloat)" }},
 				];
 				const p = (prefix || "").trim().toLowerCase();
 				return p ? items.filter((it) => it.value.trim().startsWith(p)) : items;
@@ -1804,6 +1995,98 @@ export default function (pi: ExtensionAPI) {{
 					}}
 					return;
 				}}
+				if (sub === "review") {{
+					if (!ctx.model) {{
+						ctx.ui.notify("[ap review] No active model selected.", "error");
+						return;
+					}}
+					const cwd = ctx.cwd || process.cwd();
+					if (!existsSync(join(cwd, ".git"))) {{
+						ctx.ui.notify("[ap review] Current directory is not a Git repository.", "warning");
+						return;
+					}}
+					let diffText = "";
+					const d1 = spawnSync("git", ["diff", "HEAD"], {{
+						cwd,
+						encoding: "utf8",
+						timeout: 4000,
+						windowsHide: true,
+					}});
+					if (d1.status === 0 && d1.stdout?.trim()) {{
+						diffText = d1.stdout.trim();
+					}} else {{
+						const d2 = spawnSync("git", ["diff", "HEAD~1..HEAD"], {{
+							cwd,
+							encoding: "utf8",
+							timeout: 4000,
+							windowsHide: true,
+						}});
+						if (d2.status === 0 && d2.stdout?.trim()) {{
+							diffText = d2.stdout.trim();
+						}}
+					}}
+					if (!diffText) {{
+						ctx.ui.notify("[ap review] No uncommitted or HEAD~1 diff found to review.", "info");
+						return;
+					}}
+					let guardSummary = "";
+					const gd = spawnSync(AP_BIN, ["guard", "diff", "--json", cwd], {{
+						cwd,
+						encoding: "utf8",
+						timeout: 3000,
+						windowsHide: true,
+					}});
+					if (gd.status === 0 && gd.stdout?.trim()) {{
+						guardSummary = `\n\n## Automated ap guard diff Findings\n${{gd.stdout.trim().slice(0, 3000)}}`;
+					}}
+					ctx.ui.notify("[ap review] Running isolated skeptical diff review (0 parent context bloat)...", "info");
+					try {{
+						const focusLine = rest ? `\n\n## Specific Review Focus\n${{rest}}` : "";
+						const response = await ctx.modelRegistry.complete(
+							ctx.model,
+							{{
+								systemPrompt:
+									"You are an independent, skeptical senior code reviewer seeing this Git diff with fresh eyes (zero bias from the author). Identify ONLY concrete, verified defects: logic bugs, edge cases, regressions, missing error handling, concurrency/resource leaks, or skipped/weak tests. Cite exact file:line. If the diff is solid, say LGTM concisely.",
+								messages: [
+									{{
+										role: "user",
+										content: [
+											{{
+												type: "text",
+												text: `## Git Diff\n\`\`\`diff\n${{diffText.slice(0, 24000)}}\n\`\`\`${{guardSummary}}${{focusLine}}`,
+											}},
+										],
+										timestamp: Date.now(),
+									}},
+								],
+							}},
+							{{
+								reasoning: "high",
+								cacheRetention: "none",
+							}},
+						);
+						const report = response.content
+							.filter((c): c is {{ type: "text"; text: string }} => c.type === "text")
+							.map((c) => c.text)
+							.join("\n")
+							.trim();
+						if (!report) {{
+							ctx.ui.notify("[ap review] Reviewer returned empty response.", "warning");
+							return;
+						}}
+						if (typeof ctx.ui.editor === "function") {{
+							await ctx.ui.editor("Independent /ap review findings (Esc to close)", report);
+						}} else {{
+							ctx.ui.notify(report.slice(0, 2000), "info");
+						}}
+					}} catch (err) {{
+						ctx.ui.notify(
+							`[ap review] Failed: ${{err instanceof Error ? err.message : String(err)}}`,
+							"error",
+						);
+					}}
+					return;
+				}}
 
 				const usage = ctx.getContextUsage?.();
 				const totalPrompt = sessionInputTokens + sessionCacheReadTokens;
@@ -1816,8 +2099,12 @@ export default function (pi: ExtensionAPI) {{
 						? `${{Math.round(usage.tokens / 1000)}}k (${{Math.round(usage.percent ?? 0)}}%)`
 						: "n/a";
 				const modelStr = ctx.model ? `${{ctx.model.provider}}/${{ctx.model.id}}` : "unknown";
+				const serialPct =
+					totalToolTurns > 0 ? `${{Math.round((serialSingleTotalTurns / totalToolTurns) * 100)}}%` : "n/a";
+				const branch = ctx.sessionManager?.getBranch?.() ?? [];
+				const storeKeys = countCodemodeStoreKeys(branch as unknown as Array<Record<string, unknown>>);
 				ctx.ui.notify(
-					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} guarded=${{guardsTriggered}}`,
+					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} healedEdits=${{healedEditsCount}} guarded=${{guardsTriggered}} | serial1=${{serialPct}} storeKeys=${{storeKeys}}`,
 					"info",
 				);
 			}},
@@ -1921,6 +2208,10 @@ export default function (pi: ExtensionAPI) {{
 				consecutiveLightTurns += 1;
 			}} else {{
 				consecutiveLightTurns = 0;
+			}}
+			if (toolCallCount > 0) {{
+				totalToolTurns += 1;
+				if (toolCallCount === 1) serialSingleTotalTurns += 1;
 			}}
 			if (toolCallCount === 1 && SERIAL_BATCHABLE_TOOLS.has(singleToolName) && !didEdit) {{
 				serialSingleToolTurns += 1;
@@ -2104,13 +2395,57 @@ export default function (pi: ExtensionAPI) {{
 		}};
 	}});
 
-	pi.on("tool_call", (event) => {{
+	pi.on("tool_call", (event, ctx) => {{
 		const baseTool = event.toolName.replace(/^mcp__agent_primitives__/, "");
 		if (EDIT_TOOLS.has(baseTool)) {{
 			recentShellFps.length = 0;
 			unchangedReads.clear();
 			stagnantHeavyTurns = 0;
 			pendingThinkingNudge = false;
+
+			// Proactive <1ms pre-execution indent/blank-line repair for Pi built-in `edit` (pi-edit-guard pattern)
+			if (event.toolName === "edit" && event.input && typeof event.input === "object") {{
+				const inp = event.input as {{
+					path?: string;
+					file_path?: string;
+					oldText?: string;
+					newText?: string;
+					edits?: Array<{{ oldText?: string; newText?: string }}>;
+				}};
+				const rawPath = String(inp.path ?? inp.file_path ?? "").trim();
+				if (rawPath) {{
+					const cwd = ctx?.cwd || process.cwd();
+					const absPath = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+					if (existsSync(absPath)) {{
+						try {{
+							const content = readFileSync(absPath, "utf8");
+							if (content.length <= 2_000_000) {{
+								if (Array.isArray(inp.edits)) {{
+									for (const item of inp.edits) {{
+										if (typeof item?.oldText === "string" && typeof item?.newText === "string") {{
+											const fixed = healEditBlock(content, item.oldText, item.newText);
+											if (fixed) {{
+												item.oldText = fixed.oldText;
+												item.newText = fixed.newText;
+												healedEditsCount += 1;
+											}}
+										}}
+									}}
+								}} else if (typeof inp.oldText === "string" && typeof inp.newText === "string") {{
+									const fixed = healEditBlock(content, inp.oldText, inp.newText);
+									if (fixed) {{
+										inp.oldText = fixed.oldText;
+										inp.newText = fixed.newText;
+										healedEditsCount += 1;
+									}}
+								}}
+							}}
+						}} catch {{
+							// ignore unreadable/binary files
+						}}
+					}}
+				}}
+			}}
 			return undefined;
 		}}
 		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
@@ -2169,9 +2504,38 @@ export default function (pi: ExtensionAPI) {{
 			}}
 		}}
 
-		// B. Built-in `edit` error self-healing tip (guides DeepSeek straight to fuzzy/AST recovery)
+		// B. Built-in `edit` error self-healing tip + Top-1 closest line window from disk (cuts ~47% re-reads)
 		if (event.toolName === "edit" && event.isError) {{
-			outText += `\n[ap edit-tip] Patch target missed; use ap_edit (4-tier indentation/blank-line fuzzy match + AST symbols) or ap splice view for exact lines.`;
+			let closestSnippet = "";
+			const inp = event.input as {{
+				path?: string;
+				file_path?: string;
+				oldText?: string;
+				edits?: Array<{{ oldText?: string }}>;
+			}} | undefined;
+			const rawPath = String(inp?.path ?? inp?.file_path ?? "").trim();
+			const targetOld =
+				typeof inp?.oldText === "string"
+					? inp.oldText
+					: Array.isArray(inp?.edits)
+						? inp.edits.find((e) => typeof e?.oldText === "string" && e.oldText.trim().length > 0)?.oldText ?? ""
+						: "";
+			if (rawPath && targetOld) {{
+				const cwd = ctx?.cwd || process.cwd();
+				const absPath = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+				if (existsSync(absPath)) {{
+					try {{
+						const content = readFileSync(absPath, "utf8");
+						if (content.length <= 2_000_000) {{
+							const win = findClosestEditWindow(content, targetOld);
+							if (win) closestSnippet = `\n${{win}}`;
+						}}
+					}} catch {{
+						// ignore unreadable file
+					}}
+				}}
+			}}
+			outText += `${{closestSnippet}}\n[ap edit-tip] Patch target missed; use the exact lines above, ap_edit (4-tier fuzzy + AST symbols), or ap splice view.`;
 			mutated = true;
 		}}
 
@@ -2965,6 +3329,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("shouldAutoSieveShellOutput")
                 && s.contains("classifyShellFailureTip")
                 && s.contains("sessionTurnCount")
+                && s.contains("healEditBlock")
+                && s.contains("findClosestEditWindow")
+                && s.contains("countCodemodeStoreKeys")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
@@ -3023,6 +3390,15 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                         .and_then(|mo| mo.get(dm))
                         .and_then(|ov| ov.get("reserveTokens"))
                 })
+                .or_else(|| {
+                    if default_model.as_deref() == Some("deepseek/flash-auto") {
+                        v.pointer("/compaction/modelOverrides")
+                            .and_then(|mo| mo.get("deepseek/deepseek-flash"))
+                            .and_then(|ov| ov.get("reserveTokens"))
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| v.pointer("/compaction/reserveTokens"))
         })
         .and_then(Value::as_u64);
@@ -3045,6 +3421,20 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         .as_ref()
         .and_then(|v| v.pointer("/retry/maxRetries"))
         .and_then(Value::as_u64);
+    // Pi v1.5 default is 300_000ms (5 min); "disabled" => 0
+    let http_idle_timeout_ms: u64 = settings_json
+        .as_ref()
+        .and_then(|v| v.get("httpIdleTimeoutMs"))
+        .map(|v| {
+            if let Some(n) = v.as_u64() {
+                n
+            } else if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("disabled")) {
+                0
+            } else {
+                300_000
+            }
+        })
+        .unwrap_or(300_000);
 
     let models_json = fs::read_to_string(pi_agent.join("models.json"))
         .ok()
@@ -3099,8 +3489,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
     }
 
     let effective_compaction_trigger_tokens = if is_deepseek
-        && default_model_id.as_deref() == Some("deepseek-flash")
-    {
+        && matches!(
+            default_model_id.as_deref(),
+            Some("deepseek-flash") | Some("flash-auto")
+        ) {
         compaction_reserve_tokens.map(|r| 1_000_000u64.saturating_sub(r))
     } else {
         None
@@ -3126,6 +3518,12 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 .to_string(),
         );
     }
+    if is_deepseek && (http_idle_timeout_ms == 0 || http_idle_timeout_ms > 150_000) {
+        recommendations.push(
+            "Set `\"httpIdleTimeoutMs\": 120000` in ~/.pi/agent/settings.json (default 300s lets stalled TCP streams cross DeepSeek's 2-5m KV-cache eviction cliff before retrying)."
+                .to_string(),
+        );
+    }
 
     json!({
         "detected": true,
@@ -3139,6 +3537,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "show_cache_miss_notices": show_cache_miss_notices,
         "flash_auto_enabled": flash_auto_enabled,
         "retry_max_retries": retry_max_retries,
+        "http_idle_timeout_ms": http_idle_timeout_ms,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
         "hints": hints,
         "recommendations": recommendations,
