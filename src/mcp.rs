@@ -2318,6 +2318,13 @@ fn mcp_prompts_list() -> Value {
             "arguments": [
                 { "name": "task", "description": "Software engineering objective", "required": true }
             ]
+        },
+        {
+            "name": "pi-codemode-pipeline",
+            "description": "Parallel QuickJS codemode pattern for Pi v1.5+ & DeepSeek Flash: collapse 5-8 serial discovery turns into 1 Promise.allSettled batch, filter large payloads in-sandbox, and persist branch state with store()/load()",
+            "arguments": [
+                { "name": "task", "description": "Engineering task or investigation goal", "required": true }
+            ]
         }
     ])
 }
@@ -2395,6 +2402,23 @@ fn get_mcp_prompt(name: &str, args: &Value) -> Result<Value, String> {
                     "content": {
                         "type": "text",
                         "text": format!("Complete `{task}` with concise, high-signal tool steps:\n1. Call `ap_orient` once (do not repeatedly re-read unchanged files).\n2. Batch parallel discovery with `ap_search(patterns=[...])` or `ap_locate`.\n3. Commit to one atomic `ap_edit` (or `ap_rename` for refactors) with `run_tests=true` rather than spending >2 turns deliberating.\n4. Finish with `ap_diff_audit` + `ap_verify` and summarize verified results.")
+                    }
+                }]
+            }))
+        }
+        "pi-codemode-pipeline" => {
+            let task = args
+                .get("task")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "Missing required argument `task`".to_string())?;
+            Ok(json!({
+                "description": "Parallel QuickJS codemode execution blueprint for Pi v1.5+ and DeepSeek Flash",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!("Execute `{task}` inside Pi `codemode` in minimal turns while protecting DeepSeek KV-cache:\n1. Batch discovery in ONE `codemode` call via `Promise.allSettled([tools.mcp__agent_primitives__ap_orient({{}}), tools.mcp__agent_primitives__ap_search({{patterns:[...]}}), tools.mcp__agent_primitives__ap_read({{targets:[...], outline:true}})])`.\n2. Filter/slice noisy results inside QuickJS and `return` only compact structured findings (<2KB); persist key cursors/plans across calls with `store('plan', ...)` / `load('plan')`.\n3. Apply changes atomically via `tools.mcp__agent_primitives__ap_edit` (or `ap_rename`) with `run_tests: true`.\n4. Finish with `ap_changes` + `ap_diff_audit` + `ap_verify` in one final verification script.")
                     }
                 }]
             }))

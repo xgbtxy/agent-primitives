@@ -4665,3 +4665,94 @@ fn test_v210_pi_native_context_edit_masking_and_doctor_pi_audit() {
     assert_eq!(daj["pi_runtime"]["mcp_codemode_wired"], true);
     assert_eq!(daj["pi_runtime"]["hints"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_v211_pi_settle_gate_virtual_effort_router_and_codemode_prompt() {
+    use serde_json::json;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let fake_home = root.join("fake_home_v211");
+    let ap_home = root.join("ap_v211_home");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(pi_agent.join("extensions")).unwrap();
+
+    // 1. Verify v2.10 accelerator is flagged as stale under v2.11 doctor check
+    fs::write(
+        pi_agent.join("extensions").join("zz-ap-accelerator.ts"),
+        "// v2.10 stub\nexport function planObservationMasking() {}\nexport function extractDsmlToolCalls() {}\n// session_before_compact\n",
+    )
+    .unwrap();
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let doc_v210 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc_v210.status.success());
+    let d10: Value = serde_json::from_slice(&doc_v210.stdout).unwrap();
+    assert_eq!(d10["pi_runtime"]["accelerator_up_to_date"], false);
+
+    // 2. Install v2.11 Pi accelerator and inspect all new native primitives
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function classifyDeepSeekEffort",
+        "export function routeDeepSeekFlashEffort",
+        "export function filterSettleDiffBlockers",
+        "pi.registerVirtualModel",
+        "id: \"flash-auto\"",
+        "pi.on(\"agent_before_settle\"",
+        "customType: \"ap-settle-gate\"",
+        "CACHE DROP",
+        "Promise.allSettled",
+    ] {
+        // Promise.allSettled lives in mcp.json description, rest in zz-ap-accelerator.ts
+        if needle == "Promise.allSettled" {
+            let mcp_txt = fs::read_to_string(pi_agent.join("mcp.json")).unwrap();
+            assert!(mcp_txt.contains(needle), "Missing {needle} in mcp.json");
+        } else {
+            assert!(
+                accel_ts.contains(needle),
+                "Missing expected v2.11 symbol/hook '{needle}' in zz-ap-accelerator.ts"
+            );
+        }
+    }
+
+    // 3. Verify 5th MCP prompt `pi-codemode-pipeline`
+    let mcp_in = format!(
+        "{}\n{}\n",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": {"name": "pi-codemode-pipeline", "arguments": {"task": "refactor parser"}}})
+    );
+    let mcp_out = run_ap(root, &["mcp"], Some(&mcp_in), &env_vars);
+    assert!(mcp_out.status.success());
+    let resps: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(resps.len(), 2);
+    let prompts = resps[0]["result"]["prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 5);
+    assert!(prompts.iter().any(|p| p["name"] == "pi-codemode-pipeline"));
+    let prompt_txt = resps[1]["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(prompt_txt.contains("Promise.allSettled") && prompt_txt.contains("store("));
+}

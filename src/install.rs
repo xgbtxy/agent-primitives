@@ -776,7 +776,7 @@ fn merge_pi_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
             "command": ap_bin_posix,
             "args": ["mcp"],
             "exposure": "codemode",
-            "description": "Fast Pure-Rust MCP 2025-06-18 (34 annotated tools, Resources, Prompts): AST ap_read (--symbol/--outline/batch), parallel ap_search (-l/-c/-C), ap_edit/ap_rename, ap_orient/ap_impact/ap_changes/ap_locate/ap_trace, ap_query (named records), ap_sieve (compiler/test/diff), ap_baton/ap_recall & CDP/HTTP/TCP/WS/TLS probes"
+            "description": "Fast Pure-Rust MCP 2025-06-18 (34 annotated tools, Resources, Prompts; batch via Promise.allSettled in codemode): AST ap_read (--symbol/--outline/batch), parallel ap_search (-l/-c/-C), ap_edit/ap_rename, ap_orient/ap_impact/ap_changes/ap_locate/ap_trace, ap_query (named records), ap_sieve (compiler/test/diff), ap_baton/ap_recall & CDP/HTTP/TCP/WS/TLS probes"
         }),
     );
     if let Some(p) = cfg_path.parent() {
@@ -804,13 +804,16 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
 // - Breaks 3x shell doom-loops, 3x unchanged file re-reads & 3-turn heavy-thinking stalls
 // - Recovers leaked DSML XML tool blocks when 0 native tool calls were emitted (zero conflict)
 // - Self-healing tips for `edit` misses, `codemode` errors & giant code `read` calls
-// - Auto-checkpoints `.baton/` on compaction (only if `.baton` already exists) + token-aware TUI HUD
+// - Auto-checkpoints `.baton/` on compaction (only if `.baton` already exists) + live KV-cache HUD
+// - Native Pi v1.5 `agent_before_settle` closed-loop syntax + diff blocker gate (max 1 retry/run)
+// - Opt-in `deepseek/flash-auto` virtual model (dynamic low/high/max effort, zero cache-bust switch)
 import {{ spawnSync }} from "node:child_process";
 import {{ existsSync }} from "node:fs";
 import {{ homedir }} from "node:os";
-import {{ join }} from "node:path";
+import {{ isAbsolute, join, resolve }} from "node:path";
 import type {{
 	ContextEditEntryDraft,
+	CustomMessageEntryDraft,
 	ExtensionAPI,
 	ExtensionContext,
 	ProjectedSessionEntry,
@@ -1087,24 +1090,266 @@ export function planObservationMasking(
 	return {{ edits, maskedCount: edits.length, reclaimedChars, reason }};
 }}
 
+export type DeepSeekEffort = "low" | "high" | "max";
+
+const COMPLEX_PROMPT_RE =
+	/\b(?:architect|architecture|refactor|redesign|concurrency|deadlock|race\s+condition|root\s+cause|debug|diagnose|profil|optimiz|benchmark|migrat|multi[- ]file|security|audit|algorithm|compil|memory\s+leak)\b|架构|重构|并发|死锁|根因|排查|定位|性能|优化|基准|迁移|跨文件|深度|设计|算法|泄漏/i;
+const SIMPLE_PROMPT_RE =
+	/^(?:hi|hello|hey|ok|okay|thanks|thank you|yes|no|continue|go|lgtm|commit|push|status|git status|format|lint|run tests?|你好|继续|好的|谢谢|提交|推送|跑测试|看状态)\b[\s!.。？?]*$/i;
+const BLOCKER_DIFF_KINDS = new Set([
+	"SECRET-ADDED",
+	"TEST-SKIPPED",
+	"INCOMPLETE-STUB",
+	"DEBUG-LEFTOVER",
+]);
+const CHECKABLE_CODE_EXT = /\.(?:rs|ts|tsx|js|jsx|mjs|cjs|py|go|c|cc|cpp|h|hpp|json|jsonc|toml)$/i;
+
+/**
+ * Deterministic <0.1ms effort selector for DeepSeek V4.1 Flash (`low` / `high` / `max`).
+ * Avoids burning max-effort overthinking on trivial turns while preserving deep reasoning for complex work.
+ */
+export function classifyDeepSeekEffort(
+	userText: string,
+	ceiling: DeepSeekEffort = "max",
+): DeepSeekEffort {{
+	if (ceiling === "low") return "low";
+	const trimmed = (userText || "").trim();
+	if (!trimmed) return "low";
+	if (trimmed.length <= 80 && SIMPLE_PROMPT_RE.test(trimmed)) return "low";
+	const hasCodeBlock = trimmed.includes("```") || trimmed.includes("Error:") || trimmed.includes("Traceback");
+	const lineCount = trimmed.split("\n").length;
+	if (
+		trimmed.length >= 240 ||
+		lineCount >= 6 ||
+		hasCodeBlock ||
+		COMPLEX_PROMPT_RE.test(trimmed)
+	) {{
+		return ceiling === "max" ? "max" : "high";
+	}}
+	if (trimmed.length <= 45 && !/[?？]/.test(trimmed)) return "low";
+	return "high";
+}}
+
+export interface DeepSeekRouteInput {{
+	reason: "user" | "continuation" | "retry" | "direct";
+	selectedLevel?: string;
+	previousLevel?: string;
+	userText?: string;
+	recentToolErrors?: number;
+	recentToolSuccessesAfterEdit?: number;
+	stagnantHeavyTurns?: number;
+}}
+
+function clampDeepSeekEffort(raw?: string): DeepSeekEffort {{
+	if (raw === "low" || raw === "minimal" || raw === "off") return "low";
+	if (raw === "max" || raw === "xhigh") return "max";
+	return "high";
+}}
+
+/**
+ * KV-cache-friendly dynamic reasoning-effort router staying strictly on the SAME physical
+ * `deepseek-flash` model (zero provider switch, 100% `reasoning_content` continuity).
+ */
+export function routeDeepSeekFlashEffort(input: DeepSeekRouteInput): {{
+	thinkingLevel: DeepSeekEffort;
+	phase: string;
+}} {{
+	const ceiling = clampDeepSeekEffort(input.selectedLevel);
+	if (input.reason === "direct") {{
+		return {{ thinkingLevel: "low", phase: "direct-summary" }};
+	}}
+	const prev = input.previousLevel ? clampDeepSeekEffort(input.previousLevel) : ceiling;
+	if (input.reason === "retry") {{
+		const next: DeepSeekEffort = prev === "low" ? "high" : "max";
+		return {{ thinkingLevel: next, phase: "retry-escalate" }};
+	}}
+	if (input.reason === "user") {{
+		const chosen = classifyDeepSeekEffort(input.userText ?? "", ceiling);
+		return {{ thinkingLevel: chosen, phase: `user-${{chosen}}` }};
+	}}
+	// continuation: sticky by default, escalate on repeated tool errors, cool down on overthinking stalls
+	if ((input.recentToolErrors ?? 0) >= 2) {{
+		const next: DeepSeekEffort = prev === "low" ? "high" : "max";
+		return {{ thinkingLevel: next, phase: "error-escalate" }};
+	}}
+	if (
+		prev === "max" &&
+		((input.stagnantHeavyTurns ?? 0) >= 3 || (input.recentToolSuccessesAfterEdit ?? 0) >= 2)
+	) {{
+		return {{ thinkingLevel: "high", phase: "cool-down" }};
+	}}
+	return {{ thinkingLevel: prev, phase: "sticky" }};
+}}
+
+export interface DiffFindingItem {{
+	kind?: string;
+	file?: string;
+	detail?: string;
+}}
+
+function normRelPath(p: string, cwd?: string): string {{
+	const clean = p.replace(/\\/g, "/").replace(/^\.\//, "");
+	if (cwd) {{
+		const base = cwd.replace(/\\/g, "/").replace(/\/+$/, "") + "/";
+		if (clean.toLowerCase().startsWith(base.toLowerCase())) {{
+			return clean.slice(base.length);
+		}}
+	}}
+	return clean;
+}}
+
+/**
+ * Filter `ap guard diff --json` findings strictly to high-precision blockers inside files
+ * edited during this agent run (eliminating false positives from pre-existing dirty files).
+ */
+export function filterSettleDiffBlockers(
+	findings: readonly DiffFindingItem[],
+	editedFiles: ReadonlySet<string>,
+	cwd?: string,
+): string[] {{
+	if (!Array.isArray(findings) || findings.length === 0 || editedFiles.size === 0) return [];
+	const normEdited = new Set<string>();
+	for (const f of editedFiles) {{
+		const rel = normRelPath(f, cwd).toLowerCase();
+		if (rel) normEdited.add(rel);
+	}}
+	const out: string[] = [];
+	for (const item of findings) {{
+		const kind = String(item?.kind ?? "");
+		if (!BLOCKER_DIFF_KINDS.has(kind)) continue;
+		const file = normRelPath(String(item?.file ?? ""), cwd);
+		if (!file) continue;
+		const low = file.toLowerCase();
+		const touched =
+			normEdited.has(low) ||
+			[...normEdited].some((e) => e.endsWith(`/${{low}}`) || low.endsWith(`/${{e}}`));
+		if (!touched) continue;
+		out.push(`- [${{kind}}] ${{file}}: ${{String(item?.detail ?? "").slice(0, 160)}}`);
+	}}
+	return out.slice(0, 6);
+}}
+
+function extractEditedPathsFromTool(toolName: string, input: Record<string, unknown> | undefined): string[] {{
+	if (!input) return [];
+	const out: string[] = [];
+	const pushStr = (v: unknown) => {{
+		if (typeof v === "string" && v.trim()) out.push(v.trim());
+	}};
+	if (toolName === "write" || toolName === "edit") {{
+		pushStr(input.path ?? input.file_path);
+	}} else if (toolName === "ap_edit") {{
+		for (const key of ["writes", "edits", "appends", "symbols"]) {{
+			const arr = input[key];
+			if (Array.isArray(arr)) {{
+				for (const item of arr) {{
+					if (item && typeof item === "object") pushStr((item as {{ path?: unknown }}).path);
+				}}
+			}}
+		}}
+	}}
+	return out;
+}}
+
 export default function (pi: ExtensionAPI) {{
 	const recentShellFps: string[] = [];
 	const unchangedReads = new Map<string, number>();
+	const editedFilesThisRun = new Set<string>();
+	const builtInCodeEditsThisRun = new Set<string>();
+	let settleGateFiredThisRun = false;
 	let stagnantHeavyTurns = 0;
 	let pendingThinkingNudge = false;
 	let largeReadTipShown = false;
 	let lastMaskTurn = -MASK_COOLDOWN_TURNS;
+	let expectedCacheReset = false;
+	let sessionInputTokens = 0;
+	let sessionCacheReadTokens = 0;
+	let lastCacheDropPct: number | null = null;
 	let sievedCount = 0;
 	let maskedCount = 0;
 	let guardsTriggered = 0;
 
+	const resetRunState = () => {{
+		editedFilesThisRun.clear();
+		builtInCodeEditsThisRun.clear();
+		settleGateFiredThisRun = false;
+	}};
+
 	const resetTransientState = () => {{
 		recentShellFps.length = 0;
 		unchangedReads.clear();
+		resetRunState();
 		stagnantHeavyTurns = 0;
 		pendingThinkingNudge = false;
 		lastMaskTurn = -MASK_COOLDOWN_TURNS;
+		lastCacheDropPct = null;
 	}};
+
+	// Opt-in Pi v1.5 virtual model: `deepseek/flash-auto` (same physical deepseek-flash, dynamic low/high/max effort)
+	if (typeof pi.registerVirtualModel === "function") {{
+		pi.registerVirtualModel<{{ phase: string; lastEffort: DeepSeekEffort }}>({{
+			provider: "deepseek",
+			id: "flash-auto",
+			name: "DeepSeek Flash Auto-Effort (ap)",
+			thinkingLevels: ["low", "high", "max"],
+			contextWindow: 1000000,
+			maxTokens: 384000,
+			input: ["text", "image"],
+			route(request, ctx) {{
+				const physical =
+					ctx.modelRegistry.find("deepseek", "deepseek-flash") ?? request.previous?.model;
+				if (!physical) {{
+					throw new Error("Physical model deepseek/deepseek-flash not found in Pi model registry");
+				}}
+				let userText = "";
+				let recentToolErrors = 0;
+				let recentToolSuccessesAfterEdit = 0;
+				if (Array.isArray(request.messages)) {{
+					for (let i = request.messages.length - 1; i >= 0; i--) {{
+						const m = request.messages[i] as {{
+							role?: string;
+							content?: string | Array<{{ type?: string; text?: string }}>;
+							isError?: boolean;
+						}};
+						if (m.role === "user") {{
+							if (typeof m.content === "string") userText = m.content;
+							else if (Array.isArray(m.content)) {{
+								userText = m.content
+									.filter((b) => b?.type === "text" && typeof b.text === "string")
+									.map((b) => b.text as string)
+									.join("\n");
+							}}
+							break;
+						}}
+						if (m.role === "toolResult") {{
+							if (m.isError) recentToolErrors += 1;
+							else if (editedFilesThisRun.size > 0) recentToolSuccessesAfterEdit += 1;
+						}}
+					}}
+				}}
+				const decision = routeDeepSeekFlashEffort({{
+					reason: request.reason,
+					selectedLevel: request.thinkingLevel,
+					previousLevel: request.previous?.thinkingLevel ?? request.state?.lastEffort,
+					userText,
+					recentToolErrors,
+					recentToolSuccessesAfterEdit,
+					stagnantHeavyTurns,
+				}});
+				const nextState =
+					request.reason === "direct"
+						? undefined
+						: request.state?.phase === decision.phase &&
+								request.state?.lastEffort === decision.thinkingLevel
+							? request.state
+							: {{ phase: decision.phase, lastEffort: decision.thinkingLevel }};
+				return {{
+					model: physical,
+					thinkingLevel: decision.thinkingLevel,
+					state: nextState,
+				}};
+			}},
+		}});
+	}}
 
 	const updateHud = (ctx?: ExtensionContext) => {{
 		if (!ctx || !ctx.hasUI) return;
@@ -1113,6 +1358,13 @@ export default function (pi: ExtensionAPI) {{
 		const tok = typeof usage?.tokens === "number" ? usage.tokens : null;
 		const tokLabel = tok !== null ? `${{Math.round(tok / 1000)}}k` : null;
 		const parts: string[] = [];
+		const totalPrompt = sessionInputTokens + sessionCacheReadTokens;
+		if (lastCacheDropPct !== null) {{
+			parts.push(`CACHE DROP ${{lastCacheDropPct}}%`);
+		}} else if (totalPrompt >= 10000) {{
+			const hitPct = Math.round((sessionCacheReadTokens / totalPrompt) * 100);
+			parts.push(`cache ${{hitPct}}%`);
+		}}
 		if (sievedCount > 0) parts.push(`${{sievedCount}} sieved`);
 		if (maskedCount > 0) parts.push(`${{maskedCount}} masked`);
 		if (guardsTriggered > 0) parts.push(`${{guardsTriggered}} guarded`);
@@ -1138,19 +1390,30 @@ export default function (pi: ExtensionAPI) {{
 	pi.on("session_start", (_event, ctx) => {{
 		resetTransientState();
 		largeReadTipShown = false;
+		sessionInputTokens = 0;
+		sessionCacheReadTokens = 0;
+		expectedCacheReset = false;
 		sievedCount = 0;
 		maskedCount = 0;
 		guardsTriggered = 0;
 		updateHud(ctx);
 	}});
 
+	pi.on("agent_start", () => {{
+		resetRunState();
+	}});
+
 	pi.on("session_before_switch", () => {{
 		resetTransientState();
 		largeReadTipShown = false;
+		sessionInputTokens = 0;
+		sessionCacheReadTokens = 0;
+		expectedCacheReset = false;
 	}});
 
 	pi.on("session_compact", (_event, ctx) => {{
 		resetTransientState();
+		expectedCacheReset = true;
 		updateHud(ctx);
 	}});
 
@@ -1210,8 +1473,25 @@ export default function (pi: ExtensionAPI) {{
 		const msg = event.message as {{
 			role?: string;
 			content?: Array<{{ type?: string; thinking?: string; name?: string }}>;
+			usage?: {{ input?: number; cacheRead?: number }};
 		}} | undefined;
 		if (msg?.role === "assistant" && Array.isArray(msg.content)) {{
+			// Live DeepSeek 50x KV-cache hit-rate telemetry & unexpected drop alarm
+			const uIn = typeof msg.usage?.input === "number" ? msg.usage.input : 0;
+			const uCache = typeof msg.usage?.cacheRead === "number" ? msg.usage.cacheRead : 0;
+			const turnPrompt = uIn + uCache;
+			if (turnPrompt > 0) {{
+				sessionInputTokens += uIn;
+				sessionCacheReadTokens += uCache;
+				const turnHitPct = Math.round((uCache / turnPrompt) * 100);
+				if (turnPrompt >= 20000 && turnHitPct < 45 && !expectedCacheReset) {{
+					lastCacheDropPct = turnHitPct;
+				}} else if (turnHitPct >= 60) {{
+					lastCacheDropPct = null;
+				}}
+				expectedCacheReset = false;
+			}}
+
 			let thinkChars = 0;
 			let didEdit = false;
 			for (const blk of msg.content) {{
@@ -1249,6 +1529,7 @@ export default function (pi: ExtensionAPI) {{
 			if (plan.edits.length > 0) {{
 				lastMaskTurn = turnIdx;
 				maskedCount += plan.maskedCount;
+				expectedCacheReset = true;
 				updateHud(ctx);
 				return {{
 					entries: [...(event.entries ?? []), ...plan.edits],
@@ -1260,8 +1541,91 @@ export default function (pi: ExtensionAPI) {{
 		return undefined;
 	}});
 
+	pi.on("agent_before_settle", (event, ctx) => {{
+		if (event.outcome !== "completed" || settleGateFiredThisRun || editedFilesThisRun.size === 0) {{
+			return undefined;
+		}}
+		const cwd = ctx?.cwd;
+		if (!cwd) return undefined;
+
+		const blockers: string[] = [];
+
+		// 1. Fast (<15ms) Tree-sitter/JSON/TOML syntax check on code files edited via built-in write/edit
+		for (const rawPath of [...builtInCodeEditsThisRun].slice(0, 6)) {{
+			if (!CHECKABLE_CODE_EXT.test(rawPath)) continue;
+			const absPath = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+			if (!existsSync(absPath)) continue;
+			const chk = spawnSync(AP_BIN, ["splice", "check", "--json", absPath], {{
+				cwd,
+				encoding: "utf8",
+				timeout: 2500,
+				windowsHide: true,
+			}});
+			if (chk.stdout && chk.stdout.trim().startsWith("{{")) {{
+				try {{
+					const parsed = JSON.parse(chk.stdout) as {{
+						ok?: boolean;
+						issues?: Array<string | {{ file?: string; line?: number; message?: string; detail?: string }}>;
+					}};
+					if (parsed.ok === false && Array.isArray(parsed.issues)) {{
+						for (const iss of parsed.issues.slice(0, 3)) {{
+							const msg =
+								typeof iss === "string"
+									? iss
+									: `${{iss.file ?? normRelPath(rawPath, cwd)}}${{iss.line ? `:${{iss.line}}` : ""}} ${{iss.message ?? iss.detail ?? "syntax error"}}`;
+							blockers.push(`- [SYNTAX] ${{msg.slice(0, 180)}}`);
+						}}
+					}}
+				}} catch {{
+					// ignore unparseable output
+				}}
+			}}
+		}}
+
+		// 2. Fast (<25ms) Git diff blocker gate strictly scoped to files edited in this run
+		if (existsSync(join(cwd, ".git"))) {{
+			const diffRes = spawnSync(AP_BIN, ["guard", "diff", "--json", cwd], {{
+				cwd,
+				encoding: "utf8",
+				timeout: 2500,
+				windowsHide: true,
+			}});
+			if (diffRes.stdout && diffRes.stdout.trim().startsWith("{{")) {{
+				try {{
+					const parsed = JSON.parse(diffRes.stdout) as {{ findings?: DiffFindingItem[] }};
+					if (Array.isArray(parsed.findings)) {{
+						blockers.push(...filterSettleDiffBlockers(parsed.findings, editedFilesThisRun, cwd));
+					}}
+				}} catch {{
+					// ignore unparseable output
+				}}
+			}}
+		}}
+
+		if (blockers.length === 0) {{
+			editedFilesThisRun.clear();
+			builtInCodeEditsThisRun.clear();
+			return undefined;
+		}}
+
+		settleGateFiredThisRun = true;
+		guardsTriggered += 1;
+		updateHud(ctx);
+		const draft: CustomMessageEntryDraft = {{
+			type: "custom_message",
+			customType: "ap-settle-gate",
+			display: true,
+			content: `[ap settle-gate] Blocked premature completion — concrete issue(s) found in files edited this run:\n${{blockers.slice(0, 6).join("\n")}}\nFix these issues and re-verify before finishing.`,
+		}};
+		return {{
+			entries: [...(event.entries ?? []), draft],
+			continue: true,
+		}};
+	}});
+
 	pi.on("tool_call", (event) => {{
-		if (EDIT_TOOLS.has(event.toolName)) {{
+		const baseTool = event.toolName.replace(/^mcp__agent_primitives__/, "");
+		if (EDIT_TOOLS.has(baseTool)) {{
 			recentShellFps.length = 0;
 			unchangedReads.clear();
 			stagnantHeavyTurns = 0;
@@ -1282,6 +1646,16 @@ export default function (pi: ExtensionAPI) {{
 	}});
 
 	pi.on("tool_result", (event, ctx) => {{
+		// Track edited files across both direct calls and codemode child calls for `agent_before_settle`
+		const baseTool = event.toolName.replace(/^mcp__agent_primitives__/, "");
+		if (!event.isError && EDIT_TOOLS.has(baseTool)) {{
+			for (const p of extractEditedPathsFromTool(baseTool, event.input as Record<string, unknown> | undefined)) {{
+				editedFilesThisRun.add(p);
+				if (baseTool === "write" || baseTool === "edit") {{
+					builtInCodeEditsThisRun.add(p);
+				}}
+			}}
+		}}
 		// Leave codemode child calls (`parentToolCallId`) untouched so JS scripts keep raw structuredContent!
 		if (event.parentToolCallId) return undefined;
 		if (!Array.isArray(event.content) || event.content.length === 0) return undefined;
@@ -2081,6 +2455,8 @@ fn inspect_pi_runtime(home: &Path) -> Value {
             s.contains("planObservationMasking")
                 && s.contains("extractDsmlToolCalls")
                 && s.contains("session_before_compact")
+                && s.contains("agent_before_settle")
+                && s.contains("routeDeepSeekFlashEffort")
         })
         .unwrap_or(false);
 
@@ -2153,7 +2529,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
     let mut hints: Vec<String> = Vec::new();
     if !accelerator_present || !accelerator_up_to_date {
         hints.push(
-            "Run `ap init -a pi --with-hooks --no-rules` to install/upgrade zz-ap-accelerator.ts (DSML recovery, doom-loop breaker & Pi v1.5 native context_edit batch observation masking)."
+            "Run `ap init -a pi --with-hooks --no-rules` to install/upgrade zz-ap-accelerator.ts (context_edit batch masking, agent_before_settle gate, deepseek/flash-auto router & DSML recovery)."
                 .to_string(),
         );
     }
@@ -2396,7 +2772,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.10+ (context_edit masking + DSML + guards)" } else { "stale/missing" }
+            if accel_ok { "v2.11+ (context_edit + settle-gate + flash-auto + KV-cache HUD)" } else { "stale/missing" }
         );
         if let Some(hints) = pi_runtime["hints"].as_array() {
             for h in hints.iter().filter_map(Value::as_str) {
