@@ -27,6 +27,18 @@ struct ReadCli {
     /// Optional worksheet name filter for .xlsx files
     #[arg(long)]
     sheet: Option<String>,
+    /// Virtual archive entry path to read inside .asar/.zip/.vsix/.jar/.apk/.whl without extracting
+    #[arg(long)]
+    entry: Option<String>,
+    /// Byte offset for slicing giant/minified single-line bundles (e.g. --offset 184920 --chars 2000 --pretty)
+    #[arg(long)]
+    offset: Option<usize>,
+    /// Character/byte window size when slicing with --offset (default: 2400)
+    #[arg(long, default_value_t = 2400)]
+    chars: usize,
+    /// Pretty-format minified JS/JSON snippets when slicing with --offset or --query
+    #[arg(long)]
+    pretty: bool,
     /// Render URL in real Headless Edge/Chrome (extracts JS-hydrated text, tables & interactive controls)
     #[arg(long)]
     render: bool,
@@ -777,13 +789,55 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 1;
             }
         },
-        "pptx" | "zip" => match extract_pptx_or_zip(&raw_bytes, &ext) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[ap read] {e}");
-                return 1;
+        "asar" => {
+            if let Some(ref ent) = cli.entry {
+                match crate::binary::read_asar_member(&raw_bytes, ent) {
+                    Ok(eb) => {
+                        format_tag = "asar-entry";
+                        let (dec, _, healed) = decode_any_bytes(&eb);
+                        win_heals += healed;
+                        dec
+                    }
+                    Err(e) => {
+                        eprintln!("[ap read] {e}");
+                        return 1;
+                    }
+                }
+            } else {
+                format_tag = "asar";
+                match crate::binary::list_asar_md(&raw_bytes, cli.query.as_deref()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ap read] {e}");
+                        return 1;
+                    }
+                }
             }
-        },
+        }
+        "pptx" | "zip" | "vsix" | "jar" | "apk" | "whl" => {
+            if let Some(ref ent) = cli.entry {
+                match crate::binary::read_zip_member(&raw_bytes, ent) {
+                    Ok(eb) => {
+                        format_tag = "zip-entry";
+                        let (dec, _, healed) = decode_any_bytes(&eb);
+                        win_heals += healed;
+                        dec
+                    }
+                    Err(e) => {
+                        eprintln!("[ap read] {e}");
+                        return 1;
+                    }
+                }
+            } else {
+                match extract_pptx_or_zip(&raw_bytes, &ext) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ap read] {e}");
+                        return 1;
+                    }
+                }
+            }
+        }
         "pdf" => match extract_pdf_text(&raw_bytes) {
             Ok(s) => s,
             Err(e) => {
@@ -819,6 +873,13 @@ pub fn run_cli(args: &[String]) -> i32 {
             if let Some(img_meta) = try_extract_image_meta(&raw_bytes, &ext) {
                 format_tag = "image-meta";
                 img_meta
+            } else if matches!(
+                ext.as_str(),
+                "exe" | "dll" | "so" | "dylib" | "node" | "wasm" | "bin"
+            ) || (!is_url && crate::binary::is_binary_magic(&raw_bytes))
+            {
+                format_tag = "binary";
+                crate::binary::inspect_binary_md(&raw_bytes, cli.query.as_deref(), 80)
             } else {
                 let (decoded, enc_name, healed) = decode_any_bytes(&raw_bytes);
                 win_heals += healed;
@@ -831,6 +892,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                     && decoded.len() > 2400
                     && cli.lines.is_none()
                     && cli.query.is_none()
+                    && cli.offset.is_none()
                 {
                     let sieve_store = std::env::var("SIEVE_HOME")
                         .ok()
@@ -848,8 +910,38 @@ pub fn run_cli(args: &[String]) -> i32 {
 
     let all_lines: Vec<&str> = converted.lines().collect();
     let total_lines = all_lines.len();
+    let is_minified = all_lines.iter().any(|l| l.len() > 1000);
 
-    let rendered = if let Some(ref lspec) = cli.lines {
+    let floor_boundary = |s: &str, mut idx: usize| -> usize {
+        idx = idx.min(s.len());
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    };
+    let ceil_boundary = |s: &str, mut idx: usize| -> usize {
+        idx = idx.min(s.len());
+        while idx < s.len() && !s.is_char_boundary(idx) {
+            idx += 1;
+        }
+        idx
+    };
+
+    let rendered = if let Some(off) = cli.offset {
+        let s = floor_boundary(&converted, off);
+        let e = ceil_boundary(&converted, s.saturating_add(cli.chars.max(120)));
+        let raw_slice = &converted[s..e];
+        let body = if cli.pretty {
+            crate::binary::pretty_format_js_snippet(raw_slice)
+        } else {
+            raw_slice.to_string()
+        };
+        format!(
+            "# READ `{label}` [offset {s}..{e} of {}B | {format_tag}{}]\n{body}",
+            converted.len(),
+            if cli.pretty { " | pretty" } else { "" }
+        )
+    } else if let Some(ref lspec) = cli.lines {
         if let Some((s, e)) = parse_line_window(lspec, total_lines) {
             let slice = (s..=e)
                 .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
@@ -860,31 +952,75 @@ pub fn run_cli(args: &[String]) -> i32 {
             eprintln!("[ap read] invalid --lines `{lspec}` (expected START-END, e.g. 1-120)");
             return 2;
         }
-    } else if let Some(ref q) = cli.query.clone().filter(|_| ext != "xlsx") {
-        let q_low = q.to_ascii_lowercase();
-        let mut hits = Vec::new();
-        for (idx, ln) in all_lines.iter().enumerate() {
-            if ln.to_ascii_lowercase().contains(&q_low) {
-                let s = idx.saturating_sub(1);
-                let e = (idx + 1).min(total_lines.saturating_sub(1));
-                let ctx = (s..=e)
-                    .map(|k| format!("  {}: {}", k + 1, all_lines[k]))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                hits.push(ctx);
-                if hits.len() >= 25 {
-                    break;
+    } else if let Some(ref q) = cli
+        .query
+        .clone()
+        .filter(|_| !matches!(format_tag, "xlsx" | "asar" | "binary"))
+    {
+        if is_minified {
+            let q_re = Regex::new(&format!("(?i){q}"))
+                .or_else(|_| Regex::new(&format!("(?i){}", regex::escape(q))))
+                .unwrap();
+            let mut hits = Vec::new();
+            for m in q_re.find_iter(&converted).take(12) {
+                let s = floor_boundary(&converted, m.start().saturating_sub(200));
+                let e = ceil_boundary(&converted, m.end().saturating_add(240));
+                let raw_snip = &converted[s..e];
+                let body = if cli.pretty {
+                    crate::binary::pretty_format_js_snippet(raw_snip)
+                } else {
+                    raw_snip.to_string()
+                };
+                hits.push(format!("### @off={}\n{body}", m.start()));
+            }
+            format!(
+                "# READ `{label}` [minified query='{q}' | {} byte-window hit(s) in {}B]\n{}",
+                hits.len(),
+                converted.len(),
+                if hits.is_empty() {
+                    "*(no matches)*".to_string()
+                } else {
+                    hits.join("\n\n")
+                }
+            )
+        } else {
+            let q_low = q.to_ascii_lowercase();
+            let mut hits = Vec::new();
+            for (idx, ln) in all_lines.iter().enumerate() {
+                if ln.to_ascii_lowercase().contains(&q_low) {
+                    let s = idx.saturating_sub(1);
+                    let e = (idx + 1).min(total_lines.saturating_sub(1));
+                    let ctx = (s..=e)
+                        .map(|k| format!("  {}: {}", k + 1, all_lines[k]))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    hits.push(ctx);
+                    if hits.len() >= 25 {
+                        break;
+                    }
                 }
             }
+            format!(
+                "# READ `{label}` [query='{q}' | {} match block(s) in {total_lines} lines]\n{}",
+                hits.len(),
+                if hits.is_empty() {
+                    "*(no matches)*".to_string()
+                } else {
+                    hits.join("\n  ---\n")
+                }
+            )
         }
+    } else if is_minified && converted.len() > cli.max_chars {
+        let e = ceil_boundary(&converted, 1800);
+        let raw_head = &converted[..e];
+        let body = if cli.pretty {
+            crate::binary::pretty_format_js_snippet(raw_head)
+        } else {
+            raw_head.to_string()
+        };
         format!(
-            "# READ `{label}` [query='{q}' | {} match block(s) in {total_lines} lines]\n{}",
-            hits.len(),
-            if hits.is_empty() {
-                "*(no matches)*".to_string()
-            } else {
-                hits.join("\n  ---\n")
-            }
+            "# READ `{label}` [minified/long-line file: {}B across {total_lines} lines | {format_tag}]\n{body}\n\n[ap read minified pager: pass `--query <regex> --pretty` or `--offset 1800 --chars 2400 --pretty` to slice without context overflow]",
+            converted.len()
         )
     } else if converted.len() > cli.max_chars {
         let headings: Vec<String> = all_lines

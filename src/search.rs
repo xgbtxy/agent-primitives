@@ -52,9 +52,116 @@ struct SearchCli {
     /// Maximum matches to return
     #[arg(long, default_value_t = 50)]
     max_hits: usize,
+    /// Context characters on each side when slicing matches inside giant/minified single-line bundles
+    #[arg(long, default_value_t = 160)]
+    around: usize,
+    /// Pretty-format minified JS/JSON match slices
+    #[arg(long)]
+    pretty: bool,
     /// Emit structured JSON output
     #[arg(long)]
     json: bool,
+}
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_text_matches(
+    text: &str,
+    rel: &str,
+    ext: &str,
+    is_office: bool,
+    re: &Regex,
+    around: usize,
+    pretty: bool,
+    max_hits: usize,
+    matches: &mut Vec<SearchMatch>,
+) {
+    if !re.is_match(text) {
+        return;
+    }
+    let ast_spans = if !is_office
+        && text.len() <= 2 * 1024 * 1024
+        && ap_splice::ast::language_for_ext(ext).is_some()
+    {
+        ap_splice::ast::scan_symbols(text, ext)
+    } else {
+        Vec::new()
+    };
+
+    let mut line_byte_start = 0usize;
+    for (idx, ln) in text.split('\n').enumerate() {
+        let ln_clean = ln.strip_suffix('\r').unwrap_or(ln);
+        let ln_no = idx + 1;
+        if re.is_match(ln_clean) {
+            if ln_clean.len() > 300 {
+                // Minified / giant single-line bundle: emit every match as a byte-window slice!
+                for m in re.find_iter(ln_clean) {
+                    let s = floor_char_boundary(ln_clean, m.start().saturating_sub(around));
+                    let e = ceil_char_boundary(ln_clean, m.end().saturating_add(around));
+                    let raw_snip = &ln_clean[s..e];
+                    let snip = if pretty {
+                        crate::binary::pretty_format_js_snippet(raw_snip)
+                    } else {
+                        raw_snip.to_string()
+                    };
+                    let abs_off = line_byte_start + m.start();
+                    matches.push(SearchMatch {
+                        file: rel.to_string(),
+                        line: ln_no,
+                        scope: format!("minified @off={abs_off}"),
+                        snippet: snip,
+                    });
+                    if matches.len() >= max_hits {
+                        return;
+                    }
+                }
+            } else {
+                let scope = ast_spans
+                    .iter()
+                    .filter(|sp| sp.start_line <= ln_no && ln_no <= sp.end_line)
+                    .min_by_key(|sp| sp.end_line.saturating_sub(sp.start_line))
+                    .map(|sp| {
+                        format!(
+                            "{} {} L{}-L{}",
+                            sp.kind, sp.qual, sp.start_line, sp.end_line
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        if is_office {
+                            ext.to_ascii_uppercase()
+                        } else {
+                            String::new()
+                        }
+                    });
+                let snip: String = ln_clean.trim().chars().take(180).collect();
+                matches.push(SearchMatch {
+                    file: rel.to_string(),
+                    line: ln_no,
+                    scope,
+                    snippet: snip,
+                });
+                if matches.len() >= max_hits {
+                    return;
+                }
+            }
+        }
+        line_byte_start += ln.len() + 1;
+    }
 }
 
 fn build_search_regex(pat: &str, force_case: bool) -> Result<Regex, String> {
@@ -132,6 +239,7 @@ pub fn run_cli(args: &[String]) -> i32 {
         if !ext_allow.is_empty() && !ext_allow.contains(&ext) {
             continue;
         }
+        let explicit_file = root_canon.is_file();
         if matches!(
             ext.as_str(),
             "png"
@@ -140,10 +248,6 @@ pub fn run_cli(args: &[String]) -> i32 {
                 | "gif"
                 | "webp"
                 | "ico"
-                | "exe"
-                | "dll"
-                | "so"
-                | "dylib"
                 | "woff"
                 | "woff2"
                 | "ttf"
@@ -153,10 +257,22 @@ pub fn run_cli(args: &[String]) -> i32 {
         ) {
             continue;
         }
+        let is_bin_ext = matches!(
+            ext.as_str(),
+            "exe" | "dll" | "so" | "dylib" | "node" | "wasm" | "bin"
+        );
+        if is_bin_ext && !explicit_file && ext_allow.is_empty() {
+            continue;
+        }
         let Ok(meta) = p.metadata() else {
             continue;
         };
-        if meta.len() > 16 * 1024 * 1024 {
+        let size_cap = if explicit_file {
+            64 * 1024 * 1024
+        } else {
+            16 * 1024 * 1024
+        };
+        if meta.len() > size_cap {
             continue;
         }
         let Ok(bytes) = fs::read(p) else {
@@ -164,6 +280,161 @@ pub fn run_cli(args: &[String]) -> i32 {
         };
         scanned_files += 1;
         total_bytes += bytes.len() as u64;
+
+        let rel = if explicit_file {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            p.strip_prefix(&root_canon)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+
+        // Virtual Electron .asar archive search (zero extraction!)
+        if ext == "asar" {
+            if let Ok((base, entries)) = crate::binary::parse_asar_index(&bytes) {
+                for ent in entries {
+                    if ent.unpacked || ent.size == 0 || ent.size > 12 * 1024 * 1024 {
+                        continue;
+                    }
+                    let eext = Path::new(&ent.path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if !matches!(
+                        eext.as_str(),
+                        "js" | "mjs"
+                            | "cjs"
+                            | "ts"
+                            | "tsx"
+                            | "jsx"
+                            | "json"
+                            | "html"
+                            | "htm"
+                            | "css"
+                            | "xml"
+                            | "txt"
+                            | "md"
+                            | "yml"
+                            | "yaml"
+                            | "map"
+                    ) {
+                        continue;
+                    }
+                    let st = base.saturating_add(ent.offset);
+                    let en = st.saturating_add(ent.size);
+                    if en <= bytes.len() {
+                        let txt = decode_any_bytes(&bytes[st..en]).0;
+                        let virt_rel = format!("{rel}::{}", ent.path);
+                        push_text_matches(
+                            &txt,
+                            &virt_rel,
+                            &eext,
+                            false,
+                            &re,
+                            cli.around,
+                            cli.pretty,
+                            cli.max_hits,
+                            &mut matches,
+                        );
+                        if matches.len() >= cli.max_hits {
+                            break;
+                        }
+                    }
+                }
+            }
+            if matches.len() >= cli.max_hits {
+                break;
+            }
+            continue;
+        }
+
+        // Virtual .zip / .vsix / .jar / .whl archive search (when explicitly targeted or via --ext)
+        if matches!(ext.as_str(), "zip" | "vsix" | "jar" | "whl")
+            && (explicit_file || !ext_allow.is_empty())
+        {
+            if let Ok(mut za) = zip::ZipArchive::new(std::io::Cursor::new(&bytes)) {
+                for i in 0..za.len() {
+                    if let Ok(mut zf) = za.by_index(i) {
+                        if zf.is_dir() || zf.size() > 8 * 1024 * 1024 {
+                            continue;
+                        }
+                        let nm = zf.name().replace('\\', "/");
+                        let eext = Path::new(&nm)
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        if !matches!(
+                            eext.as_str(),
+                            "js" | "mjs"
+                                | "cjs"
+                                | "ts"
+                                | "json"
+                                | "html"
+                                | "xml"
+                                | "py"
+                                | "txt"
+                                | "md"
+                                | "yml"
+                                | "yaml"
+                                | "properties"
+                        ) {
+                            continue;
+                        }
+                        let mut eb = Vec::new();
+                        if std::io::Read::read_to_end(&mut zf, &mut eb).is_ok() {
+                            let txt = decode_any_bytes(&eb).0;
+                            let virt_rel = format!("{rel}::{nm}");
+                            push_text_matches(
+                                &txt,
+                                &virt_rel,
+                                &eext,
+                                false,
+                                &re,
+                                cli.around,
+                                cli.pretty,
+                                cli.max_hits,
+                                &mut matches,
+                            );
+                            if matches.len() >= cli.max_hits {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if matches.len() >= cli.max_hits {
+                break;
+            }
+            continue;
+        }
+
+        // Binary ASCII + Windows UTF-16LE strings search when explicitly targeted
+        if is_bin_ext || (explicit_file && crate::binary::is_binary_magic(&bytes)) {
+            let md = crate::binary::inspect_binary_md(&bytes, Some(&cli.pattern), cli.max_hits);
+            for (idx, ln) in md.lines().enumerate() {
+                if ln.starts_with("[ascii ") || ln.starts_with("[utf16le ") {
+                    matches.push(SearchMatch {
+                        file: rel.clone(),
+                        line: idx + 1,
+                        scope: "BINARY".to_string(),
+                        snippet: ln.chars().take(200).collect(),
+                    });
+                    if matches.len() >= cli.max_hits {
+                        break;
+                    }
+                }
+            }
+            if matches.len() >= cli.max_hits {
+                break;
+            }
+            continue;
+        }
 
         let is_office = matches!(ext.as_str(), "docx" | "xlsx" | "pptx" | "pdf");
         let text = if is_office {
@@ -181,60 +452,17 @@ pub fn run_cli(args: &[String]) -> i32 {
             decode_any_bytes(&bytes).0
         };
 
-        if !re.is_match(&text) {
-            continue;
-        }
-
-        let rel = if root_canon.is_file() {
-            p.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string()
-        } else {
-            p.strip_prefix(&root_canon)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .replace('\\', "/")
-        };
-
-        let ast_spans = if ap_splice::ast::language_for_ext(&ext).is_some() {
-            ap_splice::ast::scan_symbols(&text, &ext)
-        } else {
-            Vec::new()
-        };
-
-        for (idx, ln) in text.lines().enumerate() {
-            if re.is_match(ln) {
-                let ln_no = idx + 1;
-                let scope = ast_spans
-                    .iter()
-                    .filter(|sp| sp.start_line <= ln_no && ln_no <= sp.end_line)
-                    .min_by_key(|sp| sp.end_line.saturating_sub(sp.start_line))
-                    .map(|sp| {
-                        format!(
-                            "{} {} L{}-L{}",
-                            sp.kind, sp.qual, sp.start_line, sp.end_line
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        if is_office {
-                            ext.to_ascii_uppercase()
-                        } else {
-                            String::new()
-                        }
-                    });
-                let snip: String = ln.trim().chars().take(150).collect();
-                matches.push(SearchMatch {
-                    file: rel.clone(),
-                    line: ln_no,
-                    scope,
-                    snippet: snip,
-                });
-                if matches.len() >= cli.max_hits {
-                    break;
-                }
-            }
-        }
+        push_text_matches(
+            &text,
+            &rel,
+            &ext,
+            is_office,
+            &re,
+            cli.around,
+            cli.pretty,
+            cli.max_hits,
+            &mut matches,
+        );
         if matches.len() >= cli.max_hits {
             break;
         }

@@ -154,6 +154,27 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Attach to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list, --target, --eval, --audit, --screenshot, --stdin) without killing the host app
+    Cdp {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(short = 'p', long, default_value_t = 9222)]
+        port: u16,
+        #[arg(long)]
+        list: bool,
+        #[arg(short = 't', long)]
+        target: Option<String>,
+        #[arg(short = 'e', long)]
+        eval: Option<String>,
+        #[arg(long)]
+        audit: bool,
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
@@ -322,5 +343,32 @@ pub fn run_cli(args: &[String]) -> i32 {
             screenshot.as_deref(),
             json,
         ),
+        SubCmd::Cdp {
+            host,
+            port,
+            list,
+            target,
+            eval,
+            audit,
+            screenshot,
+            stdin,
+            json,
+        } => {
+            let mut steps = String::new();
+            if stdin {
+                let _ = std::io::stdin().read_to_string(&mut steps);
+            }
+            cdp::run_cdp_attach(
+                &host,
+                port,
+                list,
+                target.as_deref(),
+                eval.as_deref(),
+                audit,
+                screenshot.as_deref(),
+                &steps,
+                json,
+            )
+        }
     }
 }

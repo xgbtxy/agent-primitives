@@ -246,7 +246,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     let mut bullets = Vec::new();
     if sel.contains("probe") || sel.contains("atlas") {
         bullets.push(format!(
-            "1. **Orient, Locate & Impact (`atlas`)**: Non-empty dir -> `{ap_cmd} atlas map .` (<15ms Code + `.xlsx`/`.csv`/`.sqlite`/`.gz` X-Ray). Bug hunting in multi-file repo -> `{ap_cmd} atlas locate \"<symptom/error>\" .` (<25ms Top-5 suspect functions + numbered source). Before shared symbol edits -> `{ap_cmd} atlas impact <Sym> .`."
+            "1. **Orient, Locate & Trace (`atlas`)**: Non-empty dir -> `{ap_cmd} atlas map .` (<15ms Code/Office/SQLite X-Ray). Bug hunting -> `{ap_cmd} atlas locate \"<symptom>\" .` (<25ms Top-5 functions). Call chains -> `{ap_cmd} atlas trace <Sym> .` (<30ms multi-hop callers/sinks). Shared symbol edits -> `{ap_cmd} atlas impact <Sym> .`."
         ));
     }
     if sel.contains("splice") {
@@ -256,7 +256,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     }
     if sel.contains("probe") || sel.contains("guard") {
         bullets.push(format!(
-            "3. **1-Call Deep Test & Verify (`guard verify --deep`)**: Run `{ap_cmd} guard verify --cwd . --deep` to execute OWASP security (SQLi/XSS/Path Traversal), anti-slop (`.only`/empty-catch/`:any`), cross-file export/arity check, unit tests, API chaos/concurrency fuzzing, Desktop+Mobile headless UI layout/network audit (`probe ui`), and AST mutation audit in ONE pass! (Interactive DOM clicks: `{ap_cmd} probe smoke --cwd . --stdin`)."
+            "3. **1-Call Deep Verify & Live CDP (`guard` / `probe`)**: Run `{ap_cmd} guard verify --cwd . --deep` (OWASP sec + vacuous/anti-slop + contracts + tests + API fuzz + Desktop/Mobile UI + active-file AST mutation in 1 pass). Live running Chrome/Electron CDP port -> `{ap_cmd} probe cdp --port <P> [--list|--target T --eval JS]`. Interactive E2E -> `{ap_cmd} probe smoke --cwd . --stdin`."
         ));
     }
     if ["probe", "sieve", "recall", "guard", "baton"]
@@ -264,7 +264,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Read, SQL, Search, Exec & Undo**: `{ap_cmd} read <target> [--render|--query Q|--lines A-B]` (`.docx`/`.xlsx`/`.pdf`/`.sqlite`/`.gz`/GBK/SPA); `{ap_cmd} query -f a=x.xlsx -f b=y.sqlite --schema` then `--stdin`; `{ap_cmd} search <pat> .`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
+            "4. **Read, Search, SQL, Exec & Undo**: `{ap_cmd} read <target> [--entry E|--offset N --pretty|--query Q|--render]` (Office/PDF/SQLite/`.asar`/`.vsix`/`.zip`/PE-ELF UTF-16LE strings/minified JS/SPA); `{ap_cmd} search <pat> <path> [--pretty]` (AST + minified bundles + `.asar`/`.vsix` + binaries); `{ap_cmd} query -f a=x.xlsx --schema`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
         ));
     }
     format!(

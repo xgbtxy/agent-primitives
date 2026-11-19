@@ -1,4 +1,5 @@
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -8,9 +9,18 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdpTarget {
+    pub id: String,
+    pub target_type: String,
+    pub title: String,
+    pub url: String,
+    pub ws_url: String,
+}
+
 pub struct CdpSession {
-    child: Child,
-    profile_dir: PathBuf,
+    child: Option<Child>,
+    profile_dir: Option<PathBuf>,
     stream: TcpStream,
     next_id: u64,
     pub js_errors: Vec<String>,
@@ -100,11 +110,11 @@ fn ws_read_message(stream: &mut TcpStream) -> Result<String, String> {
     }
 }
 
-fn http_get_json(port: u16, path: &str) -> Result<Value, String> {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    let _ = s.set_read_timeout(Some(Duration::from_millis(1200)));
-    let _ = s.set_write_timeout(Some(Duration::from_millis(1200)));
-    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+fn http_get_json_host(host: &str, port: u16, path: &str) -> Result<Value, String> {
+    let mut s = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
+    let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
+    let _ = s.set_write_timeout(Some(Duration::from_millis(1500)));
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     let _ = s.read_to_end(&mut buf);
@@ -112,6 +122,39 @@ fn http_get_json(port: u16, path: &str) -> Result<Value, String> {
         return Err("no http body".to_string());
     };
     serde_json::from_slice(&buf[pos + 4..]).map_err(|e| e.to_string())
+}
+
+fn http_get_json(port: u16, path: &str) -> Result<Value, String> {
+    http_get_json_host("127.0.0.1", port, path)
+}
+
+fn open_cdp_websocket(ws_url: &str) -> Result<TcpStream, String> {
+    let after_scheme = ws_url.strip_prefix("ws://").unwrap_or(ws_url);
+    let (addr, ws_path) = after_scheme
+        .split_once('/')
+        .map(|(a, p)| (a, format!("/{p}")))
+        .unwrap_or((after_scheme, "/".to_string()));
+    let mut stream = TcpStream::connect(addr).map_err(|e| format!("connect CDP ws: {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(8000)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(8000)));
+
+    let hs = format!(
+        "GET {ws_path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    );
+    stream.write_all(hs.as_bytes()).map_err(|e| e.to_string())?;
+    let mut resp = Vec::with_capacity(256);
+    let mut b1 = [0u8; 1];
+    while !resp.ends_with(b"\r\n\r\n") {
+        read_exact_bytes(&mut stream, &mut b1)?;
+        resp.push(b1[0]);
+        if resp.len() > 8192 {
+            return Err("CDP websocket handshake header overflow".to_string());
+        }
+    }
+    if !String::from_utf8_lossy(&resp).contains("101") {
+        return Err("CDP websocket upgrade rejected".to_string());
+    }
+    Ok(stream)
 }
 
 impl CdpSession {
@@ -189,43 +232,84 @@ impl CdpSession {
             return Err(format!("{reason}; stderr={}", err_tail.trim()));
         }
 
-        let after_scheme = ws_url.strip_prefix("ws://").unwrap_or(&ws_url);
-        let (addr, ws_path) = after_scheme
-            .split_once('/')
-            .map(|(a, p)| (a, format!("/{p}")))
-            .unwrap_or((after_scheme, "/".to_string()));
-        let mut stream = TcpStream::connect(addr).map_err(|e| format!("connect CDP ws: {e}"))?;
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(8000)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(8000)));
-
-        let hs = format!(
-            "GET {ws_path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        );
-        stream.write_all(hs.as_bytes()).map_err(|e| e.to_string())?;
-        let mut resp = Vec::with_capacity(256);
-        let mut b1 = [0u8; 1];
-        while !resp.ends_with(b"\r\n\r\n") {
-            read_exact_bytes(&mut stream, &mut b1)?;
-            resp.push(b1[0]);
-            if resp.len() > 8192 {
+        let stream = match open_cdp_websocket(&ws_url) {
+            Ok(s) => s,
+            Err(e) => {
                 kill_browser(&mut child, &profile_dir);
-                return Err("CDP websocket handshake header overflow".to_string());
+                return Err(e);
             }
-        }
-        if !String::from_utf8_lossy(&resp).contains("101") {
-            kill_browser(&mut child, &profile_dir);
-            return Err("CDP websocket upgrade rejected".to_string());
-        }
+        };
 
         let mut sess = Self {
-            child,
-            profile_dir,
+            child: Some(child),
+            profile_dir: Some(profile_dir),
             stream,
             next_id: 1,
             js_errors: Vec::new(),
             network_errors: Vec::new(),
         };
         let _ = sess.call("Page.enable", json!({}));
+        let _ = sess.call("Runtime.enable", json!({}));
+        let _ = sess.call("Log.enable", json!({}));
+        let _ = sess.call("Network.enable", json!({}));
+        Ok(sess)
+    }
+
+    /// Discover all live debuggable targets on an already-running Chrome/Edge/Electron CDP port.
+    pub fn list_targets(host: &str, port: u16) -> Result<Vec<CdpTarget>, String> {
+        let arr = http_get_json_host(host, port, "/json/list")
+            .or_else(|_| http_get_json_host(host, port, "/json"))?;
+        let Some(items) = arr.as_array() else {
+            return Err("CDP /json/list did not return a JSON array".to_string());
+        };
+        let mut out = Vec::new();
+        for it in items {
+            let ws_url = it
+                .get("webSocketDebuggerUrl")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if ws_url.is_empty() {
+                continue;
+            }
+            out.push(CdpTarget {
+                id: it
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                target_type: it
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                title: it
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                url: it
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                ws_url,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Attach to an already-running Chrome/Edge/Electron target WebSocket WITHOUT taking process ownership.
+    pub fn attach(ws_url: &str) -> Result<Self, String> {
+        let stream = open_cdp_websocket(ws_url)?;
+        let mut sess = Self {
+            child: None,
+            profile_dir: None,
+            stream,
+            next_id: 1,
+            js_errors: Vec::new(),
+            network_errors: Vec::new(),
+        };
         let _ = sess.call("Runtime.enable", json!({}));
         let _ = sess.call("Log.enable", json!({}));
         let _ = sess.call("Network.enable", json!({}));
@@ -337,7 +421,10 @@ fn kill_browser(child: &mut Child, profile_dir: &PathBuf) {
 
 impl Drop for CdpSession {
     fn drop(&mut self) {
-        kill_browser(&mut self.child, &self.profile_dir);
+        let _ = self.stream.write_all(&[0x88, 0x80, 0, 0, 0, 0]);
+        if let (Some(mut ch), Some(pd)) = (self.child.take(), self.profile_dir.take()) {
+            kill_browser(&mut ch, &pd);
+        }
     }
 }
 
@@ -535,5 +622,247 @@ impl CdpSession {
         })()"#;
         let raw = self.eval_js(js)?;
         serde_json::from_str::<Value>(&raw).map_err(|e| format!("parse layout audit JSON: {e}"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_cdp_attach(
+    host: &str,
+    port: u16,
+    list_only: bool,
+    target_filter: Option<&str>,
+    eval_expr: Option<&str>,
+    audit: bool,
+    screenshot: Option<&Path>,
+    steps_text: &str,
+    as_json: bool,
+) -> i32 {
+    let t0 = Instant::now();
+    let targets = match CdpSession::list_targets(host, port) {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("[probe cdp] Failed to query http://{host}:{port}/json/list: {e}");
+            return 1;
+        }
+    };
+
+    if list_only
+        || (eval_expr.is_none() && !audit && screenshot.is_none() && steps_text.trim().is_empty())
+    {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "endpoint": format!("http://{host}:{port}"),
+                    "count": targets.len(),
+                    "targets": targets,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!(
+                "[probe cdp] {} live target(s) on {host}:{port}:",
+                targets.len()
+            );
+            for (idx, t) in targets.iter().enumerate() {
+                println!(
+                    "  {}. [{}] `{}` — {} (id={})",
+                    idx + 1,
+                    t.target_type,
+                    t.title,
+                    t.url,
+                    t.id
+                );
+            }
+        }
+        return 0;
+    }
+
+    let picked = if let Some(filt) = target_filter.filter(|s| !s.trim().is_empty()) {
+        let low = filt.to_ascii_lowercase();
+        targets.iter().find(|t| {
+            t.title.to_ascii_lowercase().contains(&low)
+                || t.url.to_ascii_lowercase().contains(&low)
+                || t.id.to_ascii_lowercase().contains(&low)
+        })
+    } else {
+        targets
+            .iter()
+            .find(|t| t.target_type == "page")
+            .or_else(|| targets.first())
+    };
+    let Some(tgt) = picked else {
+        eprintln!("[probe cdp] No matching CDP target found on {host}:{port}");
+        return 1;
+    };
+
+    let mut sess = match CdpSession::attach(&tgt.ws_url) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[probe cdp] Attach failed (`{}`): {e}", tgt.title);
+            return 1;
+        }
+    };
+
+    let mut eval_out: Option<String> = None;
+    let mut audit_out: Option<Value> = None;
+    let mut shot_out: Option<String> = None;
+    let mut step_logs: Vec<String> = Vec::new();
+    let mut ok = true;
+
+    if let Some(expr) = eval_expr {
+        match sess.eval_js(expr) {
+            Ok(v) => eval_out = Some(v),
+            Err(e) => {
+                ok = false;
+                step_logs.push(format!("EVAL error: {e}"));
+            }
+        }
+    }
+
+    if audit {
+        match sess.audit_layout(1280, 800) {
+            Ok(v) => {
+                let iss_cnt = v
+                    .get("issues")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                if iss_cnt > 0 {
+                    ok = false;
+                }
+                audit_out = Some(v);
+            }
+            Err(e) => {
+                ok = false;
+                step_logs.push(format!("AUDIT error: {e}"));
+            }
+        }
+    }
+
+    if let Some(sp) = screenshot {
+        match sess.capture_screenshot(sp) {
+            Ok(n) => shot_out = Some(format!("{} ({n} B)", sp.display())),
+            Err(e) => {
+                ok = false;
+                step_logs.push(format!("SCREENSHOT error: {e}"));
+            }
+        }
+    }
+
+    let mut last_body = eval_out.clone().unwrap_or_default();
+    for raw_ln in steps_text.lines() {
+        let ln = raw_ln.trim();
+        if ln.is_empty() || ln.starts_with('#') {
+            continue;
+        }
+        let mut parts = ln.splitn(2, char::is_whitespace);
+        let kw = parts.next().unwrap_or("").to_ascii_uppercase();
+        let rest = parts.next().unwrap_or("").trim();
+        match kw.as_str() {
+            "EVAL" => match sess.eval_js(rest) {
+                Ok(v) => {
+                    step_logs.push(format!("EVAL -> {v}"));
+                    last_body = v;
+                }
+                Err(e) => {
+                    ok = false;
+                    step_logs.push(format!("EVAL FAIL: {e}"));
+                }
+            },
+            "FILL" => {
+                let mut fp = rest.splitn(2, char::is_whitespace);
+                let sel = fp.next().unwrap_or("");
+                let val = fp.next().unwrap_or("");
+                match sess.fill(sel, val) {
+                    Ok(v) => {
+                        step_logs.push(format!("FILL {sel} OK"));
+                        last_body = v;
+                    }
+                    Err(e) => {
+                        ok = false;
+                        step_logs.push(format!("FILL {sel} FAIL: {e}"));
+                    }
+                }
+            }
+            "CLICK" => match sess.click(rest) {
+                Ok(v) => {
+                    step_logs.push(format!("CLICK {rest} OK"));
+                    last_body = v;
+                }
+                Err(e) => {
+                    ok = false;
+                    step_logs.push(format!("CLICK {rest} FAIL: {e}"));
+                }
+            },
+            "WAIT_MS" => {
+                let ms = rest.parse::<u64>().unwrap_or(200).min(10000);
+                thread::sleep(Duration::from_millis(ms));
+                step_logs.push(format!("WAIT_MS {ms}"));
+            }
+            "EXPECT" => {
+                if let Some(needle) = rest.strip_prefix("CONTAINS ") {
+                    let n = needle.trim().trim_matches('"');
+                    if !last_body.contains(n) {
+                        ok = false;
+                        step_logs.push(format!("EXPECT CONTAINS `{n}` FAIL"));
+                    } else {
+                        step_logs.push(format!("EXPECT CONTAINS `{n}` OK"));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0).round();
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": ok,
+                "elapsed_ms": elapsed_ms,
+                "target": tgt,
+                "eval": eval_out,
+                "audit": audit_out,
+                "screenshot": shot_out,
+                "steps": step_logs,
+                "js_errors": sess.js_errors,
+                "network_errors": sess.network_errors,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "[probe cdp] {} `{}` ({}) in {}ms",
+            if ok { "OK" } else { "FAIL" },
+            tgt.title,
+            tgt.url,
+            elapsed_ms
+        );
+        if let Some(ev) = &eval_out {
+            println!("  eval: {ev}");
+        }
+        if let Some(au) = &audit_out {
+            println!("  audit: {au}");
+        }
+        if let Some(sh) = &shot_out {
+            println!("  screenshot: {sh}");
+        }
+        for sl in &step_logs {
+            println!("  - {sl}");
+        }
+        for je in &sess.js_errors {
+            println!("  ! {je}");
+        }
+        for ne in &sess.network_errors {
+            println!("  ! {ne}");
+        }
+    }
+    if ok {
+        0
+    } else {
+        1
     }
 }

@@ -3,6 +3,7 @@ use ignore::WalkBuilder;
 pub mod impact;
 pub mod locate;
 pub mod product;
+pub mod trace;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -181,6 +182,17 @@ enum SubCmd {
         root: String,
         #[arg(short = 'k', long, default_value_t = 5)]
         top_k: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Multi-hop Tree-sitter call-chain tracer (<30ms): maps upstream callers (1..depth hops), downstream callees & notable I/O/exec/DOM/SQL sinks
+    Trace {
+        /// Function or method symbol name to trace
+        symbol: String,
+        #[arg(default_value = ".")]
+        root: String,
+        #[arg(short = 'd', long, default_value_t = 3)]
+        depth: usize,
         #[arg(long)]
         json: bool,
     },
@@ -1433,6 +1445,25 @@ pub fn run_cli(args: &[String]) -> i32 {
                 println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
             } else {
                 print!("{}", locate::render_locate_md(&rep));
+            }
+            return 0;
+        }
+        Some(SubCmd::Trace {
+            symbol,
+            root,
+            depth,
+            json,
+        }) => {
+            let root_p = PathBuf::from(&root);
+            if !root_p.exists() {
+                eprintln!("[atlas] path not found: {root}");
+                return 1;
+            }
+            let rep = trace::trace_symbol_chain(&root_p, &symbol, depth);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+            } else {
+                println!("{}", trace::render_trace_md(&rep));
             }
             return 0;
         }

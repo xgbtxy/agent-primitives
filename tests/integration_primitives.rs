@@ -2180,3 +2180,287 @@ fn test_ui_layout_network_auditor_sec_scanner_and_fault_localizer() {
     );
     assert!(deep_out.contains("[sec]") && deep_out.contains("[mutate]"));
 }
+
+#[test]
+fn test_minified_asar_binary_cdp_attach_and_callchain_trace() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v20_home");
+
+    // 1. Minified 60KB single-line JS bundle with 2 matches far from byte 0
+    let pad = "var _x=1;".repeat(2000);
+    let minified = format!(
+        "{pad}function handleA(u){{if(u){{return postSecretToken(u);}}}}{pad}function handleB(v){{return postSecretToken(v+1);}}{pad}"
+    );
+    fs::write(root.join("bundle.min.js"), &minified).unwrap();
+    let ms = run_ap(
+        root,
+        &[
+            "search",
+            "postSecretToken",
+            "bundle.min.js",
+            "--pretty",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ms.status.success());
+    let mj: Value = serde_json::from_slice(&ms.stdout).unwrap();
+    let hits = mj["matches"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "Expected 2 matches on minified line 1: {mj}");
+    assert!(hits[0]["scope"]
+        .as_str()
+        .unwrap()
+        .contains("minified @off="));
+    assert!(hits[0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("postSecretToken(u)"));
+    let off0: usize = hits[0]["scope"]
+        .as_str()
+        .unwrap()
+        .split("@off=")
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mr = run_ap(
+        root,
+        &[
+            "read",
+            "bundle.min.js",
+            "--offset",
+            &off0.saturating_sub(30).to_string(),
+            "--chars",
+            "160",
+            "--pretty",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(mr.status.success());
+    let mr_s = String::from_utf8_lossy(&mr.stdout);
+    assert!(mr_s.contains("postSecretToken(u)") && mr_s.contains('\n'));
+
+    // 2. Real Electron `.asar` archive (Chromium Pickle header + JSON tree + payload)
+    let preload_bytes = b"export function initBridge(){ return ipcBridge.invoke('status'); }\n";
+    let hdr_json = format!(
+        r#"{{"files":{{"preload.js":{{"size":{},"offset":"0"}}}}}}"#,
+        preload_bytes.len()
+    );
+    let hdr_b = hdr_json.as_bytes();
+    let pad_len = (4 - (hdr_b.len() % 4)) % 4;
+    let json_pickle_payload = 4u32 + (hdr_b.len() + pad_len) as u32;
+    let outer_pickle_payload = 4u32 + json_pickle_payload;
+    let mut asar = Vec::new();
+    asar.extend_from_slice(&4u32.to_le_bytes());
+    asar.extend_from_slice(&outer_pickle_payload.to_le_bytes());
+    asar.extend_from_slice(&json_pickle_payload.to_le_bytes());
+    asar.extend_from_slice(&(hdr_b.len() as u32).to_le_bytes());
+    asar.extend_from_slice(hdr_b);
+    asar.resize(asar.len() + pad_len, 0);
+    asar.extend_from_slice(preload_bytes);
+    fs::write(root.join("app.asar"), &asar).unwrap();
+
+    let as_list = run_ap(root, &["read", "app.asar"], None, &[("AP_HOME", &ap_home)]);
+    assert!(as_list.status.success());
+    assert!(String::from_utf8_lossy(&as_list.stdout).contains("preload.js"));
+
+    let as_ent = run_ap(
+        root,
+        &["read", "app.asar", "--entry", "preload.js"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(as_ent.status.success());
+    assert!(String::from_utf8_lossy(&as_ent.stdout).contains("ipcBridge.invoke"));
+
+    let as_srch = run_ap(
+        root,
+        &["search", "ipcBridge", "app.asar"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(as_srch.status.success());
+    assert!(String::from_utf8_lossy(&as_srch.stdout).contains("app.asar::preload.js"));
+
+    // 3. Synthetic PE x86_64 binary containing both ASCII & Windows UTF-16LE wide strings
+    let mut pe = vec![0u8; 0x100];
+    pe[0] = b'M';
+    pe[1] = b'Z';
+    pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes()); // x86_64
+    pe.extend_from_slice(b"\0\0AsciiTelemetryUrl=https://api.example.local/v1\0\0");
+    for ch in "NamedPipeEndpoint_V2".encode_utf16() {
+        pe.extend_from_slice(&ch.to_le_bytes());
+    }
+    pe.extend_from_slice(&[0, 0]);
+    fs::write(root.join("helper.dll"), &pe).unwrap();
+
+    let bin_r = run_ap(
+        root,
+        &["read", "helper.dll", "--query", "NamedPipeEndpoint"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(bin_r.status.success());
+    let bin_s = String::from_utf8_lossy(&bin_r.stdout);
+    assert!(bin_s.contains("Windows PE (x86_64,"), "Got: {bin_s}");
+    assert!(bin_s.contains("[utf16le ") && bin_s.contains("NamedPipeEndpoint_V2"));
+
+    let bin_s2 = run_ap(
+        root,
+        &["search", "NamedPipeEndpoint", "helper.dll"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(bin_s2.status.success());
+    assert!(String::from_utf8_lossy(&bin_s2.stdout).contains("NamedPipeEndpoint_V2"));
+
+    // 4. Multi-hop Tree-sitter Call-Chain Tracer (`ap atlas trace`)
+    fs::create_dir_all(root.join("svc")).unwrap();
+    fs::write(
+        root.join("svc/fs_util.ts"),
+        "import fs from 'node:fs';\nexport function readDiskAsset(p: string) { return fs.readFileSync(p, 'utf8'); }\nexport function resolveTemplatePath(n: string) { return readDiskAsset('/tpl/' + n); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("svc/export.ts"),
+        "import { resolveTemplatePath } from './fs_util';\nexport function dispatchExport(name: string) { return resolveTemplatePath(name); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("svc/router.ts"),
+        "import { dispatchExport } from './export';\nexport function httpRouter(req: any) { return dispatchExport(req.file); }\n",
+    )
+    .unwrap();
+    let tr = run_ap(
+        root,
+        &[
+            "atlas",
+            "trace",
+            "readDiskAsset",
+            "svc",
+            "--depth",
+            "3",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(tr.status.success());
+    let tj: Value = serde_json::from_slice(&tr.stdout).unwrap();
+    let ups: Vec<&str> = tj["upstream_callers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["symbol"].as_str())
+        .collect();
+    assert!(ups.contains(&"resolveTemplatePath"), "hop 1 missing: {tj}");
+    assert!(ups.contains(&"dispatchExport"), "hop 2 missing: {tj}");
+    assert!(ups.contains(&"httpRouter"), "hop 3 missing: {tj}");
+    assert!(tj["notable_sinks"].to_string().contains("readFileSync"));
+
+    // 5. Live Running Browser CDP Attach (`ap probe cdp --port P --list / --eval`) WITHOUT killing host browser
+    let browser_opt = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .find(|p| Path::new(p).is_file())
+    .copied();
+
+    if let Some(browser) = browser_opt {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let prof = root.join("ext_cdp_prof");
+        let _ = fs::create_dir_all(&prof);
+        let mut ext_browser = Command::new(browser)
+            .args([
+                "--headless=new",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+                "--no-sandbox",
+                "--no-first-run",
+                "--remote-debugging-address=127.0.0.1",
+                &format!("--remote-debugging-port={port}"),
+                "--remote-allow-origins=*",
+                &format!("--user-data-dir={}", prof.display()),
+                "about:blank",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let mut listed = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        while std::time::Instant::now() < deadline {
+            let ls = run_ap(
+                root,
+                &[
+                    "probe",
+                    "cdp",
+                    "--port",
+                    &port.to_string(),
+                    "--list",
+                    "--json",
+                ],
+                None,
+                &[("AP_HOME", &ap_home)],
+            );
+            if ls.status.success() {
+                let lj: Value = serde_json::from_slice(&ls.stdout).unwrap();
+                if lj["count"].as_u64().unwrap_or(0) >= 1 {
+                    listed = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        assert!(
+            listed,
+            "Expected ap probe cdp --list to discover running browser"
+        );
+
+        let ev = run_ap(
+            root,
+            &[
+                "probe",
+                "cdp",
+                "--port",
+                &port.to_string(),
+                "--eval",
+                "40 + 2",
+                "--json",
+            ],
+            None,
+            &[("AP_HOME", &ap_home)],
+        );
+        assert!(
+            ev.status.success(),
+            "ap probe cdp --eval failed: {}{}",
+            String::from_utf8_lossy(&ev.stdout),
+            String::from_utf8_lossy(&ev.stderr)
+        );
+        let ej: Value = serde_json::from_slice(&ev.stdout).unwrap();
+        assert_eq!(ej["eval"], "42");
+        // Verify detaching NEVER killed the external host browser process!
+        assert!(
+            ext_browser.try_wait().unwrap().is_none(),
+            "ap probe cdp must NOT kill the attached host browser process"
+        );
+        let _ = ext_browser.kill();
+        let _ = ext_browser.wait();
+    }
+}

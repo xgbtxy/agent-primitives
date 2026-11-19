@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod bench;
+pub mod binary;
 pub mod exec;
 pub mod install;
 pub mod mcp;

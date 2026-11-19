@@ -43,11 +43,11 @@ curl -fsSL https://raw.githubusercontent.com/xgbtxy/ap/main/install.sh | sh
 
 | AI `<thinking>` 真实卡点 | 没装 `ap` 时为什么会越干越乱？ | `ap` 怎么在底层顺着思考链路提效？（用户零感知） |
 | :--- | :--- | :--- |
-| **1. 读任意文件/库/压缩包、SQL 跨源联表与动态网页**<br>*(通用办公、数据排障与编程)* | 读 `.docx`/`.xlsx`/`.sqlite`/`.gz`/图片报乱码、3000 行多表心算必错、`curl` 动态网页只拿到空 `<div id="root">`，没装 Python/sqlite3 就抓瞎。 | **`ap read`** 原生解构 Office/PDF/SQLite/`.gz`/图片尺寸并用无头 Edge 自动渲染 SPA；**`ap query`** 免 Python 直接跨 `.sqlite` + 多工作表 `.xlsx` (`a__all`) + `GBK` 流水联表 SQL；**`ap search`** 同搜代码语法树与文档。 |
-| **2. 开局盲猜、零提示排障与跨文件漏改**<br>*(全域 X 光、故障定位与影响面)* | 面对多文件客诉靠 `ls`/`rg` 盲搜浪费多轮，或多文件重构只改 2 处漏掉 5 处下游调用方。 | **<15 ms 全域 X 光地图 (`atlas map`)** + **<25 ms 症状直达函数定位 (`atlas locate`)** + **语法树 `ap_impact` 全量调用链** + UI `#id` ↔ 路由契约。 |
+| **1. 读任意文件/归档/二进制/压缩包与动态网页**<br>*(通用办公、桌面端审计与编程)* | 读 `.docx`/`.xlsx`/`.sqlite`/`.asar`/`.vsix`/PE 宽字符报乱码，遇 15MB 单行压缩 JS 撑爆上下文，或 `curl` SPA 仅得空壳。 | **`ap read`** 原生解构 Office/PDF/SQLite/`.gz`/`.asar`/`.vsix`/PE-ELF UTF-16LE 字符串、压缩 JS 偏移切片美化（`--offset --pretty`）与无头 SPA；**`ap query`** 免 Python 跨源联表 SQL；**`ap search`** 同搜代码语法树、单行压缩包、`.asar`/`.vsix` 与二进制。 |
+| **2. 开局盲猜、零提示排障与多跳调用链追踪**<br>*(全域 X 光、故障定位与调用链)* | 面对多文件客诉靠 `ls`/`rg` 盲搜或手写 Python AST 脚本追调用链，或重构只改 2 处漏掉 5 处调用方。 | **<15 ms 全域 X 光 (`atlas map`)** + **<25 ms 症状直达函数 (`atlas locate`)** + **<30 ms 多跳调用链与高危 Sink 追踪 (`atlas trace`)** + **语法树 `ap_impact`**。 |
 | **3. 跨文件创造断链、补丁失败与追加截断**<br>*(跨模块契约与容错修改)* | 从零写多模块常出现幻觉导出名、函数实参个数不匹配，或因空行偏差打补丁失败、向长报告追加时把原文截断。 | **<5 ms 跨文件导出名与实参个数静态链接检查** + **四级空行容错 / Git Diff / `@@ APPEND:` 零截断追加** + **6 语言语法树验错** + **`ap undo`**。 |
 | **4. 终端水土不服死循环**<br>*(Windows/Mac 头号泥潭)* | 模型 90% 语料是 Linux Bash，到了 Windows 撞上 **528 次崩溃**（`'gbk'` 乱码、PS 5.1 不认 `&&`/`curl`/`<<EOF`）与残留孤儿进程。 | **Base64 零转义 Hook + `ap exec`** 无感锁死 UTF-8、治愈 PS 语法坑，通过 **Windows NT 内核 `Job Object`** 根除孤儿进程锁死，并过滤 90%+ 刷屏日志。 |
-| **5. 表面“假绿灯”、安全漏洞与盲交前端页面**<br>*(六合一深度自验门禁)* | 写出零断言空测或仅 `62.5%` 变异率的弱单测、埋下 SQL 注入/路径穿越/DOM XSS、或交付移动端溢出/按钮遮挡/404 静默报错的前端页面。 | **一行 `ap guard verify --deep`** 融合 **OWASP 安全扫描 (`guard sec`)** + **防空测/防 Slop** + **跨文件契约** + **全接口混沌并发 Fuzz (`probe fuzz`)** + **桌面/移动端 UI 布局与网络巡检 (`probe ui`)** + **活跃文件变异测试 (`probe mutate`)** 并输出完整实证回执。 |
+| **5. 表面“假绿灯”、安全漏洞与运行中浏览器调试**<br>*(六合一深度自验 + 无杀宿主 CDP 附加)* | 写出零断言空测或仅 `62.5%` 变异率的弱单测、埋下 OWASP 缺陷、盲交溢出前端，或反复手写易崩的 Python WebSocket/CDP 脚本。 | **一行 `ap guard verify --deep`** 融合 **OWASP 安全 (`guard sec`)** + **防空测/防 Slop** + **契约** + **接口 Fuzz** + **双端 UI (`probe ui`)** + **活跃文件变异**；**`ap probe cdp`** 直接附加运行中 Chrome/Electron 调试端口且绝不误杀宿主进程。 |
 
 ---
 
@@ -79,6 +79,7 @@ $ ap stats
 | **非编程日常办公（无 Python 电脑）** · *核对 `.docx` + `.xlsx` + `GBK` 流水* | `70.5s` *(读出乱码+调 Python 报错)* → **`46.5s`（快 1.52 倍）** | **`5/5` → `5/5`** *(`ap read` 一次直读零报错)* | **`-54.3%`** (`127k → 58k`) |
 | **复杂财务跨表与动态内网对账** · *2500 行双表 `.xlsx` + `GBK` 流水 + 动态 SPA* | `118.4s` *(连写 5 遍 XML 解析脚本)* → **`94.3s`（快 1.26 倍）** | **`5/5` → `5/5`** *(`ap query` 精确到分 + 无头 Edge 渲染)* | **`-35.1%`** (`212k → 138k`) |
 | **无 Python 全栈排障与跨库稽核** · *`.sqlite` + 3000 行 `.xlsx` + `.log.gz` + 代码单测* | `112.0s` *(手拼 .NET 解压+4 遍脚本)* → **`94.3s`（快 1.19 倍）** | **`6/6` → `6/6`** *(`.gz` 首屏抓 `[FATAL]` + SQLite↔Excel 联表 + `APPEND`)* | **`-28.7%`** (`235k → 167k`) |
+| **桌面端归档、二进制与运行中 CDP 全栈审计** · *`.asar` + 180KB 单行压缩 JS + PE 宽字符 + 运行中 CDP + 3 跳追踪* | `98.88s` *(手写 Node/WS/ASAR 解析脚本)* → **`83.43s`（快 1.19 倍，零手写脚本）** | **`5/5` → `5/5`** *（`15` vs `4` 条单测 + `--deep` 全绿，宿主浏览器零中断）* | **`-17.8%`** (`146k → 120k`) |
 | **全栈安全与双端 UI 创造验收** · *`EventDesk`（SQLite + 桌面/移动布局 + XSS + 并发 Fuzz）* | 零手写浏览器脚本 *(`probe ui` + `smoke` 替代手写 `test/browser.mjs`)* | **单测变异杀伤率：`62.5%` (`5/8`) → `100.0%` (`8/8`)**，**`5/5`（0 安全缺陷 / 0 404 / 0 溢出）** | *6 门禁实证回执将调用步数压降 `-30.8%` (`13→9`)* |
 | **18 模块零提示客诉排障定位** · *`CommerceCore` 优惠券叠加资损（零文件名提示）* | `123.37s` → **`107.59s`（快 1.15 倍，`atlas locate` + `--deep` 一次直通）** | **`5/5` + 变异率 `100%`** *（联动 `atlas impact` 与活跃文件变异门禁）* | **`-7.2%`** (`111k → 103k`) |
 | **从零创造高并发服务与深度自测** · *秒杀与钱包引擎 `FlashVault`（10 路并发压测）* | 仅 `7` 步完成创造 + 五合一深度门禁 | **单测变异杀伤率：`62.5%` (`5/8`) → `100.0%` (`8/8` 全杀，黑盒 `10/10`)** | *自主揪出并消灭 3 处漏测边界缺陷* |
@@ -94,7 +95,7 @@ $ ap stats
 
 <br/>
 
-- **纯 Rust 零耦合单文件架构**：1 个原生二进制内聚 7 个物理隔离 crate（`crates/ap-{atlas,splice,probe,sieve,guard,recall,baton}`），子 crate 之间 `0` 相互依赖，内置 SQLite FTS5 与 6 语言编译态 Tree-sitter C 语法树，常驻提示词仅 `396` Tokens。
+- **纯 Rust 零耦合单文件架构**：1 个原生二进制内聚 7 个物理隔离 crate（`crates/ap-{atlas,splice,probe,sieve,guard,recall,baton}`），子 crate 之间 `0` 相互依赖，内置 SQLite FTS5 与 6 语言编译态 Tree-sitter C 语法树，常驻提示词仅 `390` Tokens。
 - **一键复现底层微基准**：运行 `ap bench`（详见 [`bench/results.json`](./bench/results.json)）。
 - **深度工程文档**：
   - [核心研发理念与演进手册 (`docs/HANDBOOK.zh-CN.md`)](./docs/HANDBOOK.zh-CN.md) | [R&D Philosophy (`docs/HANDBOOK.md`)](./docs/HANDBOOK.md)

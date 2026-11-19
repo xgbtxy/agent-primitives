@@ -6,15 +6,19 @@ fn mcp_tools_schema() -> Value {
     json!([
         {
             "name": "ap_read",
-            "description": "Universal zero-dependency reader for general & coding agents: reads Word (.docx), Excel (.xlsx worksheets/tables), PowerPoint (.pptx), PDF text, CSV/TSV/JSON, legacy GBK/GB18030/UTF-16 files on Windows, or web http(s):// URLs without mojibake or context-window overflow. Supports `lines` paging and `query` filtering.",
+            "description": "Universal zero-dependency reader: parses .docx/.xlsx/.pptx/.pdf/.sqlite/.gz, Electron .asar & .zip/.vsix/.jar/.whl virtual archives (--entry without extracting), PE/ELF/Mach-O headers + ASCII & Windows UTF-16LE strings, minified JS bundles (--offset/--chars/--pretty), GBK files, and JS-rendered URLs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": { "type": "string", "description": "Local file/folder path or http(s):// URL" },
                     "lines": { "type": "string", "description": "Optional line window, e.g. '1-120'" },
-                    "query": { "type": "string", "description": "Optional keyword filter for rows/paragraphs" },
+                    "query": { "type": "string", "description": "Optional keyword/regex filter for rows, minified slices, archive entries, or binary strings" },
                     "sheet": { "type": "string", "description": "Optional worksheet filter for .xlsx" },
-                    "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome (extracts headings, interactive controls & tables)" }
+                    "entry": { "type": "string", "description": "Optional archive entry path inside .asar/.zip/.vsix/.jar/.apk/.whl" },
+                    "offset": { "type": "integer", "description": "Optional byte offset for slicing giant/minified single-line bundles" },
+                    "chars": { "type": "integer", "description": "Optional slice window length with offset (default: 2400)" },
+                    "pretty": { "type": "boolean", "description": "Pretty-format minified JS/JSON snippets" },
+                    "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome" }
                 },
                 "required": ["target"]
             }
@@ -39,13 +43,14 @@ fn mcp_tools_schema() -> Value {
         },
         {
             "name": "ap_search",
-            "description": "Fast .gitignore-aware regex search across codebases AND `.docx`/`.xlsx`/`.pdf`/GBK files (zero external ripgrep needed). Automatically tags code matches with their enclosing Tree-sitter AST function/class span.",
+            "description": "Fast .gitignore-aware regex search across codebases (with AST spans), giant/minified JS bundles (auto byte-window + pretty-print), Electron .asar & .zip/.vsix archives, Office/PDF docs, and binary ASCII/UTF-16LE strings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex or literal search pattern" },
                     "path": { "type": "string", "description": "Directory or file to search (default: '.')" },
-                    "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'xlsx,docx'" }
+                    "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'asar,vsix'" },
+                    "pretty": { "type": "boolean", "description": "Pretty-format matches inside minified single-line bundles" }
                 },
                 "required": ["pattern"]
             }
@@ -202,6 +207,35 @@ fn mcp_tools_schema() -> Value {
         }
     },
     {
+        "name": "ap_trace",
+        "description": "Multi-hop Tree-sitter call-chain tracer (<30ms): maps upstream callers (1..depth hops), downstream callees & notable I/O/exec/DOM/SQL sinks for any function across Py/TS/JS/Go/Rust/C.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": { "type": "string", "description": "Function or method symbol name to trace" },
+                "path": { "type": "string", "description": "Workspace root directory (default: '.')" },
+                "depth": { "type": "integer", "description": "Max upstream caller hops (default: 3)" }
+            },
+            "required": ["symbol"]
+        }
+    },
+    {
+        "name": "ap_cdp",
+        "description": "Attach directly to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list targets, --target filter, --eval async JS, --audit layout, --screenshot PNG, or interactive steps) without killing the host app.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "host": { "type": "string", "description": "CDP host (default: '127.0.0.1')" },
+                "port": { "type": "integer", "description": "CDP debugging port (default: 9222)" },
+                "list": { "type": "boolean", "description": "List all live debuggable targets" },
+                "target": { "type": "string", "description": "Substring matching target title, url, or id" },
+                "eval": { "type": "string", "description": "JavaScript expression to evaluate (awaits Promises)" },
+                "audit": { "type": "boolean", "description": "Run live DOM layout/overflow/overlap check" },
+                "screenshot": { "type": "string", "description": "Optional PNG screenshot output path" }
+            }
+        }
+    },
+    {
         "name": "ap_verify",
             "description": "Run final quality gate before finishing: checks 0 broken HTML #id <-> JS selector or fetch() <-> route contracts, 0 anti-slop violations (:any, @ts-ignore, empty catch {}), and runs project tests.",
             "inputSchema": {
@@ -318,6 +352,25 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 cli.push("--sheet".to_string());
                 cli.push(sh.to_string());
             }
+            if let Some(ent) = args
+                .get("entry")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--entry".to_string());
+                cli.push(ent.to_string());
+            }
+            if let Some(off) = args.get("offset").and_then(Value::as_u64) {
+                cli.push("--offset".to_string());
+                cli.push(off.to_string());
+            }
+            if let Some(ch) = args.get("chars").and_then(Value::as_u64) {
+                cli.push("--chars".to_string());
+                cli.push(ch.to_string());
+            }
+            if args.get("pretty").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--pretty".to_string());
+            }
             if args.get("render").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--render".to_string());
             }
@@ -382,6 +435,9 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             {
                 cli.push("--ext".to_string());
                 cli.push(ext.to_string());
+            }
+            if args.get("pretty").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--pretty".to_string());
             }
             run_self_captured(&cli, None)
         }
@@ -704,6 +760,75 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             let (ok, out) = run_self_captured(&cli, Some(&spec_txt));
             crate::stats::record_event("smoke", 0, 0, 1, 1, "mcp-smoke");
             (ok, out)
+        }
+        "ap_trace" => {
+            let sym = args
+                .get("symbol")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if sym.is_empty() {
+                return (false, "Pass non-empty `symbol` to `ap_trace`.".to_string());
+            }
+            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(3);
+            run_self_captured(
+                &[
+                    "atlas".into(),
+                    "trace".into(),
+                    sym.into(),
+                    path.into(),
+                    "--depth".into(),
+                    depth.to_string(),
+                ],
+                None,
+            )
+        }
+        "ap_cdp" => {
+            let host = args
+                .get("host")
+                .and_then(Value::as_str)
+                .unwrap_or("127.0.0.1");
+            let port = args.get("port").and_then(Value::as_u64).unwrap_or(9222);
+            let mut cli = vec![
+                "probe".into(),
+                "cdp".into(),
+                "--host".into(),
+                host.into(),
+                "--port".into(),
+                port.to_string(),
+            ];
+            if args.get("list").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--list".into());
+            }
+            if let Some(t) = args
+                .get("target")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--target".into());
+                cli.push(t.into());
+            }
+            if let Some(ev) = args
+                .get("eval")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--eval".into());
+                cli.push(ev.into());
+            }
+            if args.get("audit").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--audit".into());
+            }
+            if let Some(sp) = args
+                .get("screenshot")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--screenshot".into());
+                cli.push(sp.into());
+            }
+            run_self_captured(&cli, None)
         }
         "ap_verify" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
