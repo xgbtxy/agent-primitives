@@ -3,9 +3,9 @@ name: sieve
 description: Compress noisy CLI/CI logs, JSON/JSONL streams, HTML tables, and CSV/TSV by 80-99% into a deterministic digest with sub-ms bundled SQLite FTS5 `search` and lossless `peek` (`--lines`, `--grep`, `--json-path`).
 ---
 
-# Sieve — Lossless Output Compressor, Table Extractor & FTS5 Flight Recorder
+# Sieve — Lossless Output Compressor, Compiler/Test/Diff Digester & FTS5 Flight Recorder
 
-Keep massive tool outputs out of the context window without losing a single stack frame, JSONL error event, or HTML/CSV table row. Native Rust single-binary primitive with bundled SQLite FTS5 (`0` runtime dependencies).
+Keep massive tool outputs out of the context window without losing a single compiler error (`rustc`/`tsc`/`gcc`/`go`), failing test assertion (`cargo test`/`pytest`/`jest`/`vitest`), unified `git diff` hunk, JSONL error event, or HTML/CSV table row (ANSI colors stripped automatically before digestion; raw stream preserved losslessly). Native Rust single-binary primitive with bundled SQLite FTS5 (`0` runtime dependencies).
 
 ## Usage
 

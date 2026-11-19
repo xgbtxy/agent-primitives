@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node, Parser as TsParser};
 
-const SKIP_DIRS: &[&str] = &[
+pub const SKIP_DIRS: &[&str] = &[
     ".git",
     ".hg",
     ".svn",

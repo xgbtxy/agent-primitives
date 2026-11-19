@@ -159,7 +159,43 @@ fn bench_sieve(tmp: &Path) -> Vec<Value> {
         "signal_preserved": r_ht.rendered.contains("X-Sig-256") && r_ht.rendered.contains("/v2/webhooks"),
     }));
 
-    // Case 5: Honest Negative Control (<1.2 KB short output passthrough)
+    // Case 5: ANSI-colored Cargo/rustc compiler failure log
+    let mut comp_lines = Vec::new();
+    for k in 0..180usize {
+        comp_lines.push(format!(
+            "\x1b[1;33mwarning\x1b[0m: unused variable: `tmp_{k}`\n  --> src/worker.rs:{}:9\n   |\n{} |     let tmp_{k} = {k};\n   |         ^^^^^ help: prefix with `_`\n",
+            20 + k,
+            20 + k
+        ));
+    }
+    comp_lines.push(
+        "\x1b[1;31merror[E0308]\x1b[0m: mismatched types\n  --> src/ledger.rs:88:17\n   |\n88 |     return total;\n   |            ^^^^^ expected `i64`, found `u64`\n"
+            .to_string(),
+    );
+    comp_lines.push(
+        "\x1b[1;31merror[E0599]\x1b[0m: no method named `commit_tx` found for struct `Ledger`\n  --> src/ledger.rs:104:12\n"
+            .to_string(),
+    );
+    let raw_comp = comp_lines.join("\n");
+    let t0 = Instant::now();
+    let r_comp = ap_sieve::compress_stream_in(&store, &raw_comp, "cargo-check", 101, 0.0);
+    let lat_comp = (t0.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+    cases.push(json!({
+        "workload": "sieve: ANSI-colored Cargo/rustc compiler diagnostics (Coding Agent)",
+        "mode": r_comp.mode,
+        "raw_bytes": r_comp.raw_bytes,
+        "out_bytes": r_comp.digest_bytes,
+        "raw_tokens_est": r_comp.raw_tokens_est,
+        "out_tokens_est": r_comp.digest_tokens_est,
+        "reduction_pct": r_comp.saved_pct,
+        "latency_ms": lat_comp,
+        "signal_preserved": r_comp.mode == "compiler"
+            && r_comp.rendered.contains("E0308")
+            && r_comp.rendered.contains("src/ledger.rs:88:17")
+            && !r_comp.rendered.contains('\x1b'),
+    }));
+
+    // Case 6: Honest Negative Control (<1.2 KB short output passthrough)
     let short_txt = "On branch main\nChanges not staged for commit:\n  modified: src/main.rs\n";
     let t0 = Instant::now();
     let r_short = ap_sieve::compress_stream_in(&store, short_txt, "git-status", 0, 0.0);
@@ -405,6 +441,16 @@ fn bench_atlas_probe_splice(tmp: &Path) -> (Value, Value, Value) {
         .unwrap_or(false);
     let chk = ap_splice::check::collect_check_payload(&sp_repo, false, "");
 
+    let ren = ap_splice::rename::rename_symbol_workspace(
+        &sp_repo,
+        "commit_invoice",
+        "finalize_invoice",
+        false,
+        false,
+        "",
+        false,
+    );
+
     let splice_res = json!({
         "full_module_tokens_est": full_tokens,
         "symbol_view_tokens_est": sym_tokens,
@@ -414,6 +460,8 @@ fn bench_atlas_probe_splice(tmp: &Path) -> (Value, Value, Value) {
         "atomic_apply_latency_ms": apply_ms,
         "crlf_preserved": crlf_preserved,
         "repo_ast_check_latency_ms": chk.elapsed_ms,
+        "ast_rename_ok": ren.ok && ren.total_replacements == 1,
+        "ast_rename_latency_ms": ren.elapsed_ms,
     });
 
     (atlas_res, probe_res, splice_res)

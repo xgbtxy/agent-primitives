@@ -2,7 +2,7 @@ use clap::Parser;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -141,11 +141,21 @@ fn norm_cmd_key(s: &str) -> String {
         .collect()
 }
 
+fn track_sliding_loop(win: &mut VecDeque<String>, nk: String) -> bool {
+    if nk.is_empty() {
+        return false;
+    }
+    win.push_back(nk.clone());
+    if win.len() > 6 {
+        win.pop_front();
+    }
+    win.iter().filter(|x| x.as_str() == nk.as_str()).count() >= 3
+}
+
 fn scan_codex(f: &Path) -> Counters {
     let mut st = Counters::default();
     let Ok(file) = File::open(f) else { return st };
-    let mut prev = String::new();
-    let mut streak = 0usize;
+    let mut recent: VecDeque<String> = VecDeque::with_capacity(7);
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if !line.contains("call") {
             continue;
@@ -167,15 +177,8 @@ fn scan_codex(f: &Path) -> Counters {
                 .as_str()
                 .or_else(|| o["payload"]["input"].as_str())
                 .unwrap_or("");
-            let nk = norm_cmd_key(inp);
-            if !nk.is_empty() && nk == prev {
-                streak += 1;
-                if streak >= 2 {
-                    st.identical_retry_loops += 1;
-                }
-            } else {
-                prev = nk;
-                streak = 0;
+            if track_sliding_loop(&mut recent, norm_cmd_key(inp)) {
+                st.identical_retry_loops += 1;
             }
             classify_cmd(inp, &mut st);
         } else if pt == "function_call_output" || pt == "custom_tool_call_output" {
@@ -351,8 +354,7 @@ fn scan_pi(f: &Path) -> Counters {
     let mut st = Counters::default();
     let Ok(file) = File::open(f) else { return st };
     let mut seen_reads: HashMap<String, usize> = HashMap::new();
-    let mut prev = String::new();
-    let mut streak = 0usize;
+    let mut recent: VecDeque<String> = VecDeque::with_capacity(7);
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if !line.contains("\"message\"") {
             continue;
@@ -397,15 +399,8 @@ fn scan_pi(f: &Path) -> Counters {
                             }
                         } else if nm == "bash" || nm == "powershell" {
                             let cmd_s = args["command"].as_str().unwrap_or("");
-                            let nk = norm_cmd_key(cmd_s);
-                            if !nk.is_empty() && nk == prev {
-                                streak += 1;
-                                if streak >= 2 {
-                                    st.identical_retry_loops += 1;
-                                }
-                            } else {
-                                prev = nk;
-                                streak = 0;
+                            if track_sliding_loop(&mut recent, norm_cmd_key(cmd_s)) {
+                                st.identical_retry_loops += 1;
                             }
                             classify_cmd(cmd_s, &mut st);
                         }

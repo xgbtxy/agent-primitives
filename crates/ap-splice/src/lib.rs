@@ -2,6 +2,7 @@ pub mod ast;
 pub mod blast;
 pub mod check;
 pub mod patch;
+pub mod rename;
 
 use ast::{find_symbol_span, scan_symbols, verify_syntax};
 use base64::Engine;
@@ -90,6 +91,23 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Tree-sitter AST-exact workspace symbol rename across Py/TS/JS/Go/Rust/C (ignores comments & strings)
+    Rename {
+        old_name: String,
+        new_name: String,
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        test: bool,
+        #[arg(long, default_value = "")]
+        test_cmd: String,
+        #[arg(long)]
+        rollback_on_test_fail: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn md_heading_re() -> &'static (Regex, Regex) {
@@ -146,7 +164,10 @@ fn format_numbered(lines: &[&str], s_1idx: usize, e_1idx: usize) -> String {
         .join("\n")
 }
 
-fn decode_source_bytes_clean(raw_b: &[u8], label: &str) -> Result<(String, &'static str), String> {
+pub(crate) fn decode_source_bytes_clean(
+    raw_b: &[u8],
+    label: &str,
+) -> Result<(String, &'static str), String> {
     let text = if let Some(rest) = raw_b.strip_prefix(b"\xEF\xBB\xBF") {
         std::str::from_utf8(rest)
             .map_err(|e| format!("`{label}` is not valid UTF-8: {e}"))?
@@ -291,7 +312,7 @@ pub fn view_single_file(
     })
 }
 
-fn purge_stale_pyc(py_file: &Path) {
+pub(crate) fn purge_stale_pyc(py_file: &Path) {
     let Some(parent) = py_file.parent() else {
         return;
     };
@@ -818,6 +839,38 @@ pub fn run_cli(args: &[String]) -> i32 {
                 emit_check_human(&payload);
             }
             if payload.ok {
+                0
+            } else {
+                1
+            }
+        }
+        SubCmd::Rename {
+            old_name,
+            new_name,
+            root,
+            dry_run,
+            test,
+            test_cmd,
+            rollback_on_test_fail,
+            json: as_json,
+        } => {
+            let rep = rename::rename_symbol_workspace(
+                &root,
+                &old_name,
+                &new_name,
+                dry_run,
+                test,
+                &test_cmd,
+                rollback_on_test_fail,
+            );
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+            } else if rep.ok {
+                println!("{}", rename::render_rename_human(&rep));
+            } else {
+                eprintln!("{}", rename::render_rename_human(&rep));
+            }
+            if rep.ok {
                 0
             } else {
                 1

@@ -48,4 +48,8 @@ EOF
 
 # 3. Standalone sub-25ms UTF-8 + 6-language Tree-sitter AST + local-import + auto-test gate
 ap splice check . --test
+
+# 4. Tree-sitter AST-exact workspace symbol rename (ignores comments, strings & substrings; supports --dry-run & --rollback-on-test-fail)
+ap splice rename oldSymbol newSymbol . --dry-run
+ap splice rename oldSymbol newSymbol . --test --rollback-on-test-fail
 ```

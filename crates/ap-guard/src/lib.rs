@@ -273,13 +273,27 @@ pub fn inspect_text_safety(text: &str) -> Vec<String> {
 }
 
 fn normalize_error_sig(cmd_str: &str, output: &str, exit_code: i32) -> String {
+    static JITTER_RES: OnceLock<(Regex, Regex)> = OnceLock::new();
+    let (ansi_re, jitter_re) = JITTER_RES.get_or_init(|| {
+        (
+            Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap(),
+            Regex::new(
+                r"(?i)(?:\bpid[=:\s]+\d+|\b\d+(?:\.\d+)?\s*(?:ms|s)\b|(?:/tmp/|\\Temp\\)[A-Za-z0-9._-]+)",
+            )
+            .unwrap(),
+        )
+    });
     let pats = safety_patterns();
     let norm_cmd = cmd_str.split_whitespace().collect::<Vec<_>>().join(" ");
     let err_lines: Vec<String> = output
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(|l| pats.hex_ts_re.replace_all(l, "<HEX>").to_string())
+        .map(|l| {
+            let no_ansi = ansi_re.replace_all(l, "");
+            let no_hex = pats.hex_ts_re.replace_all(&no_ansi, "<HEX>");
+            jitter_re.replace_all(&no_hex, "<VAR>").to_string()
+        })
         .collect();
     let start = err_lines.len().saturating_sub(6);
     let tail_joined = err_lines[start..].join("\n");

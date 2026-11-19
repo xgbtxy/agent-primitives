@@ -776,7 +776,7 @@ fn merge_pi_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
             "command": ap_bin_posix,
             "args": ["mcp"],
             "exposure": "codemode",
-            "description": "Fast Pure-Rust batch read/search, PE/ELF/asar/SourceMap/SQLite/Office parsing, live CDP watch, batch HTTP/TCP/WS/TLS/listen, process tree, atomic FS diff & multi-agent claims/dedup"
+            "description": "Fast Pure-Rust AST edit/rename/orient/impact/trace, batch read/search, SQLite/Office/SourceMap/PE/ELF parsing, compiler/test/diff sieve, baton/recall memory, CDP/HTTP/TCP/WS/TLS probes & multi-agent claims/dedup"
         }),
     );
     if let Some(p) = cfg_path.parent() {
@@ -796,9 +796,10 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
     let escaped = ap_bin_posix.replace('\\', "/").replace('"', "\\\"");
     format!(
         r#"// Managed by agent-primitives (`ap init`). Zero system-prompt token overhead.
-// Safely accelerates slow bash patterns and sieves >28KB noisy direct-to-LLM outputs
-// into user-scoped `~/.ap/sieve` (zero workspace `.sieve` clutter) while leaving
-// destructive commands, write/edit tools, and codemode child calls untouched.
+// Safely accelerates slow bash patterns, breaks 3x repetitive shell doom-loops
+// (resetting cleanly on file edits & session switches), and sieves >28KB noisy
+// direct-to-LLM outputs into `~/.ap/sieve` (zero workspace `.sieve` clutter)
+// while leaving destructive commands, write/edit tools, and codemode child calls untouched.
 import {{ spawnSync }} from "node:child_process";
 import {{ homedir }} from "node:os";
 import {{ join }} from "node:path";
@@ -814,6 +815,19 @@ const PY_INVOKE = /(?:^|[;&|]\s*)(?:python3?|py)\b/i;
 const HAS_UTF8_ENV = /PYTHONUTF8|PYTHONIOENCODING/i;
 const PY_WIN_BS = /\b(?:python3?|py)\s+-c\s+.*(?<![rR])['"][A-Za-z]:\\(?!\\)/;
 const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
+const EDIT_TOOLS = new Set(["write", "edit", "ap_edit", "ap_rename"]);
+const LOOP_WINDOW = 6;
+const LOOP_THRESHOLD = 3;
+
+export function normCmdFingerprint(raw: string): string {{
+	return raw
+		.replace(/^export\s+PYTHONUTF8=1\s+PYTHONIOENCODING=utf-8;\s*/i, "")
+		.replace(/\b0x[0-9a-fA-F]{{4,}}\b/g, "<HEX>")
+		.replace(/\b\d{{4}}-\d{{2}}-\d{{2}}[T\s]\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?Z?\b/g, "<TS>")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 180);
+}}
 
 export function healCommand(raw: string, toolName: string): string | undefined {{
 	if (!raw || DESTRUCTIVE_OR_WRITE.test(raw)) return undefined;
@@ -856,7 +870,19 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 }}
 
 export default function (pi: ExtensionAPI) {{
+	const recentShellFps: string[] = [];
+	const resetLoopTracker = () => {{
+		recentShellFps.length = 0;
+	}};
+
+	pi.on("session_start", resetLoopTracker);
+	pi.on("session_switch", resetLoopTracker);
+
 	pi.on("tool_call", (event) => {{
+		if (EDIT_TOOLS.has(event.toolName)) {{
+			resetLoopTracker();
+			return undefined;
+		}}
 		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
 		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
 		const healed = healCommand(cmd, event.toolName);
@@ -871,31 +897,59 @@ export default function (pi: ExtensionAPI) {{
 		if (event.parentToolCallId) return undefined;
 		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
 		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
-		if (cmd.includes("ap.exe") || /\bap\s+(?:read|search|query|atlas|probe|guard|sieve|baton)\b/.test(cmd)) {{
-			return undefined;
-		}}
 		if (!Array.isArray(event.content) || event.content.length === 0) return undefined;
-		const textBlock = event.content.find((c: {{ type?: string; text?: string }}) => c?.type === "text" && typeof c.text === "string");
+		const textBlock = event.content.find(
+			(c: {{ type?: string; text?: string }}) => c?.type === "text" && typeof c.text === "string",
+		);
 		if (!textBlock || typeof textBlock.text !== "string") return undefined;
-		const rawText = textBlock.text;
-		const hasGiantLine = rawText.split("\n").some((l: string) => l.length > 4500);
-		if (rawText.length < 28000 && !hasGiantLine) return undefined;
 
-		const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
-			input: rawText,
-			encoding: "utf8",
-			timeout: 4000,
-			windowsHide: true,
-			env: {{ ...process.env, SIEVE_HOME }},
-		}});
-		if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < rawText.length * 0.8) {{
-			return {{
-				content: event.content.map((c: {{ type?: string; text?: string }}) =>
-					c === textBlock ? {{ ...c, text: res.stdout }} : c,
-				),
-			}};
+		let outText = textBlock.text;
+		let mutated = false;
+
+		// 1. Auto-sieve noisy >28KB outputs (or giant minified lines) into `~/.ap/sieve`
+		const skipSieve =
+			cmd.includes("ap.exe") ||
+			/\bap\s+(?:read|search|query|atlas|probe|guard|sieve|baton|splice|recall)\b/.test(cmd);
+		if (!skipSieve) {{
+			const hasGiantLine = outText.split("\n").some((l: string) => l.length > 4500);
+			if (outText.length >= 28000 || hasGiantLine) {{
+				const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
+					input: outText,
+					encoding: "utf8",
+					timeout: 4000,
+					windowsHide: true,
+					env: {{ ...process.env, SIEVE_HOME }},
+				}});
+				if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < outText.length * 0.8) {{
+					outText = res.stdout;
+					mutated = true;
+				}}
+			}}
 		}}
-		return undefined;
+
+		// 2. Non-blocking stateful doom-loop circuit-breaker (resets on edits & session switches)
+		const fp = normCmdFingerprint(cmd);
+		if (fp.length >= 8) {{
+			recentShellFps.push(fp);
+			if (recentShellFps.length > LOOP_WINDOW) {{
+				recentShellFps.shift();
+			}}
+			const repeats = recentShellFps.filter((x) => x === fp).length;
+			if (repeats >= LOOP_THRESHOLD) {{
+				const hint = event.isError
+					? `\n[ap loop-breaker] Repeated failing shell command (${{repeats}}/${{LOOP_WINDOW}} calls) without intervening edits. Pause, inspect root cause, edit code or switch strategy/primitive instead of retrying identically.`
+					: `\n[ap loop-breaker] Near-identical shell command repeated (${{repeats}}/${{LOOP_WINDOW}} calls) without edits. Avoid redundant polling; summarize findings or pivot to the next concrete action.`;
+				outText = `${{outText}}${{hint}}`;
+				mutated = true;
+			}}
+		}}
+
+		if (!mutated) return undefined;
+		return {{
+			content: event.content.map((c: {{ type?: string; text?: string }}) =>
+				c === textBlock ? {{ ...c, text: outText }} : c,
+			),
+		}};
 	}});
 }}
 "#

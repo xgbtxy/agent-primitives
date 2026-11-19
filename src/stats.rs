@@ -2,6 +2,7 @@ use crate::audit::default_home_dir;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -118,6 +119,10 @@ pub fn run_cli(args: &[String]) -> i32 {
     let total_out: u64 = events.iter().map(|e| e.out_bytes).sum();
     let total_win_heals: u64 = events.iter().map(|e| e.win_heals as u64).sum();
     let total_guards: u64 = events.iter().map(|e| e.guards as u64).sum();
+    let mut by_kind: BTreeMap<String, u64> = BTreeMap::new();
+    for ev in &events {
+        *by_kind.entry(ev.kind.clone()).or_insert(0) += 1;
+    }
     let saved_bytes = total_raw.saturating_sub(total_out);
     let direct_tokens_saved = saved_bytes / 4;
     let retry_tokens_avoided = total_win_heals * 3_500;
@@ -141,6 +146,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 "direct_tokens_saved": direct_tokens_saved,
                 "retry_tokens_avoided": retry_tokens_avoided,
                 "estimated_total_tokens_saved": net_tokens_saved,
+                "by_kind": by_kind,
             }))
             .unwrap_or_default()
         );
@@ -169,5 +175,16 @@ pub fn run_cli(args: &[String]) -> i32 {
     println!(
         "  Byproduct Token Savings      : ~{net_tokens_saved} wasted tokens avoided (~{direct_tokens_saved} diet + ~{retry_tokens_avoided} retry)"
     );
+    if !by_kind.is_empty() {
+        let mut ranked: Vec<(&String, &u64)> = by_kind.iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let summary = ranked
+            .into_iter()
+            .take(6)
+            .map(|(k, c)| format!("{k}={c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  Top Primitives Breakdown     : {summary}");
+    }
     0
 }

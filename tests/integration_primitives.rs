@@ -3672,3 +3672,321 @@ fn test_cdp_diff_ports_and_http_single_field_vary_outliers() {
         "Expected outlier json:alt:role, got: {lv_j}"
     );
 }
+
+#[test]
+fn test_v260_ast_rename_semantic_sieve_mcp_2025_and_loop_breaker() {
+    use serde_json::json;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_home");
+    let sieve_home = root.join("sieve_home");
+    let fake_home = root.join("fake_home");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(fake_home.join(".pi").join("agent")).unwrap();
+
+    // 1. Polyglot workspace for Tree-sitter AST-exact `ap splice rename`
+    let ts_src = "// keep comment computeTax intact\r\nexport function computeTax(amount: number): number {\r\n  const label = \"computeTax\";\r\n  return recomputeTax(amount) + label.length;\r\n}\r\nexport function recomputeTax(v: number): number {\r\n  return v * 0.1;\r\n}\r\nexport function checkout(n: number): number {\r\n  return computeTax(n);\r\n}\r\n";
+    let py_src = "# comment computeTax\ndef computeTax(x):\n    msg = 'computeTax'\n    return x + len(msg)\n\ndef bill(v):\n    return computeTax(v)\n";
+    let rs_src = "pub fn computeTax(v: i64) -> i64 {\n    // computeTax comment\n    let _s = \"computeTax\";\n    v + 1\n}\npub fn run() -> i64 { computeTax(41) }\n";
+    fs::write(root.join("src").join("tax.ts"), ts_src.as_bytes()).unwrap();
+    fs::write(root.join("src").join("tax.py"), py_src.as_bytes()).unwrap();
+    fs::write(root.join("src").join("tax.rs"), rs_src.as_bytes()).unwrap();
+
+    // 1a. Dry-run preview does not mutate disk
+    let dry = run_ap(
+        root,
+        &[
+            "splice",
+            "rename",
+            "computeTax",
+            "calculateTax",
+            ".",
+            "--dry-run",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(dry.status.success());
+    let dry_j: Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert_eq!(dry_j["ok"], true);
+    assert_eq!(dry_j["dry_run"], true);
+    assert_eq!(dry_j["files_changed"], 3);
+    assert_eq!(dry_j["total_replacements"], 6);
+    assert!(fs::read_to_string(root.join("src/tax.ts"))
+        .unwrap()
+        .contains("export function computeTax"));
+
+    // 1b. Rollback on failing test restores original bytes cleanly
+    let rb = run_ap(
+        root,
+        &[
+            "splice",
+            "rename",
+            "computeTax",
+            "calculateTax",
+            ".",
+            "--test",
+            "--test-cmd",
+            if cfg!(windows) {
+                "cmd /C exit 1"
+            } else {
+                "sh -c 'exit 1'"
+            },
+            "--rollback-on-test-fail",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(!rb.status.success());
+    let rb_j: Value = serde_json::from_slice(&rb.stdout).unwrap();
+    assert_eq!(rb_j["rolled_back"], true);
+    assert_eq!(
+        fs::read(root.join("src/tax.ts")).unwrap(),
+        ts_src.as_bytes()
+    );
+
+    // 1c. Live rename preserves comments, string literals, superstrings & CRLF
+    let applied = run_ap(
+        root,
+        &[
+            "splice",
+            "rename",
+            "computeTax",
+            "calculateTax",
+            ".",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(applied.status.success());
+    let app_j: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(app_j["ok"], true);
+    assert_eq!(app_j["total_replacements"], 6);
+
+    let ts_after = fs::read_to_string(root.join("src/tax.ts")).unwrap();
+    assert!(ts_after.contains("\r\n"), "CRLF must be preserved");
+    assert!(ts_after.contains("// keep comment computeTax intact"));
+    assert!(ts_after.contains("const label = \"computeTax\";"));
+    assert!(ts_after.contains("export function recomputeTax("));
+    assert!(ts_after.contains("export function calculateTax("));
+    assert!(ts_after.contains("return calculateTax(n);"));
+
+    let py_after = fs::read_to_string(root.join("src/tax.py")).unwrap();
+    assert!(py_after.contains("# comment computeTax"));
+    assert!(py_after.contains("msg = 'computeTax'"));
+    assert!(py_after.contains("def calculateTax(x):"));
+    assert!(py_after.contains("return calculateTax(v)"));
+
+    let rs_after = fs::read_to_string(root.join("src/tax.rs")).unwrap();
+    assert!(rs_after.contains("// computeTax comment"));
+    assert!(rs_after.contains("\"computeTax\""));
+    assert!(rs_after.contains("pub fn calculateTax("));
+    assert!(rs_after.contains("calculateTax(41)"));
+
+    // 2. Semantic `ap-sieve` v2: ANSI-colored compiler, test runner & unified diff
+    let mut comp_log = String::new();
+    for k in 0..45 {
+        comp_log.push_str(&format!(
+            "\x1b[1;33mwarning\x1b[0m: unused variable: `v_{k}`\n  --> src/app.rs:{}:5\n",
+            10 + k
+        ));
+    }
+    comp_log.push_str(
+        "\x1b[1;31merror[E0308]\x1b[0m: mismatched types\n  --> src/core.rs:42:11\n   |\n42 |     return total;\n",
+    );
+    let sv_comp = run_ap(
+        root,
+        &["sieve", "pipe", "--label", "cargo-check", "--json"],
+        Some(&comp_log),
+        &[("SIEVE_HOME", &sieve_home), ("AP_HOME", &ap_home)],
+    );
+    assert!(sv_comp.status.success());
+    let comp_j: Value = serde_json::from_slice(&sv_comp.stdout).unwrap();
+    assert_eq!(comp_j["mode"], "compiler");
+    let comp_rend = comp_j["rendered"].as_str().unwrap();
+    assert!(!comp_rend.contains('\x1b'));
+    assert!(comp_rend.contains("error[E0308]"));
+    assert!(comp_rend.contains("src/core.rs:42:11"));
+
+    let mut test_log = String::new();
+    for k in 0..80 {
+        test_log.push_str(&format!("\x1b[32mtest suite::case_{k:02} ... ok\x1b[0m\n"));
+    }
+    test_log.push_str("\x1b[31mtest suite::test_quorum_timeout ... FAILED\x1b[0m\n");
+    test_log.push_str("failures:\n\n---- suite::test_quorum_timeout stdout ----\n");
+    test_log.push_str("thread 'suite::test_quorum_timeout' panicked at src/quorum.rs:77: assertion failed: left == right\n");
+    test_log.push_str("test result: FAILED. 80 passed; 1 failed; 0 ignored\n");
+    let sv_test = run_ap(
+        root,
+        &["sieve", "pipe", "--label", "cargo-test", "--json"],
+        Some(&test_log),
+        &[("SIEVE_HOME", &sieve_home), ("AP_HOME", &ap_home)],
+    );
+    assert!(sv_test.status.success());
+    let test_j: Value = serde_json::from_slice(&sv_test.stdout).unwrap();
+    assert_eq!(test_j["mode"], "test");
+    let test_rend = test_j["rendered"].as_str().unwrap();
+    assert!(test_rend.contains("passed=80, failed=1"));
+    assert!(test_rend.contains("suite::test_quorum_timeout"));
+    assert!(test_rend.contains("panicked at src/quorum.rs:77"));
+
+    let mut diff_log = String::new();
+    for f in 0..12 {
+        diff_log.push_str(&format!(
+            "diff --git a/src/mod_{f}.rs b/src/mod_{f}.rs\n--- a/src/mod_{f}.rs\n+++ b/src/mod_{f}.rs\n@@ -10,4 +10,6 @@ pub fn handler_{f}()\n-    let old = {f};\n+    let updated = {f} + 1;\n+    let verified = true;\n"
+        ));
+    }
+    let sv_diff = run_ap(
+        root,
+        &["sieve", "pipe", "--label", "git-diff", "--json"],
+        Some(&diff_log),
+        &[("SIEVE_HOME", &sieve_home), ("AP_HOME", &ap_home)],
+    );
+    assert!(sv_diff.status.success());
+    let diff_j: Value = serde_json::from_slice(&sv_diff.stdout).unwrap();
+    assert_eq!(diff_j["mode"], "diff");
+    let diff_rend = diff_j["rendered"].as_str().unwrap();
+    assert!(diff_rend.contains("12 file(s), +24/-12"));
+    assert!(diff_rend.contains("src/mod_0.rs (+2/-1)"));
+
+    // 3. MCP 2025-06-18: tool annotations, structuredContent, in-process orient, rename, edit.symbols, sieve, baton & recall
+    let root_s = root.to_string_lossy().replace('\\', "/");
+    let mcp_in = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ap_orient", "arguments": {"path": root_s}}}),
+        json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "ap_rename", "arguments": {"old_name": "calculateTax", "new_name": "evalTax", "path": root_s}}}),
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "ap_edit", "arguments": {"cwd": root_s, "symbols": [{"path": "src/tax.rs", "symbol": "run", "content": "pub fn run() -> i64 { evalTax(99) }"}]}}}),
+        json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "ap_baton", "arguments": {"action": "set", "cwd": root_s, "goal": "Verify v2.6.0 MCP", "next": "Run checks"}}}),
+        json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "ap_baton", "arguments": {"action": "resume", "cwd": root_s}}}),
+        json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "ap_recall", "arguments": {"action": "add", "cwd": root_s, "triggers": "cargo,rust,tax", "rule": "Always run AST rename before manual search-replace"}}}),
+        json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "ap_recall", "arguments": {"action": "match", "cwd": root_s, "query": "rust tax rename"}}}),
+        json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "ap_sieve", "arguments": {"action": "search", "cwd": root_s, "query": "E0308"}}}),
+    ]
+    .iter()
+    .map(|v| v.to_string())
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+
+    let mcp_out = run_ap(
+        root,
+        &["mcp"],
+        Some(&mcp_in),
+        &[("SIEVE_HOME", &sieve_home), ("AP_HOME", &ap_home)],
+    );
+    assert!(mcp_out.status.success());
+    let mcp_resps: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(mcp_resps.len(), 10);
+
+    // 3a. tools/list has >= 33 tools, all with title + annotations
+    let tools = mcp_resps[1]["result"]["tools"].as_array().unwrap();
+    assert!(
+        tools.len() >= 33,
+        "Expected >=33 MCP tools, got {}",
+        tools.len()
+    );
+    for t in tools {
+        assert!(t["title"].is_string(), "missing title on {}", t["name"]);
+        assert!(
+            t["annotations"]["readOnlyHint"].is_boolean(),
+            "missing readOnlyHint on {}",
+            t["name"]
+        );
+        assert!(
+            t["annotations"]["destructiveHint"].is_boolean(),
+            "missing destructiveHint on {}",
+            t["name"]
+        );
+    }
+    let read_tool = tools.iter().find(|t| t["name"] == "ap_read").unwrap();
+    assert_eq!(read_tool["annotations"]["readOnlyHint"], true);
+    let exec_tool = tools.iter().find(|t| t["name"] == "ap_exec").unwrap();
+    assert_eq!(exec_tool["annotations"]["destructiveHint"], true);
+
+    // 3b. In-process ap_orient succeeded
+    assert_eq!(mcp_resps[2]["result"]["isError"], false);
+    assert!(mcp_resps[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("tax.rs"));
+
+    // 3c. ap_rename returned structuredContent + updated files
+    assert_eq!(mcp_resps[3]["result"]["isError"], false);
+    assert_eq!(mcp_resps[3]["result"]["structuredContent"]["ok"], true);
+    assert_eq!(
+        mcp_resps[3]["result"]["structuredContent"]["total_replacements"],
+        6
+    );
+
+    // 3d. ap_edit with `symbols` updated `run` cleanly
+    assert_eq!(mcp_resps[4]["result"]["isError"], false);
+    assert!(fs::read_to_string(root.join("src/tax.rs"))
+        .unwrap()
+        .contains("evalTax(99)"));
+
+    // 3e. ap_baton resume returned structuredContent
+    assert_eq!(mcp_resps[6]["result"]["isError"], false);
+    assert_eq!(
+        mcp_resps[6]["result"]["structuredContent"]["goal"],
+        "Verify v2.6.0 MCP"
+    );
+
+    // 3f. ap_recall match returned structuredContent with matching rule
+    assert_eq!(mcp_resps[8]["result"]["isError"], false);
+    assert!(mcp_resps[8]["result"]["structuredContent"]["matches"]
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false));
+
+    // 3g. ap_sieve search returned structuredContent hitting E0308 archive
+    assert_eq!(mcp_resps[9]["result"]["isError"], false);
+    assert!(mcp_resps[9]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false));
+
+    // 4. Pi accelerator extension includes stateful doom-loop circuit breaker
+    let init_pi = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--home",
+            fake_home.to_str().unwrap(),
+            "--no-rules",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(init_pi.status.success());
+    let ext_ts = fs::read_to_string(
+        fake_home
+            .join(".pi")
+            .join("agent")
+            .join("extensions")
+            .join("zz-ap-accelerator.ts"),
+    )
+    .unwrap();
+    assert!(ext_ts.contains("normCmdFingerprint"));
+    assert!(ext_ts.contains("[ap loop-breaker]"));
+    assert!(ext_ts.contains("session_switch"));
+    assert!(ext_ts.contains("EDIT_TOOLS"));
+
+    // 5. `ap stats --json` emits per-primitive `by_kind` breakdown
+    let st_out = run_ap(root, &["stats", "--json"], None, &[("AP_HOME", &ap_home)]);
+    assert!(st_out.status.success());
+    let st_j: Value = serde_json::from_slice(&st_out.stdout).unwrap();
+    assert!(st_j["by_kind"].is_object());
+    assert!(st_j["by_kind"]["orient"].as_u64().unwrap_or(0) >= 1);
+    assert!(st_j["by_kind"]["rename"].as_u64().unwrap_or(0) >= 1);
+}

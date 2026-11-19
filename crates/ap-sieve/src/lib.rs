@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -835,6 +836,426 @@ fn summarize_log(raw: &str) -> String {
     sections.join("\n")
 }
 
+pub fn strip_ansi(raw: &str) -> Cow<'_, str> {
+    if !raw.contains('\x1b') {
+        return Cow::Borrowed(raw);
+    }
+    static ANSI_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ANSI_RE.get_or_init(|| {
+        Regex::new(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+            .unwrap()
+    });
+    re.replace_all(raw, "")
+}
+
+fn try_summarize_diff(clean: &str) -> Option<String> {
+    let lines: Vec<&str> = clean.lines().collect();
+    if lines.len() < 6 {
+        return None;
+    }
+    let has_git_diff = lines.iter().any(|l| l.starts_with("diff --git "));
+    let has_unified = lines.iter().any(|l| l.starts_with("--- "))
+        && lines.iter().any(|l| l.starts_with("+++ "))
+        && lines.iter().any(|l| l.starts_with("@@ "));
+    if !has_git_diff && !has_unified {
+        return None;
+    }
+
+    struct FileDiffStat {
+        path: String,
+        added: usize,
+        deleted: usize,
+        hunks: Vec<String>,
+        sample_changes: Vec<String>,
+    }
+
+    let mut files: Vec<FileDiffStat> = Vec::new();
+    let mut cur: Option<FileDiffStat> = None;
+
+    let flush_cur = |cur_opt: &mut Option<FileDiffStat>, out: &mut Vec<FileDiffStat>| {
+        if let Some(f) = cur_opt.take() {
+            out.push(f);
+        }
+    };
+
+    for &ln in &lines {
+        if let Some(rest) = ln.strip_prefix("diff --git ") {
+            flush_cur(&mut cur, &mut files);
+            let path = rest
+                .split_whitespace()
+                .nth(1)
+                .map(|s| s.strip_prefix("b/").unwrap_or(s))
+                .unwrap_or(rest)
+                .to_string();
+            cur = Some(FileDiffStat {
+                path,
+                added: 0,
+                deleted: 0,
+                hunks: Vec::new(),
+                sample_changes: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(rest) = ln.strip_prefix("+++ ") {
+            let p = rest
+                .split('\t')
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .strip_prefix("b/")
+                .unwrap_or(rest.trim())
+                .to_string();
+            if let Some(ref mut f) = cur {
+                if p != "/dev/null" && !p.is_empty() {
+                    f.path = p;
+                }
+            } else if p != "/dev/null" && !p.is_empty() {
+                cur = Some(FileDiffStat {
+                    path: p,
+                    added: 0,
+                    deleted: 0,
+                    hunks: Vec::new(),
+                    sample_changes: Vec::new(),
+                });
+            }
+            continue;
+        }
+        if ln.starts_with("--- ") {
+            continue;
+        }
+        let Some(ref mut f) = cur else {
+            continue;
+        };
+        if ln.starts_with("@@ ") {
+            if f.hunks.len() < 3 {
+                let ctx = ln
+                    .split("@@")
+                    .nth(2)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if let Some(c) = ctx {
+                    f.hunks.push(trunc_chars(c, 60));
+                } else {
+                    f.hunks.push(trunc_chars(ln, 48));
+                }
+            }
+        } else if ln.starts_with('+') && !ln.starts_with("+++") {
+            f.added += 1;
+            if f.sample_changes.len() < 2 && ln.len() > 2 {
+                f.sample_changes.push(trunc_chars(ln, 96));
+            }
+        } else if ln.starts_with('-') && !ln.starts_with("---") {
+            f.deleted += 1;
+            if f.sample_changes.len() < 2 && ln.len() > 2 {
+                f.sample_changes.push(trunc_chars(ln, 96));
+            }
+        }
+    }
+    flush_cur(&mut cur, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+
+    let total_added: usize = files.iter().map(|f| f.added).sum();
+    let total_deleted: usize = files.iter().map(|f| f.deleted).sum();
+    let mut out = vec![format!(
+        "Unified Diff Digest ({} file(s), +{total_added}/-{total_deleted} across {} lines):",
+        files.len(),
+        lines.len()
+    )];
+    for f in files.iter().take(20) {
+        let hunk_txt = if f.hunks.is_empty() {
+            String::new()
+        } else {
+            format!(" | hunks: {}", f.hunks.join(", "))
+        };
+        out.push(format!(
+            "  - {} (+{}/-{}){hunk_txt}",
+            f.path, f.added, f.deleted
+        ));
+        if files.len() <= 8 {
+            for s in &f.sample_changes {
+                out.push(format!("      {s}"));
+            }
+        }
+    }
+    if files.len() > 20 {
+        out.push(format!(
+            "  ... ({} additional files omitted; use `ap sieve peek`)",
+            files.len() - 20
+        ));
+    }
+    Some(out.join("\n"))
+}
+
+fn try_summarize_compiler(clean: &str) -> Option<String> {
+    static COMP_RES: OnceLock<(Regex, Regex, Regex, Regex)> = OnceLock::new();
+    let (rust_diag, rust_loc, tsc_diag, generic_diag) = COMP_RES.get_or_init(|| {
+        (
+            Regex::new(r"^(error|warning)(?:\[([A-Za-z0-9_-]+)\])?:\s+(.+)$").unwrap(),
+            Regex::new(r"^\s*-->\s+(.+:\d+:\d+)\s*$").unwrap(),
+            Regex::new(
+                r"^([^\s(]+)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$",
+            )
+            .unwrap(),
+            Regex::new(
+                r"^([A-Za-z0-9_./\\-]+\.(?:rs|ts|tsx|js|jsx|go|c|cc|cpp|h|hpp|py)):(\d+)(?::(\d+))?:\s*(?:-\s*)?(error|warning)(?:\s+([A-Za-z0-9_-]+))?:\s+(.+)$",
+            )
+            .unwrap(),
+        )
+    });
+
+    let lines: Vec<&str> = clean.lines().collect();
+    let mut err_count = 0usize;
+    let mut warn_count = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut seen_err: HashSet<String> = HashSet::new();
+    let mut seen_warn: HashSet<String> = HashSet::new();
+
+    let mut i = 0usize;
+    while i < lines.len() {
+        let ln = lines[i].trim_end();
+        if let Some(cap) = rust_diag.captures(ln) {
+            let sev = &cap[1];
+            let code = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            let msg = cap[3].trim();
+            // Skip cargo roll-up summary lines like "could not compile" or "generated 3 warnings"
+            if msg.starts_with("aborting due to")
+                || msg.starts_with("could not compile")
+                || msg.contains("warnings emitted")
+            {
+                i += 1;
+                continue;
+            }
+            let mut loc = String::new();
+            for next_ln in lines.iter().skip(i + 1).take(3) {
+                if let Some(lc) = rust_loc.captures(next_ln) {
+                    loc = lc[1].to_string();
+                    break;
+                }
+            }
+            let tag = if code.is_empty() {
+                sev.to_string()
+            } else {
+                format!("{sev}[{code}]")
+            };
+            let entry = if loc.is_empty() {
+                format!("{tag}: {}", trunc_chars(msg, 120))
+            } else {
+                format!("{loc} | {tag}: {}", trunc_chars(msg, 110))
+            };
+            let dedup_key = format!("{tag}::{}::{}", loc, trunc_chars(msg, 60));
+            if sev == "error" {
+                err_count += 1;
+                if seen_err.insert(dedup_key) && errors.len() < 14 {
+                    errors.push(format!("  - {entry}"));
+                }
+            } else {
+                warn_count += 1;
+                if seen_warn.insert(dedup_key) && warnings.len() < 6 {
+                    warnings.push(format!("  - {entry}"));
+                }
+            }
+        } else if let Some(cap) = tsc_diag.captures(ln) {
+            let loc = format!("{}:{}:{}", &cap[1], &cap[2], &cap[3]);
+            let sev = &cap[4];
+            let code = &cap[5];
+            let msg = cap[6].trim();
+            let entry = format!("{loc} | {sev}[{code}]: {}", trunc_chars(msg, 110));
+            let dedup_key = format!("{code}::{loc}");
+            if sev == "error" {
+                err_count += 1;
+                if seen_err.insert(dedup_key) && errors.len() < 14 {
+                    errors.push(format!("  - {entry}"));
+                }
+            } else {
+                warn_count += 1;
+                if seen_warn.insert(dedup_key) && warnings.len() < 6 {
+                    warnings.push(format!("  - {entry}"));
+                }
+            }
+        } else if let Some(cap) = generic_diag.captures(ln) {
+            let loc = match cap.get(3) {
+                Some(col) => format!("{}:{}:{}", &cap[1], &cap[2], col.as_str()),
+                None => format!("{}:{}", &cap[1], &cap[2]),
+            };
+            let sev = &cap[4];
+            let code = cap.get(5).map(|m| m.as_str()).unwrap_or("");
+            let msg = cap[6].trim();
+            let tag = if code.is_empty() {
+                sev.to_string()
+            } else {
+                format!("{sev}[{code}]")
+            };
+            let entry = format!("{loc} | {tag}: {}", trunc_chars(msg, 110));
+            let dedup_key = format!("{tag}::{loc}");
+            if sev == "error" {
+                err_count += 1;
+                if seen_err.insert(dedup_key) && errors.len() < 14 {
+                    errors.push(format!("  - {entry}"));
+                }
+            } else {
+                warn_count += 1;
+                if seen_warn.insert(dedup_key) && warnings.len() < 6 {
+                    warnings.push(format!("  - {entry}"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let total_diags = err_count + warn_count;
+    if total_diags < 2 {
+        return None;
+    }
+    let mut out = vec![format!(
+        "Compiler Diagnostics Digest (errors={err_count}, warnings={warn_count} across {} lines):",
+        lines.len()
+    )];
+    if !errors.is_empty() {
+        out.push(format!("Root-Cause Errors (showing {}):", errors.len()));
+        out.extend(errors);
+    }
+    if !warnings.is_empty() {
+        out.push(format!("Warnings (showing {}):", warnings.len()));
+        out.extend(warnings);
+    }
+    Some(out.join("\n"))
+}
+
+fn try_summarize_test_output(clean: &str) -> Option<String> {
+    static TEST_RES: OnceLock<(Regex, Regex, Regex, Regex, Regex)> = OnceLock::new();
+    let (pass_re, fail_re, skip_re, summary_re, assert_re) = TEST_RES.get_or_init(|| {
+        (
+            Regex::new(
+                r"(?:^test\s+\S+\s+\.\.\.\s+ok\b|^---\s+PASS:\s+\S+|\bPASSED\b|^PASS\s+\S|^✔\s+|\bok\s+\d+\s+-)",
+            )
+            .unwrap(),
+            Regex::new(
+                r"(?:^test\s+(\S+)\s+\.\.\.\s+FAILED\b|^---\s+FAIL:\s+(\S+)|^(?:FAIL|FAILED|ERROR)\s+(\S+)|^✖\s+(.+)|^not ok\s+\d+\s+-\s+(.+))",
+            )
+            .unwrap(),
+            Regex::new(r"(?:^test\s+\S+\s+\.\.\.\s+ignored\b|\bSKIPPED\b|^---\s+SKIP:)").unwrap(),
+            Regex::new(
+                r"(?:^test result:|^Tests:\s+|\d+\s+passed(?:,\s+\d+\s+failed)?|\d+\s+failed,\s+\d+\s+passed|^FAIL\s+\S+\s+[0-9.]+s)",
+            )
+            .unwrap(),
+            Regex::new(
+                r"(?i)(?:panicked at|assertion|expected|received|AssertionError|TypeError|ValueError|RuntimeError|Error:|^\s*E\s+|^\s*left:|^\s*right:)",
+            )
+            .unwrap(),
+        )
+    });
+
+    let lines: Vec<&str> = clean.lines().collect();
+    let mut passed = 0usize;
+    let mut failed_names: Vec<String> = Vec::new();
+    let mut failed_seen: HashSet<String> = HashSet::new();
+    let mut skipped = 0usize;
+    let mut summary_lines: Vec<String> = Vec::new();
+    let mut failure_snippets: Vec<String> = Vec::new();
+
+    for (idx, &ln) in lines.iter().enumerate() {
+        let tr = ln.trim();
+        if tr.is_empty() {
+            continue;
+        }
+        if let Some(cap) = fail_re.captures(tr) {
+            let name = (1..=5)
+                .find_map(|g| cap.get(g).map(|m| m.as_str().trim()))
+                .unwrap_or(tr);
+            let nm = trunc_chars(name, 100);
+            if failed_seen.insert(nm.clone()) {
+                failed_names.push(nm);
+            }
+            if failure_snippets.len() < 8 {
+                let mut block = vec![format!("L{}: {}", idx + 1, trunc_chars(tr, 150))];
+                for (k, raw_nxt) in lines
+                    .iter()
+                    .enumerate()
+                    .take((idx + 7).min(lines.len()))
+                    .skip(idx + 1)
+                {
+                    let nxt = raw_nxt.trim();
+                    if nxt.is_empty() || pass_re.is_match(nxt) {
+                        break;
+                    }
+                    if assert_re.is_match(nxt)
+                        || nxt.starts_with("File ")
+                        || nxt.starts_with("Traceback")
+                        || nxt.starts_with("at ")
+                    {
+                        block.push(format!("L{}: {}", k + 1, trunc_chars(nxt, 150)));
+                    }
+                }
+                failure_snippets.push(format!("  - {}", block.join("\n      ")));
+            }
+        } else if pass_re.is_match(tr) {
+            passed += 1;
+        } else if skip_re.is_match(tr) {
+            skipped += 1;
+        }
+        if summary_re.is_match(tr) && summary_lines.len() < 4 {
+            summary_lines.push(format!("  {}", trunc_chars(tr, 140)));
+        }
+    }
+
+    // Also pick up Rust/Cargo `failures:` section assertion/panic lines if not already attached
+    if !failed_names.is_empty() && failure_snippets.len() < 8 {
+        let mut in_failures_detail = false;
+        for (idx, &ln) in lines.iter().enumerate() {
+            let tr = ln.trim();
+            if tr == "failures:" {
+                in_failures_detail = true;
+                continue;
+            }
+            if in_failures_detail && assert_re.is_match(tr) {
+                let snip = format!("  - L{}: {}", idx + 1, trunc_chars(tr, 150));
+                if !failure_snippets.iter().any(|s| s.contains(tr)) {
+                    failure_snippets.push(snip);
+                    if failure_snippets.len() >= 8 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let has_runner_signal =
+        !summary_lines.is_empty() || passed >= 3 || (passed >= 1 && !failed_names.is_empty());
+    if !has_runner_signal {
+        return None;
+    }
+
+    let mut out = vec![format!(
+        "Test Runner Digest (passed={passed}, failed={}, skipped={skipped} across {} lines):",
+        failed_names.len(),
+        lines.len()
+    )];
+    if !failed_names.is_empty() {
+        out.push(format!(
+            "Failed Tests ({}): {}",
+            failed_names.len(),
+            failed_names
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !failure_snippets.is_empty() {
+        out.push("Failure Details:".to_string());
+        out.extend(failure_snippets);
+    }
+    if !summary_lines.is_empty() {
+        out.push("Runner Summary:".to_string());
+        out.extend(summary_lines);
+    }
+    Some(out.join("\n"))
+}
+
 pub fn compress_stream_in(
     store: &Path,
     raw_text: &str,
@@ -864,14 +1285,16 @@ pub fn compress_stream_in(
         };
     }
 
-    let stripped = raw_text.trim_start();
+    let clean_cow = strip_ansi(raw_text);
+    let clean = clean_cow.as_ref();
+    let stripped = clean.trim_start();
     let (kind, body_summary) = if stripped.starts_with('{') || stripped.starts_with('[') {
         if let Ok(parsed) = serde_json::from_str::<Value>(stripped) {
             ("json".to_string(), summarize_json(&parsed))
-        } else if let Some(jl) = try_summarize_jsonl(raw_text) {
+        } else if let Some(jl) = try_summarize_jsonl(clean) {
             ("jsonl".to_string(), jl)
         } else {
-            ("log".to_string(), summarize_log(raw_text))
+            ("log".to_string(), summarize_log(clean))
         }
     } else {
         let head_low = trunc_chars(stripped, 400).to_ascii_lowercase();
@@ -879,11 +1302,17 @@ pub fn compress_stream_in(
             || head_low.contains("<html")
             || head_low.contains("<table")
         {
-            ("html".to_string(), summarize_html(raw_text))
-        } else if let Some((tk, ts)) = try_summarize_tabular(raw_text) {
+            ("html".to_string(), summarize_html(clean))
+        } else if let Some(diff_s) = try_summarize_diff(clean) {
+            ("diff".to_string(), diff_s)
+        } else if let Some(comp_s) = try_summarize_compiler(clean) {
+            ("compiler".to_string(), comp_s)
+        } else if let Some(test_s) = try_summarize_test_output(clean) {
+            ("test".to_string(), test_s)
+        } else if let Some((tk, ts)) = try_summarize_tabular(clean) {
             (tk, ts)
         } else {
-            ("log".to_string(), summarize_log(raw_text))
+            ("log".to_string(), summarize_log(clean))
         }
     };
 

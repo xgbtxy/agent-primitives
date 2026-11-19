@@ -168,6 +168,46 @@ pub fn split_top_level_and_and(s: &str) -> Vec<String> {
     parts
 }
 
+/// Safely normalize unescaped Windows drive backslashes (`'C:\foo\bar'` -> `'C:/foo/bar'`)
+/// inside `python -c` non-raw string literals, while leaving Python raw strings (`r'C:\foo'`)
+/// and already-escaped strings (`'C:\\foo'`) completely untouched.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn heal_py_win_backslashes(cmd: &str) -> (String, bool) {
+    let b = cmd.as_bytes();
+    let mut out = String::with_capacity(cmd.len());
+    let mut i = 0usize;
+    let mut changed = false;
+    while i < b.len() {
+        let ch = b[i];
+        if (ch == b'\'' || ch == b'"') && i + 4 <= b.len() {
+            let prev_is_raw = i > 0
+                && matches!(b[i - 1], b'r' | b'R')
+                && (i == 1 || !(b[i - 2].is_ascii_alphanumeric() || b[i - 2] == b'_'));
+            if !prev_is_raw
+                && b[i + 1].is_ascii_alphabetic()
+                && b[i + 2] == b':'
+                && b[i + 3] == b'\\'
+                && b.get(i + 4) != Some(&b'\\')
+            {
+                let quote = ch;
+                let mut end = i + 4;
+                while end < b.len() && b[end] != quote && !b[end].is_ascii_whitespace() {
+                    end += 1;
+                }
+                let seg = &cmd[i..end];
+                out.push_str(&seg.replace('\\', "/"));
+                changed = true;
+                i = end;
+                continue;
+            }
+        }
+        let next_ch = cmd[i..].chars().next().unwrap();
+        out.push(next_ch);
+        i += next_ch.len_utf8();
+    }
+    (out, changed)
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn heal_windows_command(
     raw: &str,
@@ -199,14 +239,11 @@ pub fn heal_windows_command(
         heals.push("ps-cmdlet->pwsh");
     }
     if re.py_win_backslash.is_match(&out) {
-        static WIN_DRIVE_BS: OnceLock<Regex> = OnceLock::new();
-        let drv = WIN_DRIVE_BS.get_or_init(|| Regex::new(r#"([A-Za-z]:)(\\[^\s'"]+)"#).unwrap());
-        out = drv
-            .replace_all(&out, |caps: &regex::Captures| {
-                format!("{}{}", &caps[1], caps[2].replace('\\', "/"))
-            })
-            .to_string();
-        heals.push("py-win-backslash->slash");
+        let (fixed, did_fix) = heal_py_win_backslashes(&out);
+        if did_fix {
+            out = fixed;
+            heals.push("py-win-backslash->slash");
+        }
     }
     if re.curl_cmd.is_match(&out) {
         out = re
@@ -746,5 +783,15 @@ mod tests {
         );
         assert!(h5.contains("C:/Users/demo/a.txt"));
         assert!(tags5.contains(&"py-win-backslash->slash"));
+
+        // Raw strings (`r'C:\...'`) and already-escaped strings (`'C:\\...'`) stay untouched
+        let (_, h6, tags6) = heal_windows_command(
+            r#"python -c "print(r'C:\Users\demo\a.txt', 'C:\\Users\\demo\\b.txt')""#,
+            true,
+            true,
+        );
+        assert!(h6.contains(r"r'C:\Users\demo\a.txt'"));
+        assert!(h6.contains(r"'C:\\Users\\demo\\b.txt'"));
+        assert!(!tags6.contains(&"py-win-backslash->slash"));
     }
 }

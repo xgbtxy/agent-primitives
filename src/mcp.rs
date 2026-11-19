@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::process::Command;
 
 fn mcp_tools_schema() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "ap_read",
             "description": "Universal zero-dependency reader: parses .docx/.xlsx/.pptx/.pdf/.sqlite/.gz, Electron .asar & .zip/.vsix/.jar/.whl virtual archives (--entry without extracting), PE/ELF/Mach-O headers + ASCII & Windows UTF-16LE strings, minified JS bundles (--offset/--chars/--pretty), GBK files, and JS-rendered URLs.",
@@ -139,6 +139,19 @@ fn mcp_tools_schema() -> Value {
                                 "content": { "type": "string" }
                             },
                             "required": ["path", "content"]
+                        }
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "description": "Tree-sitter AST-exact function/class/struct symbol replacements [{path, symbol, content}]",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "symbol": { "type": "string" },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["path", "symbol", "content"]
                         }
                     },
                     "diff": { "type": "string", "description": "Optional standard Git unified diff (`--- a/...`, `+++ b/...`, `@@ ... @@`)" },
@@ -457,15 +470,255 @@ fn mcp_tools_schema() -> Value {
                 }
             }
         }
-    ])
+    ]);
+    let mut extra = vec![
+        json!({
+            "name": "ap_rename",
+            "description": "Tree-sitter AST-exact workspace symbol rename across Py/TS/TSX/JS/Go/Rust/C. Replaces only real identifier AST nodes (never touches comments, strings, or substrings), validates 100% syntax before writing, records an `ap_undo` checkpoint, and supports `dry_run` + `run_tests` rollback.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "old_name": { "type": "string", "description": "Existing identifier name to rename" },
+                    "new_name": { "type": "string", "description": "New identifier name" },
+                    "path": { "type": "string", "description": "Workspace root directory (default: '.')" },
+                    "dry_run": { "type": "boolean", "description": "Preview affected files and lines without modifying disk" },
+                    "run_tests": { "type": "boolean", "description": "Run project checks/tests after applying rename" },
+                    "rollback_on_test_fail": { "type": "boolean", "description": "Atomically restore all files if tests fail" }
+                },
+                "required": ["old_name", "new_name"]
+            }
+        }),
+        json!({
+            "name": "ap_sieve",
+            "description": "Inspect or search archived lossless outputs from `ap sieve` (searches local `.sieve` with read-only fallback to `~/.ap/sieve`). Supports `peek` (by `id`, `lines`, `grep`, `json_path`) and sub-ms SQLite FTS5 `search`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "'peek' or 'search'" },
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "id": { "type": "string", "description": "Archive ID prefix for `peek`" },
+                    "lines": { "type": "string", "description": "Line range 'START:END' for `peek`" },
+                    "grep": { "type": "string", "description": "Regex filter for `peek`" },
+                    "json_path": { "type": "string", "description": "Dot-separated JSON path for `peek`" },
+                    "query": { "type": "string", "description": "FTS5 search query for `search`" },
+                    "limit": { "type": "integer", "description": "Max FTS5 hits (default: 8)" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "ap_baton",
+            "description": "Compaction-proof task state & cross-agent handoff capsule (<500 tokens): `resume`, `set` (goal/constraints/next), `fact` (verified ground truth), `deadend` (falsified approach), `checkpoint`, or `clear`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "'resume', 'set', 'fact', 'deadend', 'checkpoint', or 'clear'" },
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "goal": { "type": "string", "description": "Task goal for `set`" },
+                    "constraints": { "type": "array", "items": { "type": "string" }, "description": "Constraint list for `set`" },
+                    "next": { "type": "string", "description": "Immediate next action for `set`" },
+                    "text": { "type": "string", "description": "Fact or deadend statement" },
+                    "ref": { "type": "string", "description": "Optional file:line reference for `fact`" },
+                    "reason": { "type": "string", "description": "Optional failure reason for `deadend`" },
+                    "note": { "type": "string", "description": "Optional checkpoint note" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "ap_recall",
+            "description": "Sub-millisecond SQLite FTS5/BM25 triggered micro-memory vault: `match` (retrieve top-K rules for query/files), `add` (save triggers + rule), or `stats`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "'match', 'add', or 'stats'" },
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "query": { "type": "string", "description": "Task/command query for `match`" },
+                    "files": { "type": "string", "description": "Comma-separated active file paths for `match`" },
+                    "top": { "type": "integer", "description": "Max rules to retrieve (default: 3)" },
+                    "triggers": { "type": "string", "description": "Trigger keywords/globs for `add`" },
+                    "rule": { "type": "string", "description": "Concise actionable rule text for `add`" },
+                    "kind": { "type": "string", "description": "Rule category (default: 'gotcha')" }
+                },
+                "required": ["action"]
+            }
+        }),
+    ];
+    if let Value::Array(ref mut arr) = tools {
+        arr.append(&mut extra);
+    }
+    annotate_mcp_tools(tools)
+}
+
+fn tool_annotations_for(name: &str) -> (&'static str, bool, bool, bool, bool) {
+    // (title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint)
+    match name {
+        "ap_read" => ("Universal File & URL Reader", true, false, true, true),
+        "ap_query" => (
+            "Exact SQLite/Office/CSV SQL Query",
+            true,
+            false,
+            true,
+            false,
+        ),
+        "ap_search" => (
+            "Multi-Pattern AST & Archive Search",
+            true,
+            false,
+            true,
+            false,
+        ),
+        "ap_undo" => ("Restore Pre-Edit Checkpoint", false, false, false, false),
+        "ap_orient" => ("Workspace X-Ray & Product Map", true, false, true, false),
+        "ap_impact" => ("Tree-Sitter Symbol Impact Graph", true, false, true, false),
+        "ap_edit" => (
+            "Atomic AST-Verified Multi-File Edit",
+            false,
+            false,
+            false,
+            false,
+        ),
+        "ap_rename" => (
+            "AST-Exact Workspace Symbol Rename",
+            false,
+            false,
+            false,
+            false,
+        ),
+        "ap_smoke" => (
+            "Headless Browser & API Smoke Test",
+            false,
+            false,
+            false,
+            true,
+        ),
+        "ap_fuzz" => ("API & CLI Boundary Fuzzer", false, false, false, true),
+        "ap_mutate" => ("AST Mutation Test Auditor", false, false, false, false),
+        "ap_ui" => (
+            "Headless Desktop/Mobile UI Auditor",
+            true,
+            false,
+            true,
+            true,
+        ),
+        "ap_locate" => ("Hierarchical Fault Localizer", true, false, true, false),
+        "ap_trace" => ("Multi-Hop AST Call-Chain Tracer", true, false, true, false),
+        "ap_cdp" => ("Live Browser CDP Probe", false, false, false, true),
+        "ap_http" => ("HTTP/API Diagnostic Probe", false, false, false, true),
+        "ap_ports" => ("Listening TCP Port & CDP Radar", true, false, true, false),
+        "ap_ps" => ("Process Tree & Command Inspector", true, false, true, false),
+        "ap_fs_diff" => ("Filesystem Snapshot & Diff", false, false, false, false),
+        "ap_tcp" => ("Bounded Raw TCP Probe", false, false, false, true),
+        "ap_listen" => (
+            "Ephemeral Webhook Capture Server",
+            false,
+            false,
+            false,
+            true,
+        ),
+        "ap_ws" => ("Bounded WebSocket Probe", false, false, false, true),
+        "ap_tls" => ("TLS & X.509 Certificate Inspector", true, false, true, true),
+        "ap_baton_claim" => (
+            "Multi-Agent Resource Lease Manager",
+            false,
+            false,
+            false,
+            false,
+        ),
+        "ap_baton_dedup" => (
+            "BM25+CJK Semantic Near-Duplicate Finder",
+            true,
+            false,
+            true,
+            false,
+        ),
+        "ap_guard_pack" => (
+            "Deliverable Bundle & SHA-256 Gate",
+            true,
+            false,
+            true,
+            false,
+        ),
+        "ap_diff_audit" => ("Semantic Git Diff Self-Audit", true, false, true, false),
+        "ap_verify" => ("Quality Gate & Test Verifier", true, false, true, false),
+        "ap_exec" => (
+            "UTF-8 Healed Shell Command Runner",
+            false,
+            true,
+            false,
+            true,
+        ),
+        "ap_probe" => ("Runtime Microscope & Log Sieve", false, false, false, false),
+        "ap_sieve" => (
+            "Lossless Archive Peek & FTS5 Search",
+            true,
+            false,
+            true,
+            false,
+        ),
+        "ap_baton" => (
+            "Compaction-Proof Task State Capsule",
+            false,
+            false,
+            false,
+            false,
+        ),
+        "ap_recall" => (
+            "Sub-ms Triggered Micro-Memory Vault",
+            false,
+            false,
+            false,
+            false,
+        ),
+        _ => ("Agent Primitive Tool", false, false, false, false),
+    }
+}
+
+fn annotate_mcp_tools(mut tools: Value) -> Value {
+    if let Value::Array(ref mut arr) = tools {
+        for item in arr.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                let name = obj
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let (title, ro, destr, idemp, open) = tool_annotations_for(&name);
+                obj.entry("title".to_string())
+                    .or_insert_with(|| Value::String(title.to_string()));
+                obj.insert(
+                    "annotations".to_string(),
+                    json!({
+                        "title": title,
+                        "readOnlyHint": ro,
+                        "destructiveHint": destr,
+                        "idempotentHint": idemp,
+                        "openWorldHint": open
+                    }),
+                );
+            }
+        }
+    }
+    tools
 }
 
 fn run_self_captured(args: &[String], stdin_data: Option<&str>) -> (bool, String) {
+    run_self_captured_in(None, args, stdin_data)
+}
+
+fn run_self_captured_in(
+    cwd: Option<&str>,
+    args: &[String],
+    stdin_data: Option<&str>,
+) -> (bool, String) {
     let Ok(exe) = std::env::current_exe() else {
         return (false, "Failed to locate ap binary".to_string());
     };
     let mut cmd = Command::new(exe);
     cmd.args(args).env("AP_MCP_CHILD", "1");
+    if let Some(dir) = cwd.filter(|s| !s.trim().is_empty()) {
+        cmd.current_dir(dir);
+    }
     cmd.stdin(if stdin_data.is_some() {
         std::process::Stdio::piped()
     } else {
@@ -687,18 +940,15 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
         }
         "ap_orient" => {
             let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let (_, map_json) = run_self_captured(
-                &["atlas".into(), "map".into(), root.into(), "--json".into()],
-                None,
-            );
-            let raw_b = serde_json::from_str::<Value>(&map_json)
-                .ok()
-                .and_then(|v| v.get("raw_bytes").and_then(Value::as_u64))
-                .unwrap_or(0);
-            let (_, map_txt) =
-                run_self_captured(&["atlas".into(), "map".into(), root.into()], None);
-            let (_, prod_txt) =
-                run_self_captured(&["atlas".into(), "product".into(), root.into()], None);
+            let root_p = std::path::Path::new(root);
+            if !root_p.exists() {
+                return (false, format!("[atlas] path not found: {root}"));
+            }
+            let data = ap_atlas::scan_workspace(root_p, "", 35, 14);
+            let raw_b = data.raw_bytes as u64;
+            let map_txt = ap_atlas::render_atlas_md(&data);
+            let pm = ap_atlas::product::build_product_map(root_p, ap_atlas::SKIP_DIRS);
+            let prod_txt = ap_atlas::product::render_product_map(&pm);
             let out = format!("{map_txt}\n{prod_txt}");
             crate::stats::record_event(
                 "orient",
@@ -748,6 +998,22 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                     }
                 }
             }
+            if let Some(symbols) = args.get("symbols").and_then(Value::as_array) {
+                for s in symbols {
+                    if let (Some(p), Some(sym), Some(c)) = (
+                        s.get("path").and_then(Value::as_str),
+                        s.get("symbol").and_then(Value::as_str),
+                        s.get("content").and_then(Value::as_str),
+                    ) {
+                        ops.push(json!({
+                            "op": "replace_symbol",
+                            "path": p,
+                            "symbol": sym,
+                            "new": c
+                        }));
+                    }
+                }
+            }
             if let Some(diff_raw) = args
                 .get("diff")
                 .and_then(Value::as_str)
@@ -764,7 +1030,7 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if ops.is_empty() {
                 return (
                     false,
-                    "Provide at least one entry in `writes`, `edits`, `appends`, or `diff`."
+                    "Provide at least one entry in `writes`, `edits`, `appends`, `symbols`, or `diff`."
                         .to_string(),
                 );
             }
@@ -811,12 +1077,18 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if sym.is_empty() {
                 return (false, "Pass non-empty `symbol` to `ap_impact`.".to_string());
             }
-            let (ok, out) = run_self_captured(
-                &["atlas".into(), "impact".into(), sym.into(), root.into()],
-                None,
+            let root_p = std::path::Path::new(root);
+            if !root_p.exists() {
+                return (false, format!("[atlas] path not found: {root}"));
+            }
+            let rep = ap_atlas::impact::analyze_symbol_impact(
+                root_p,
+                &[sym.to_string()],
+                ap_atlas::SKIP_DIRS,
             );
+            let out = ap_atlas::impact::render_impact_md(&rep);
             crate::stats::record_event("impact", 0, out.len() as u64, 0, 1, "mcp-impact");
-            (ok, out)
+            (true, out)
         }
         "ap_fuzz" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
@@ -929,20 +1201,15 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 return (false, "Pass non-empty `query` to `ap_locate`.".to_string());
             }
             let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(5);
-            let (ok, out) = run_self_captured(
-                &[
-                    "atlas".into(),
-                    "locate".into(),
-                    q.into(),
-                    root.into(),
-                    "-k".into(),
-                    top_k.to_string(),
-                ],
-                None,
-            );
+            let root_p = std::path::Path::new(root);
+            if !root_p.exists() {
+                return (false, format!("[atlas] path not found: {root}"));
+            }
+            let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(5) as usize;
+            let rep = ap_atlas::locate::locate_faults(root_p, q, top_k);
+            let out = ap_atlas::locate::render_locate_md(&rep);
             crate::stats::record_event("locate", 0, out.len() as u64, 0, 1, "mcp-locate");
-            (ok, out)
+            (true, out)
         }
         "ap_exec" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
@@ -1008,18 +1275,15 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 return (false, "Pass non-empty `symbol` to `ap_trace`.".to_string());
             }
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(3);
-            run_self_captured(
-                &[
-                    "atlas".into(),
-                    "trace".into(),
-                    sym.into(),
-                    path.into(),
-                    "--depth".into(),
-                    depth.to_string(),
-                ],
-                None,
-            )
+            let root_p = std::path::Path::new(path);
+            if !root_p.exists() {
+                return (false, format!("[atlas] path not found: {path}"));
+            }
+            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(3) as usize;
+            let rep = ap_atlas::trace::trace_symbol_chain(root_p, sym, depth);
+            let out = ap_atlas::trace::render_trace_md(&rep);
+            crate::stats::record_event("trace", 0, out.len() as u64, 0, 1, "mcp-trace");
+            (true, out)
         }
         "ap_cdp" => {
             let host = args
@@ -1514,6 +1778,329 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 "Pass `code` or `sieve_cmd` to `ap_probe`.".to_string(),
             )
         }
+        "ap_rename" => {
+            let old_name = args
+                .get("old_name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let new_name = args
+                .get("new_name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if old_name.is_empty() || new_name.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `old_name` and `new_name` to `ap_rename`.".to_string(),
+                );
+            }
+            let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let root_p = std::path::Path::new(root);
+            let dry_run = args
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let run_tests = args
+                .get("run_tests")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let rollback = args
+                .get("rollback_on_test_fail")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !dry_run {
+                let preview = ap_splice::rename::rename_symbol_workspace(
+                    root_p, old_name, new_name, true, false, "", false,
+                );
+                if preview.ok && !preview.changes.is_empty() {
+                    let touched: Vec<String> =
+                        preview.changes.iter().map(|c| c.path.clone()).collect();
+                    let _ = crate::undo::record_pre_edit_snapshot(root_p, &touched);
+                }
+            }
+            let rep = ap_splice::rename::rename_symbol_workspace(
+                root_p, old_name, new_name, dry_run, run_tests, "", rollback,
+            );
+            if rep.ok && !dry_run && rep.total_replacements > 0 {
+                crate::stats::record_event(
+                    "rename",
+                    0,
+                    0,
+                    0,
+                    rep.files_changed as u32,
+                    "mcp-rename",
+                );
+            }
+            let js = serde_json::to_string_pretty(&rep).unwrap_or_default();
+            (rep.ok, js)
+        }
+        "ap_sieve" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let cwd = args.get("cwd").and_then(Value::as_str);
+            match action.as_str() {
+                "peek" => {
+                    let id = args.get("id").and_then(Value::as_str).unwrap_or("").trim();
+                    if id.is_empty() {
+                        return (
+                            false,
+                            "Pass non-empty `id` for `ap_sieve` action='peek'.".to_string(),
+                        );
+                    }
+                    let mut cli = vec!["sieve".into(), "peek".into(), id.into()];
+                    if let Some(l) = args
+                        .get("lines")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--lines".into());
+                        cli.push(l.into());
+                    }
+                    if let Some(g) = args
+                        .get("grep")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--grep".into());
+                        cli.push(g.into());
+                    }
+                    if let Some(jp) = args
+                        .get("json_path")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--json-path".into());
+                        cli.push(jp.into());
+                    }
+                    run_self_captured_in(cwd, &cli, None)
+                }
+                "search" => {
+                    let q = args
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    if q.is_empty() {
+                        return (
+                            false,
+                            "Pass non-empty `query` for `ap_sieve` action='search'.".to_string(),
+                        );
+                    }
+                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8);
+                    run_self_captured_in(
+                        cwd,
+                        &[
+                            "sieve".into(),
+                            "search".into(),
+                            q.into(),
+                            "--limit".into(),
+                            limit.to_string(),
+                            "--json".into(),
+                        ],
+                        None,
+                    )
+                }
+                _ => (
+                    false,
+                    "Pass `action`: 'peek' or 'search' to `ap_sieve`.".to_string(),
+                ),
+            }
+        }
+        "ap_baton" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("resume")
+                .trim()
+                .to_ascii_lowercase();
+            let cwd = args.get("cwd").and_then(Value::as_str);
+            match action.as_str() {
+                "resume" => run_self_captured_in(
+                    cwd,
+                    &["baton".into(), "resume".into(), "--json".into()],
+                    None,
+                ),
+                "set" => {
+                    let mut cli = vec!["baton".into(), "set".into()];
+                    if let Some(g) = args
+                        .get("goal")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--goal".into());
+                        cli.push(g.into());
+                    }
+                    if let Some(cs) = args.get("constraints").and_then(Value::as_array) {
+                        for c in cs {
+                            if let Some(s) = c.as_str().filter(|s| !s.is_empty()) {
+                                cli.push("--constraint".into());
+                                cli.push(s.into());
+                            }
+                        }
+                    }
+                    if let Some(n) = args
+                        .get("next")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--next".into());
+                        cli.push(n.into());
+                    }
+                    run_self_captured_in(cwd, &cli, None)
+                }
+                "fact" => {
+                    let text = args
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    if text.is_empty() {
+                        return (
+                            false,
+                            "Pass non-empty `text` for `ap_baton` action='fact'.".to_string(),
+                        );
+                    }
+                    let mut cli = vec!["baton".into(), "fact".into(), text.into()];
+                    if let Some(r) = args
+                        .get("ref")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--ref".into());
+                        cli.push(r.into());
+                    }
+                    run_self_captured_in(cwd, &cli, None)
+                }
+                "deadend" => {
+                    let text = args
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    if text.is_empty() {
+                        return (
+                            false,
+                            "Pass non-empty `text` for `ap_baton` action='deadend'.".to_string(),
+                        );
+                    }
+                    let mut cli = vec!["baton".into(), "deadend".into(), text.into()];
+                    if let Some(r) = args
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--reason".into());
+                        cli.push(r.into());
+                    }
+                    run_self_captured_in(cwd, &cli, None)
+                }
+                "checkpoint" => {
+                    let mut cli = vec!["baton".into(), "checkpoint".into()];
+                    if let Some(n) = args
+                        .get("note")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--note".into());
+                        cli.push(n.into());
+                    }
+                    run_self_captured_in(cwd, &cli, None)
+                }
+                "clear" => run_self_captured_in(cwd, &["baton".into(), "clear".into()], None),
+                _ => (
+                    false,
+                    "Pass `action`: 'resume', 'set', 'fact', 'deadend', 'checkpoint', or 'clear'."
+                        .to_string(),
+                ),
+            }
+        }
+        "ap_recall" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("match")
+                .trim()
+                .to_ascii_lowercase();
+            let cwd = args.get("cwd").and_then(Value::as_str);
+            match action.as_str() {
+                "match" => {
+                    let mut cli = vec!["recall".into(), "match".into(), "--json".into()];
+                    if let Some(q) = args
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--query".into());
+                        cli.push(q.into());
+                    }
+                    if let Some(f) = args
+                        .get("files")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        cli.push("--files".into());
+                        cli.push(f.into());
+                    }
+                    if let Some(top) = args.get("top").and_then(Value::as_u64) {
+                        cli.push("--top".into());
+                        cli.push(top.to_string());
+                    }
+                    run_self_captured_in(cwd, &cli, None)
+                }
+                "add" => {
+                    let triggers = args
+                        .get("triggers")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let rule = args
+                        .get("rule")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    if triggers.is_empty() || rule.is_empty() {
+                        return (
+                            false,
+                            "Pass non-empty `triggers` and `rule` for `ap_recall` action='add'."
+                                .to_string(),
+                        );
+                    }
+                    let kind = args
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("gotcha");
+                    run_self_captured_in(
+                        cwd,
+                        &[
+                            "recall".into(),
+                            "add".into(),
+                            "--triggers".into(),
+                            triggers.into(),
+                            "--rule".into(),
+                            rule.into(),
+                            "--kind".into(),
+                            kind.into(),
+                        ],
+                        None,
+                    )
+                }
+                "stats" => run_self_captured_in(
+                    cwd,
+                    &["recall".into(), "stats".into(), "--json".into()],
+                    None,
+                ),
+                _ => (
+                    false,
+                    "Pass `action`: 'match', 'add', or 'stats' to `ap_recall`.".to_string(),
+                ),
+            }
+        }
         other => (false, format!("Unknown tool: {other}")),
     }
 }
@@ -1575,13 +2162,30 @@ fn handle_rpc_request(req: &Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let (ok, text) = dispatch_tool_call(tname, &targs);
+            let mut result = json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": !ok
+            });
+            if ok {
+                let trimmed = text.trim();
+                if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                        match parsed {
+                            Value::Object(_) => {
+                                result["structuredContent"] = parsed;
+                            }
+                            Value::Array(_) => {
+                                result["structuredContent"] = json!({ "items": parsed });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": text }],
-                    "isError": !ok
-                }
+                "result": result
             }))
         }
         _ => Some(json!({
