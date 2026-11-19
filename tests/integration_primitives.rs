@@ -5262,3 +5262,54 @@ fn test_v216_mcp_output_schema_pi_edit_guard_review_and_http_idle_doctor() {
     assert_eq!(d2["pi_runtime"]["http_idle_timeout_ms"], 120000);
     assert_eq!(d2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_v217_tier2_peak_iq_masking_lineno_edit_heal_cmd_tip_and_write_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v217");
+    let ap_home = root.join("ap_home_v217");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "const MASK_TIER2_TOKENS = 240000;",
+        "const MASK_TIER2_MIN_ENTRY_CHARS = 1800;",
+        "tier2-peak-iq-guard",
+        "lineno-strip-unique",
+        "export function isBenignGrepNoMatch",
+        "[ap cmd-tip]",
+        "[ap write-tip]",
+        "export function listCodemodeStoreKeys",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.17 feature '{needle}'");
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}

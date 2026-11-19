@@ -839,6 +839,16 @@ const ENOENT_ERR_RE =
 	/no such file or directory|cannot find the path|FileNotFoundError|ENOENT/i;
 const PATH_MISMATCH_RE = /\/mnt\/[a-z]\//i;
 const BASH_BS_PATH_RE = /(?:^|[\s=])[A-Za-z]:\\/;
+const CMD_NOT_FOUND_RE = /command not found|is not recognized|exit(?:ed with)? code 127\b/i;
+const MISSING_CLI_MAP: ReadonlyArray<[RegExp, string]> = [
+	[/\bjq\b/i, 'ap read <file> --json-path "..." or ap query'],
+	[/\b(?:xxd|hexdump)\b/i, "ap read <file> --hex"],
+	[/\b(?:rg|ag)\b/i, "ap search <pattern> [path]"],
+	[/\b(?:tree|fd)\b/i, "ap atlas map [path]"],
+	[/\bsqlite3\b/i, "ap query -f db=<file.sqlite> <sql>"],
+	[/\bpdftotext\b/i, "ap read <file.pdf>"],
+	[/\bstrings\b/i, "ap read <binary> or ap search <pattern> <binary>"],
+];
 const CODE_FILE_EXT = /\.(?:rs|ts|tsx|js|jsx|mjs|cjs|py|go|c|cc|cpp|h|hpp)$/i;
 const EDIT_TOOLS = new Set(["write", "edit", "ap_edit", "ap_rename"]);
 const SERIAL_BATCHABLE_TOOLS = new Set(["bash", "powershell", "read", "grep", "find", "ls"]);
@@ -851,16 +861,23 @@ const LIGHT_THINKING_CHARS = 1500;
 const STAGNATION_TURNS = 3;
 const SERIAL_BATCH_THRESHOLD = 6;
 const BATCH_TIP_COOLDOWN_TURNS = 25;
+const WRITE_OVERWRITE_TIP_CHARS = 4000;
+const WRITE_TIP_COOLDOWN_TURNS = 15;
 const LARGE_CODE_READ_CHARS = 20000;
 const SIEVE_HARD_CHARS = 24000;
 const SIEVE_STRUCTURED_CHARS = 14000;
 const SIEVE_GIANT_LINE_CHARS = 4500;
 const SIEVE_STRUCTURED_LINES = 250;
 
-// High-water batch observation masking constants (calibrated for 1M-window DeepSeek Flash 98%+ KV-cache & 128k-256k models)
+// Two-tier batch observation masking constants (keeps DeepSeek V4.1 Flash in its <240k Peak-IQ zone)
 const MASK_PREFIX = "[ap masked stale toolResult:";
 const MASK_HIGH_WATER_PCT = 72;
 const MASK_HIGH_WATER_TOKENS = 180000;
+const MASK_TIER2_PCT = 78;
+const MASK_TIER2_TOKENS = 240000;
+const MASK_TIER2_MIN_ENTRY_CHARS = 1800;
+const MASK_TIER2_KEEP_RECENT = 10;
+const MASK_TIER2_MIN_RECLAIMED = 10000;
 const MASK_STALE_CHARS_FALLBACK = 120000;
 const FREE_MASK_MIN_TOKENS = 80000;
 const FREE_MASK_STALE_CHARS = 40000;
@@ -869,6 +886,14 @@ const MASK_MIN_ENTRY_CHARS = 4500;
 const MASK_MIN_BATCH_ENTRIES = 2;
 const MASK_MIN_RECLAIMED_CHARS = 16000;
 const MASK_COOLDOWN_TURNS = 15;
+
+export function isBenignGrepNoMatch(cmd: string, outText: string): boolean {{
+	if (!cmd || !outText) return false;
+	if (!/(?:^|[;&|]\s*)(?:grep|egrep|fgrep|rg|findstr|Select-String)\b/i.test(cmd)) return false;
+	if (!/exit(?:ed with)? code 1\b/i.test(outText)) return false;
+	const body = outText.replace(/command exited with code 1[\s\S]*/i, "").trim();
+	return body.length < 15;
+}}
 
 export function shouldAutoSieveShellOutput(text: string): boolean {{
 	if (!text) return false;
@@ -888,6 +913,7 @@ export function classifyShellFailureTip(
 	cmd: string,
 	outText: string,
 ): string | undefined {{
+	if (isBenignGrepNoMatch(cmd, outText)) return undefined;
 	if (QUOTE_OR_BS_ERR.test(outText)) {{
 		return `[ap quote-tip] Avoid nested quotes/backslashes inside inline python -c; use a single-quoted heredoc (python - <<'PY' ... PY) or write a script file via write/ap_edit.`;
 	}}
@@ -896,6 +922,13 @@ export function classifyShellFailureTip(
 			return `[ap timeout-tip] Slow recursive shell search timed out; use ap search (or ap_search / ap_atlas) with -e <ext> or a narrower directory instead.`;
 		}}
 		return `[ap timeout-tip] Command timed out (commands >2m also risk evicting DeepSeek KV-cache); cap synchronous commands <=90s, narrow scope, or redirect long jobs to a log file.`;
+	}}
+	if (CMD_NOT_FOUND_RE.test(outText)) {{
+		for (const [re, replacement] of MISSING_CLI_MAP) {{
+			if (re.test(cmd)) {{
+				return `[ap cmd-tip] Missing shell CLI detected; use built-in zero-dependency \`${{replacement}}\` instead.`;
+			}}
+		}}
 	}}
 	if (ENOENT_ERR_RE.test(outText)) {{
 		if (PATH_MISMATCH_RE.test(cmd)) {{
@@ -906,6 +939,27 @@ export function classifyShellFailureTip(
 		}}
 	}}
 	return undefined;
+}}
+
+function stripSequentialLineNumbers(lines: readonly string[]): string[] | undefined {{
+	const nonBlank = lines.filter((l) => l.trim().length > 0);
+	if (nonBlank.length < 2) return undefined;
+	const lineRe = /^\s*(\d+)(?::[0-9a-f]{{2}})?(?::|\||\t) ?(.*)$/;
+	let prevNum = -1;
+	const stripped: string[] = [];
+	for (const l of lines) {{
+		if (l.trim().length === 0) {{
+			stripped.push("");
+			continue;
+		}}
+		const m = l.match(lineRe);
+		if (!m) return undefined;
+		const num = Number(m[1]);
+		if (!Number.isFinite(num) || num <= prevNum) return undefined;
+		prevNum = num;
+		stripped.push(m[2] ?? "");
+	}}
+	return stripped;
 }}
 
 function reindentReplacement(
@@ -957,13 +1011,21 @@ export function healEditBlock(
 	if (trimEndAll(lfFile).includes(trimEndAll(lfOld))) return undefined;
 
 	const fileLines = lfFile.split("\n");
-	const oldLines = lfOld.split("\n");
+	const rawOldLines = lfOld.split("\n");
+	// Tier 0: Auto-strip accidental sequential line-number prefixes (e.g. `12: code` / `12:a3|code` copied from read/edit-closest/nl)
+	const strippedOld = stripSequentialLineNumbers(rawOldLines);
+	const oldLines = strippedOld ?? rawOldLines;
+	let effectiveNew = lfNew;
+	if (strippedOld) {{
+		const strippedNew = stripSequentialLineNumbers(lfNew.split("\n"));
+		if (strippedNew) effectiveNew = strippedNew.join("\n");
+	}}
 	const nonBlankOld = oldLines.filter((l) => l.trim().length > 0);
 	if (nonBlankOld.length === 0 || !nonBlankOld.some((l) => l.trim().length >= 4)) {{
 		return undefined;
 	}}
 
-	// Tier 1: Exact-length dedented line-block unique match (handles 2<->4 space / Tab<->space / shifted indent)
+	// Tier 1 (or Tier 0 after lineno strip): Exact-length dedented line-block unique match
 	const n = oldLines.length;
 	const exactHits: number[] = [];
 	for (let i = 0; i <= fileLines.length - n; i++) {{
@@ -985,8 +1047,8 @@ export function healEditBlock(
 		if (healedOld !== lfOld) {{
 			return {{
 				oldText: healedOld,
-				newText: reindentReplacement(lfNew, oldLines, matched),
-				strategy: "indent-unique",
+				newText: reindentReplacement(effectiveNew, oldLines, matched),
+				strategy: strippedOld ? "lineno-strip-unique" : "indent-unique",
 			}};
 		}}
 	}}
@@ -1025,7 +1087,7 @@ export function healEditBlock(
 			if (healedOld !== lfOld) {{
 				return {{
 					oldText: healedOld,
-					newText: reindentReplacement(lfNew, oldLines, matched),
+					newText: reindentReplacement(effectiveNew, oldLines, matched),
 					strategy: "blankline-unique",
 				}};
 			}}
@@ -1075,9 +1137,9 @@ export function findClosestEditWindow(fileContent: string, oldText: string): str
 	return `[ap edit-closest] Closest lines on disk (L${{bestStart + 1}}-L${{end}}):\n${{body}}`;
 }}
 
-export function countCodemodeStoreKeys(branch: ReadonlyArray<Record<string, unknown>>): number {{
+export function listCodemodeStoreKeys(branch: ReadonlyArray<Record<string, unknown>>): string[] {{
 	const keys = new Set<string>();
-	if (!Array.isArray(branch)) return 0;
+	if (!Array.isArray(branch)) return [];
 	for (const e of branch) {{
 		if (e?.type === "custom" && e.customType === "codemode-store" && e.data && typeof e.data === "object") {{
 			const d = e.data as {{ set?: Record<string, unknown>; delete?: string[] }};
@@ -1089,7 +1151,11 @@ export function countCodemodeStoreKeys(branch: ReadonlyArray<Record<string, unkn
 			}}
 		}}
 	}}
-	return keys.size;
+	return [...keys];
+}}
+
+export function countCodemodeStoreKeys(branch: ReadonlyArray<Record<string, unknown>>): number {{
+	return listCodemodeStoreKeys(branch).length;
 }}
 
 export function normCmdFingerprint(raw: string): string {{
@@ -1396,13 +1462,22 @@ export function planObservationMasking(
 	contextEntries: readonly ProjectedSessionEntry[],
 	options: ObservationMaskOptions = {{}},
 ): ObservationMaskPlan {{
-	const keepRecent = options.keepRecentEntries ?? MASK_KEEP_RECENT_ENTRIES;
-	const minChars = options.minEntryChars ?? MASK_MIN_ENTRY_CHARS;
+	const pct = typeof options.usagePercent === "number" ? options.usagePercent : null;
+	const tok = typeof options.usageTokens === "number" ? options.usageTokens : null;
+	const tier2 =
+		options.minEntryChars === undefined &&
+		((tok !== null && tok >= MASK_TIER2_TOKENS) || (pct !== null && pct >= MASK_TIER2_PCT));
+
+	const keepRecent =
+		options.keepRecentEntries ?? (tier2 ? MASK_TIER2_KEEP_RECENT : MASK_KEEP_RECENT_ENTRIES);
+	const minChars =
+		options.minEntryChars ?? (tier2 ? MASK_TIER2_MIN_ENTRY_CHARS : MASK_MIN_ENTRY_CHARS);
 	const highPct = options.highWaterPercent ?? MASK_HIGH_WATER_PCT;
 	const highTok = options.highWaterTokens ?? MASK_HIGH_WATER_TOKENS;
 	const staleFallback = options.staleCharsFallback ?? MASK_STALE_CHARS_FALLBACK;
 	const minEntries = options.minBatchEntries ?? MASK_MIN_BATCH_ENTRIES;
-	const minReclaimed = options.minReclaimedChars ?? MASK_MIN_RECLAIMED_CHARS;
+	const minReclaimed =
+		options.minReclaimedChars ?? (tier2 ? MASK_TIER2_MIN_RECLAIMED : MASK_MIN_RECLAIMED_CHARS);
 
 	if (!Array.isArray(contextEntries) || contextEntries.length <= keepRecent) {{
 		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "too-few-entries" }};
@@ -1444,8 +1519,6 @@ export function planObservationMasking(
 		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "below-min-entries" }};
 	}}
 
-	const pct = typeof options.usagePercent === "number" ? options.usagePercent : null;
-	const tok = typeof options.usageTokens === "number" ? options.usageTokens : null;
 	const pctTriggered = pct !== null && pct >= highPct;
 	const tokTriggered = tok !== null && tok >= highTok;
 	const fallbackTriggered = totalStaleChars >= staleFallback && candidates.length >= 4;
@@ -1472,11 +1545,13 @@ export function planObservationMasking(
 		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "savings-too-small" }};
 	}}
 
-	const reason = tokTriggered
-		? "high-water-tokens"
-		: pctTriggered
-			? "high-water-percent"
-			: "stale-payload-fallback";
+	const reason = tier2
+		? "tier2-peak-iq-guard"
+		: tokTriggered
+			? "high-water-tokens"
+			: pctTriggered
+				? "high-water-percent"
+				: "stale-payload-fallback";
 	return {{ edits, maskedCount: edits.length, reclaimedChars, reason }};
 }}
 
@@ -1649,12 +1724,14 @@ export default function (pi: ExtensionAPI) {{
 	const unchangedReads = new Map<string, number>();
 	const editedFilesThisRun = new Set<string>();
 	const builtInCodeEditsThisRun = new Set<string>();
+	const largeOverwriteCallIds = new Set<string>();
 	let settleGateFiredThisRun = false;
 	let stagnantHeavyTurns = 0;
 	let consecutiveLightTurns = 0;
 	let pendingThinkingNudge = false;
 	let serialSingleToolTurns = 0;
 	let lastBatchTipTurn = -BATCH_TIP_COOLDOWN_TURNS;
+	let lastWriteTipTurn = -WRITE_TIP_COOLDOWN_TURNS;
 	let pendingBatchNudge = false;
 	let largeReadTipShown = false;
 	let codemodeParallelTipShown = false;
@@ -1680,12 +1757,14 @@ export default function (pi: ExtensionAPI) {{
 	const resetTransientState = () => {{
 		recentShellFps.length = 0;
 		unchangedReads.clear();
+		largeOverwriteCallIds.clear();
 		resetRunState();
 		stagnantHeavyTurns = 0;
 		consecutiveLightTurns = 0;
 		pendingThinkingNudge = false;
 		serialSingleToolTurns = 0;
 		lastBatchTipTurn = -BATCH_TIP_COOLDOWN_TURNS;
+		lastWriteTipTurn = -WRITE_TIP_COOLDOWN_TURNS;
 		pendingBatchNudge = false;
 		sessionTurnCount = 0;
 		lastMaskTurn = -MASK_COOLDOWN_TURNS;
@@ -1843,11 +1922,17 @@ export default function (pi: ExtensionAPI) {{
 		}}
 	}});
 
-	pi.on("session_before_tree", () => {{
-		// Keep branch-switch summaries sharp by preserving verified facts & falsified dead-ends
+	pi.on("session_before_tree", (_event, ctx) => {{
+		// Keep branch-switch summaries sharp by preserving verified facts, dead-ends & active codemode-store keys
+		const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+		const storeKeys = listCodemodeStoreKeys(branch as unknown as Array<Record<string, unknown>>);
+		const storeAnchor =
+			storeKeys.length > 0
+				? ` Note active codemode-store keys recoverable via load(key): [${{storeKeys.slice(0, 12).join(", ")}}].`
+				: "";
 		return {{
 			customInstructions:
-				"Preserve exact file paths, symbol names, verified facts, falsified hypotheses/dead-ends, and exact failing error signatures so the target branch never repeats failed attempts.",
+				`Preserve exact file paths, symbol names, verified facts, falsified hypotheses/dead-ends, and exact failing error signatures so the target branch never repeats failed attempts.${{storeAnchor}}`,
 		}};
 	}});
 
@@ -1888,11 +1973,17 @@ export default function (pi: ExtensionAPI) {{
 					return;
 				}}
 				if (sub === "compact") {{
+					const branch = ctx.sessionManager?.getBranch?.() ?? [];
+					const storeKeys = listCodemodeStoreKeys(branch as unknown as Array<Record<string, unknown>>);
+					const storeAnchor =
+						storeKeys.length > 0
+							? ` Preserve active codemode-store keys recoverable via load(key): [${{storeKeys.slice(0, 12).join(", ")}}].`
+							: "";
 					ctx.compact({{
 						customInstructions:
-							"Preserve exact file paths, symbol names, verified facts, falsified dead-ends, and exact build/test commands needed to continue cleanly.",
+							`Preserve exact file paths, symbol names, verified facts, falsified dead-ends, and exact build/test commands needed to continue cleanly.${{storeAnchor}}`,
 					}});
-					ctx.ui.notify("[ap] Triggered focused compaction preserving verified facts & dead-ends.", "info");
+					ctx.ui.notify("[ap] Triggered focused compaction preserving verified facts, dead-ends & store keys.", "info");
 					return;
 				}}
 				if (sub === "handoff") {{
@@ -2403,6 +2494,20 @@ export default function (pi: ExtensionAPI) {{
 			stagnantHeavyTurns = 0;
 			pendingThinkingNudge = false;
 
+			// Track large full-file `write` overwrites of already-existing files (to nudge surgical `edit`)
+			if (event.toolName === "write" && event.input && typeof event.input === "object") {{
+				const inp = event.input as {{ path?: string; file_path?: string; content?: string }};
+				const rawPath = String(inp.path ?? inp.file_path ?? "").trim();
+				const content = typeof inp.content === "string" ? inp.content : "";
+				if (rawPath && content.length >= WRITE_OVERWRITE_TIP_CHARS) {{
+					const cwd = ctx?.cwd || process.cwd();
+					const absPath = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+					if (existsSync(absPath) && typeof event.toolCallId === "string" && event.toolCallId) {{
+						largeOverwriteCallIds.add(event.toolCallId);
+					}}
+				}}
+			}}
+
 			// Proactive <1ms pre-execution indent/blank-line repair for Pi built-in `edit` (pi-edit-guard pattern)
 			if (event.toolName === "edit" && event.input && typeof event.input === "object") {{
 				const inp = event.input as {{
@@ -2539,6 +2644,17 @@ export default function (pi: ExtensionAPI) {{
 			mutated = true;
 		}}
 
+		// B1. Large full-file overwrite tip on `write` (rate-limited: once per 15 turns)
+		if (event.toolName === "write" && !event.isError && typeof event.toolCallId === "string") {{
+			if (largeOverwriteCallIds.delete(event.toolCallId)) {{
+				if (sessionTurnCount - lastWriteTipTurn >= WRITE_TIP_COOLDOWN_TURNS) {{
+					lastWriteTipTurn = sessionTurnCount;
+					outText += `\n[ap write-tip] Full-file overwrite (>=4KB) on existing file. Prefer surgical \`edit\` (supports multi-hunk edits[]) or \`ap_edit\` to save output tokens & generation time.`;
+					mutated = true;
+				}}
+			}}
+		}}
+
 		// B2. Pi `codemode` error self-healing tip + one-time Promise.allSettled parallelism tip
 		if (event.toolName === "codemode") {{
 			if (event.isError || outText.includes("Script failed") || outText.includes("is not a function")) {{
@@ -2576,7 +2692,8 @@ export default function (pi: ExtensionAPI) {{
 				}}
 			}}
 
-			if (event.isError) {{
+			const benignGrep = event.isError && isBenignGrepNoMatch(cmd, outText);
+			if (event.isError && !benignGrep) {{
 				const failTip = classifyShellFailureTip(event.toolName, cmd, outText);
 				if (failTip) {{
 					outText += `\n${{failTip}}`;
@@ -2591,9 +2708,10 @@ export default function (pi: ExtensionAPI) {{
 					recentShellFps.shift();
 				}}
 				const repeats = recentShellFps.filter((x) => x === fp).length;
-				const threshold = event.isError ? LOOP_ERR_THRESHOLD : LOOP_OK_THRESHOLD;
+				const effectiveErr = event.isError && !benignGrep;
+				const threshold = effectiveErr ? LOOP_ERR_THRESHOLD : LOOP_OK_THRESHOLD;
 				if (repeats >= threshold) {{
-					const hint = event.isError
+					const hint = effectiveErr
 						? `\n[ap loop-breaker] Repeated failing shell command (${{repeats}}/${{LOOP_WINDOW}} calls) without intervening edits. Pause, inspect root cause, edit code or switch strategy instead of retrying identically.`
 						: `\n[ap loop-breaker] Identical shell command repeated (${{repeats}}/${{LOOP_WINDOW}} calls) without edits. Avoid redundant polling; summarize findings or pivot to the next concrete action.`;
 					outText = `${{outText}}${{hint}}`;
@@ -3332,6 +3450,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("healEditBlock")
                 && s.contains("findClosestEditWindow")
                 && s.contains("countCodemodeStoreKeys")
+                && s.contains("listCodemodeStoreKeys")
+                && s.contains("isBenignGrepNoMatch")
+                && s.contains("MASK_TIER2_TOKENS")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
