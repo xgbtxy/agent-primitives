@@ -24,7 +24,7 @@ jobs:
       - name: Strict Clippy lint gate (-D warnings across all 8 workspace crates)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run standalone crate isolation & end-to-end integration tests
-        run: cargo test --workspace -- --nocapture
+        run: cargo test --workspace -- --test-threads=2 --nocapture
       - name: Build LTO-optimized single binary & verify doctor + deterministic benchmarks
         run: |
           cargo build --release --bin ap
