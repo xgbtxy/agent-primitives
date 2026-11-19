@@ -118,11 +118,23 @@ fn est_tokens(text: &str) -> usize {
     }
 }
 
-pub fn store_dir(cwd: &Path) -> PathBuf {
-    let base = match std::env::var("SIEVE_HOME") {
+pub fn global_sieve_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|h| h.join(".ap").join("sieve"))
+}
+
+fn store_dir_readonly(cwd: &Path) -> PathBuf {
+    match std::env::var("SIEVE_HOME") {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
         _ => cwd.join(".sieve"),
-    };
+    }
+}
+
+pub fn store_dir(cwd: &Path) -> PathBuf {
+    let base = store_dir_readonly(cwd);
     let _ = fs::create_dir_all(&base);
     let gi = base.join(".gitignore");
     if !gi.exists() {
@@ -995,10 +1007,10 @@ pub fn run_cli(args: &[String]) -> i32 {
         }
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let store = store_dir(&cwd);
 
     match cli.subcmd {
         SubCmd::Run { json: as_json, cmd } => {
+            let store = store_dir(&cwd);
             let clean_cmd: Vec<String> = if cmd.first().map(|s| s.as_str()) == Some("--") {
                 cmd[1..].to_vec()
             } else {
@@ -1063,6 +1075,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             label,
             json: as_json,
         } => {
+            let store = store_dir(&cwd);
             let mut raw = String::new();
             let _ = std::io::stdin().read_to_string(&mut raw);
             let res = compress_stream_in(&store, &raw, &label, 0, 0.0);
@@ -1081,15 +1094,24 @@ pub fn run_cli(args: &[String]) -> i32 {
             max_hits,
             json_path,
         } => {
+            let primary = store_dir_readonly(&cwd);
+            let mut candidate_dirs = vec![primary.clone()];
+            if let Some(g) = global_sieve_dir() {
+                if g != primary {
+                    candidate_dirs.push(g);
+                }
+            }
             let mut match_file: Option<PathBuf> = None;
-            if let Ok(rd) = fs::read_dir(&store) {
-                for entry in rd.flatten() {
-                    let p = entry.path();
-                    if p.extension().and_then(|e| e.to_str()) == Some("raw") {
-                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                            if stem.starts_with(&id) {
-                                match_file = Some(p);
-                                break;
+            'dirs: for dir in &candidate_dirs {
+                if let Ok(rd) = fs::read_dir(dir) {
+                    for entry in rd.flatten() {
+                        let p = entry.path();
+                        if p.extension().and_then(|e| e.to_str()) == Some("raw") {
+                            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                                if stem.starts_with(&id) {
+                                    match_file = Some(p);
+                                    break 'dirs;
+                                }
                             }
                         }
                     }
@@ -1098,7 +1120,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             let Some(raw_path) = match_file else {
                 eprintln!(
                     "[sieve] error: unknown archive id '{id}' in {}",
-                    store.display()
+                    primary.display()
                 );
                 return 1;
             };
@@ -1209,7 +1231,21 @@ pub fn run_cli(args: &[String]) -> i32 {
             limit,
             json: as_json,
         } => {
-            let (hits, elapsed_ms) = search_archives(&store, &query, limit);
+            let primary = store_dir_readonly(&cwd);
+            let (mut hits, mut elapsed_ms) = search_archives(&primary, &query, limit);
+            let mut searched = primary.clone();
+            if hits.is_empty() {
+                if let Some(g) = global_sieve_dir() {
+                    if g != primary && g.join("index.sqlite").is_file() {
+                        let (ghits, gms) = search_archives(&g, &query, limit);
+                        if !ghits.is_empty() {
+                            hits = ghits;
+                            elapsed_ms = gms;
+                            searched = g;
+                        }
+                    }
+                }
+            }
             if as_json {
                 println!(
                     "{}",
@@ -1226,7 +1262,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 println!(
                     "[sieve search] 0 matches for {:?} across {} ({elapsed_ms} ms)",
                     query.trim(),
-                    store.display()
+                    searched.display()
                 );
                 return 0;
             }

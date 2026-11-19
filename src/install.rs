@@ -797,21 +797,25 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
     format!(
         r#"// Managed by agent-primitives (`ap init`). Zero system-prompt token overhead.
 // Safely accelerates slow bash patterns and sieves >28KB noisy direct-to-LLM outputs
-// while leaving destructive commands, write/edit tools, and codemode child calls untouched.
+// into user-scoped `~/.ap/sieve` (zero workspace `.sieve` clutter) while leaving
+// destructive commands, write/edit tools, and codemode child calls untouched.
 import {{ spawnSync }} from "node:child_process";
+import {{ homedir }} from "node:os";
+import {{ join }} from "node:path";
 import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
 
 const AP_BIN = "{escaped}";
+const SIEVE_HOME = process.env.SIEVE_HOME || join(homedir(), ".ap", "sieve");
 const DESTRUCTIVE_OR_WRITE =
 	/\b(?:Remove-Item|rm|del|erase|rmdir|rd|Move-Item|Rename-Item|mv|ren|Set-Content|Add-Content|Clear-Content|Out-File|Copy-Item|cpi|copy)\b|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|\.rmdir\(|\bgit(?:\.exe)?\b[\s\S]{{0,80}}?\bclean\b/i;
 const BARE_SLOW_GREP =
 	/^\s*grep\s+-[rR][nwiEH]*\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$/;
 const PY_INVOKE = /(?:^|[;&|]\s*)(?:python3?|py)\b/i;
 const HAS_UTF8_ENV = /PYTHONUTF8|PYTHONIOENCODING/i;
-const PY_WIN_BS = /\b(?:python3?|py)\s+-c\s+.*['"][A-Za-z]:\\/;
+const PY_WIN_BS = /\b(?:python3?|py)\s+-c\s+.*(?<![rR])['"][A-Za-z]:\\(?!\\)/;
 const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
 
-function healCommand(raw: string, toolName: string): string | undefined {{
+export function healCommand(raw: string, toolName: string): string | undefined {{
 	if (!raw || DESTRUCTIVE_OR_WRITE.test(raw)) return undefined;
 	let cmd = raw;
 	let changed = false;
@@ -833,15 +837,18 @@ function healCommand(raw: string, toolName: string): string | undefined {{
 		changed = true;
 	}}
 
-	// 3. Auto-fix unescaped Windows drive backslashes inside `python -c` string literals
+	// 3. Auto-fix unescaped Windows drive backslashes inside `python -c` non-raw string literals
 	if (PY_WIN_BS.test(cmd)) {{
-		cmd = cmd.replace(/([A-Za-z]:)(\\[^\s'"]+)/g, (_m, drv: string, rest: string) => drv + rest.replace(/\\/g, "/"));
+		cmd = cmd.replace(
+			/(?<![rR])(['"])([A-Za-z]:)(\\(?!\\)[^\s'"]+)/g,
+			(_m, q: string, drv: string, rest: string) => q + drv + rest.replace(/\\/g, "/"),
+		);
 		changed = true;
 	}}
 
-	// 4. Auto-lock UTF-8 for Python invocations in bash to eliminate GBK codec crashes
+	// 4. Auto-lock UTF-8 across the full command chain (including `cd ... && python ...`) to eliminate GBK codec crashes
 	if (toolName === "bash" && PY_INVOKE.test(cmd) && !HAS_UTF8_ENV.test(cmd)) {{
-		cmd = `PYTHONUTF8=1 PYTHONIOENCODING=utf-8 ${{cmd}}`;
+		cmd = `export PYTHONUTF8=1 PYTHONIOENCODING=utf-8; ${{cmd}}`;
 		changed = true;
 	}}
 
@@ -879,6 +886,7 @@ export default function (pi: ExtensionAPI) {{
 			encoding: "utf8",
 			timeout: 4000,
 			windowsHide: true,
+			env: {{ ...process.env, SIEVE_HOME }},
 		}});
 		if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < rawText.length * 0.8) {{
 			return {{

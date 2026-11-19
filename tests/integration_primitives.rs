@@ -3366,12 +3366,62 @@ fn test_multi_agent_claims_dedup_pack_ws_and_pi_codemode_wiring() {
     let pi_ext = pi_home.join(".pi/agent/extensions/zz-ap-accelerator.ts");
     assert!(pi_mcp.is_file(), "Expected ~/.pi/agent/mcp.json created");
     assert!(pi_ext.is_file(), "Expected zz-ap-accelerator.ts created");
-    assert!(fs::read_to_string(&pi_ext)
-        .unwrap()
-        .contains("\"sieve\", \"pipe\""));
+    let pi_ext_src = fs::read_to_string(&pi_ext).unwrap();
+    assert!(pi_ext_src.contains("\"sieve\", \"pipe\""));
+    assert!(pi_ext_src.contains("export PYTHONUTF8=1 PYTHONIOENCODING=utf-8;"));
+    assert!(pi_ext_src.contains("SIEVE_HOME"));
     assert!(fs::read_to_string(&pi_mcp)
         .unwrap()
         .contains("\"exposure\": \"codemode\""));
+
+    // 6. Global `~/.ap/sieve` fallback on `ap sieve peek` + `ap sieve search` without creating `.sieve/` in clean cwd
+    let clean_ws = root.join("clean_ws_no_sieve");
+    fs::create_dir_all(&clean_ws).unwrap();
+    let global_sieve = pi_home.join(".ap/sieve");
+    let big_log = (0..120)
+        .map(|i| format!("2026-11-19T12:00:00Z INFO worker-{i} UNIQUE_FALLBACK_TOKEN_V242 ok"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let piped = run_ap(
+        &clean_ws,
+        &["sieve", "pipe", "--label", "global-test", "--json"],
+        Some(&big_log),
+        &[("AP_HOME", &ap_home), ("SIEVE_HOME", &global_sieve)],
+    );
+    assert!(piped.status.success());
+    let pipe_j: Value = serde_json::from_slice(&piped.stdout).unwrap();
+    let sid = pipe_j["id"].as_str().unwrap().to_string();
+    assert!(
+        !clean_ws.join(".sieve").exists(),
+        "SIEVE_HOME write must never create cwd/.sieve"
+    );
+    let peeked = run_ap(
+        &clean_ws,
+        &[
+            "sieve",
+            "peek",
+            &sid,
+            "--grep",
+            "UNIQUE_FALLBACK_TOKEN_V242",
+        ],
+        None,
+        &[
+            ("AP_HOME", &ap_home),
+            ("HOME", &pi_home),
+            ("USERPROFILE", &pi_home),
+        ],
+    );
+    assert!(
+        peeked.status.success()
+            && String::from_utf8_lossy(&peeked.stdout).contains("UNIQUE_FALLBACK_TOKEN_V242"),
+        "Expected peek to find archive in global ~/.ap/sieve fallback: {}{}",
+        String::from_utf8_lossy(&peeked.stdout),
+        String::from_utf8_lossy(&peeked.stderr)
+    );
+    assert!(
+        !clean_ws.join(".sieve").exists(),
+        "Read-only `ap sieve peek` must never create cwd/.sieve"
+    );
 
     assert!(run_ap(
         root,
