@@ -2267,6 +2267,13 @@ fn mcp_prompts_list() -> Value {
             "arguments": [
                 { "name": "symptom", "description": "Error message, failing test, or bug symptom", "required": true }
             ]
+        },
+        {
+            "name": "deepseek-lean-coding",
+            "description": "High-efficiency coding loop tuned for interleaved-thinking models (e.g. DeepSeek Flash/Reasoner): single-pass orientation, zero re-read loops, atomic AST edits, and strict post-edit verification",
+            "arguments": [
+                { "name": "task", "description": "Software engineering objective", "required": true }
+            ]
         }
     ])
 }
@@ -2327,6 +2334,23 @@ fn get_mcp_prompt(name: &str, args: &Value) -> Result<Value, String> {
                     "content": {
                         "type": "text",
                         "text": format!("Diagnose and fix `{symptom}`:\n1. Run `ap_locate(query=\"{symptom}\")` to rank Top-K suspect functions.\n2. Trace callers/sinks with `ap_trace`.\n3. Reproduce with `ap_probe` or a focused test, apply fix via `ap_edit(run_tests=true)`, and verify via `ap_verify`.")
+                    }
+                }]
+            }))
+        }
+        "deepseek-lean-coding" => {
+            let task = args
+                .get("task")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "Missing required argument `task`".to_string())?;
+            Ok(json!({
+                "description": "Lean interleaved-thinking coding loop that prevents overthinking stalls and re-read loops",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!("Complete `{task}` with concise, high-signal tool steps:\n1. Call `ap_orient` once (do not repeatedly re-read unchanged files).\n2. Batch parallel discovery with `ap_search(patterns=[...])` or `ap_locate`.\n3. Commit to one atomic `ap_edit` (or `ap_rename` for refactors) with `run_tests=true` rather than spending >2 turns deliberating.\n4. Finish with `ap_diff_audit` + `ap_verify` and summarize verified results.")
                     }
                 }]
             }))

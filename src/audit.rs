@@ -40,6 +40,10 @@ pub struct Counters {
     pub outputs_over_8kb: usize,
     pub output_truncation_spill: usize,
     pub identical_retry_loops: usize,
+    pub heavy_thinking_turns: usize,
+    pub dsml_tool_leaks: usize,
+    pub prompt_input_tokens: u64,
+    pub prompt_cache_read_tokens: u64,
 }
 
 impl Counters {
@@ -57,6 +61,10 @@ impl Counters {
         self.outputs_over_8kb += o.outputs_over_8kb;
         self.output_truncation_spill += o.output_truncation_spill;
         self.identical_retry_loops += o.identical_retry_loops;
+        self.heavy_thinking_turns += o.heavy_thinking_turns;
+        self.dsml_tool_leaks += o.dsml_tool_leaks;
+        self.prompt_input_tokens += o.prompt_input_tokens;
+        self.prompt_cache_read_tokens += o.prompt_cache_read_tokens;
     }
 }
 
@@ -375,9 +383,28 @@ fn scan_pi(f: &Path) -> Counters {
         let msg = &o["message"];
         match msg["role"].as_str().unwrap_or("") {
             "assistant" => {
+                if let Some(u) = msg["usage"].as_object() {
+                    st.prompt_input_tokens += u.get("input").and_then(Value::as_u64).unwrap_or(0);
+                    st.prompt_cache_read_tokens +=
+                        u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
+                }
                 if let Some(arr) = msg["content"].as_array() {
+                    let mut turn_thinking_chars = 0usize;
+                    let mut has_dsml_leak = false;
                     for blk in arr {
                         let bt = blk["type"].as_str().unwrap_or("");
+                        if bt == "thinking" {
+                            turn_thinking_chars +=
+                                blk["thinking"].as_str().map(str::len).unwrap_or(0);
+                            continue;
+                        }
+                        if bt == "text" {
+                            let tx = blk["text"].as_str().unwrap_or("");
+                            if tx.contains("DSML") && tx.contains("invoke") {
+                                has_dsml_leak = true;
+                            }
+                            continue;
+                        }
                         if bt != "toolCall" && bt != "tool_use" {
                             continue;
                         }
@@ -404,6 +431,12 @@ fn scan_pi(f: &Path) -> Counters {
                             }
                             classify_cmd(cmd_s, &mut st);
                         }
+                    }
+                    if turn_thinking_chars >= 8000 {
+                        st.heavy_thinking_turns += 1;
+                    }
+                    if has_dsml_leak {
+                        st.dsml_tool_leaks += 1;
                     }
                 }
             }
@@ -659,6 +692,13 @@ pub fn audit_home(home: &Path, max_per_harness: usize, compare: bool) -> Value {
             "why": "Hard-stops identical failing retries (`exit 2` in <2ms) and preserves verified facts/dead-ends across compaction."
         }));
     }
+    if totals.heavy_thinking_turns > 0 || totals.dsml_tool_leaks > 0 {
+        recs.push(json!({
+            "primitive": "pi accelerator (`ap init -a pi --with-hooks`)",
+            "evidence": format!("{} heavy-thinking turns (>8k chars), {} DSML text tool leaks", totals.heavy_thinking_turns, totals.dsml_tool_leaks),
+            "why": "Enables zero-token Pi v1.5+ overthinking stagnation nudges, unchanged re-read guards, DSML->toolCall recovery & live TUI context-rot HUD."
+        }));
+    }
 
     let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
     let mut out = json!({
@@ -736,6 +776,20 @@ pub fn run_cli(args: &[String]) -> i32 {
         "- Broad shell searches: **{}** | Identical retry loops: **{}**",
         c["shell_broad_search"], c["identical_retry_loops"]
     );
+    let heavy_t = c["heavy_thinking_turns"].as_u64().unwrap_or(0);
+    let dsml_l = c["dsml_tool_leaks"].as_u64().unwrap_or(0);
+    let in_tok = c["prompt_input_tokens"].as_u64().unwrap_or(0);
+    let cache_tok = c["prompt_cache_read_tokens"].as_u64().unwrap_or(0);
+    if heavy_t > 0 || dsml_l > 0 || cache_tok > 0 {
+        let cache_pct = if in_tok + cache_tok > 0 {
+            ((cache_tok as f64 / (in_tok + cache_tok) as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+        println!(
+            "- Heavy-thinking turns (>8k chars): **{heavy_t}** | DSML tool leaks: **{dsml_l}** | Prompt KV-cache hit rate: **{cache_pct:.1}%**"
+        );
+    }
 
     if let Some(cmp_map) = report["period_comparison"]
         .as_object()

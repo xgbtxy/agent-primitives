@@ -3979,7 +3979,7 @@ fn test_v260_ast_rename_semantic_sieve_mcp_2025_and_loop_breaker() {
     .unwrap();
     assert!(ext_ts.contains("normCmdFingerprint"));
     assert!(ext_ts.contains("[ap loop-breaker]"));
-    assert!(ext_ts.contains("session_switch"));
+    assert!(ext_ts.contains("session_before_switch"));
     assert!(ext_ts.contains("EDIT_TOOLS"));
 
     // 5. `ap stats --json` emits per-primitive `by_kind` breakdown
@@ -4214,7 +4214,7 @@ fn test_v270_parallel_search_git_changes_mcp_resources_prompts_and_smart_patch()
         .contains("billing.ts"));
 
     // 4d. prompts/list & prompts/get return workflow messages
-    assert_eq!(resps[4]["result"]["prompts"].as_array().unwrap().len(), 3);
+    assert!(resps[4]["result"]["prompts"].as_array().unwrap().len() >= 4);
     assert!(resps[5]["result"]["messages"][0]["content"]["text"]
         .as_str()
         .unwrap()
@@ -4232,4 +4232,127 @@ fn test_v270_parallel_search_git_changes_mcp_resources_prompts_and_smart_patch()
         .as_str()
         .unwrap()
         .contains("TEST-SKIPPED"));
+}
+
+#[test]
+fn test_v280_pi_deepseek_accelerator_dsml_reread_overthinking_and_audit_metrics() {
+    use serde_json::json;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_home");
+    let fake_home = root.join("fake_home");
+    let pi_sess_dir = fake_home
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join("--demo-coding-repo--");
+    fs::create_dir_all(&pi_sess_dir).unwrap();
+
+    // 1. Verify v2.8.0 generated Pi extension uses valid Pi v1.5+ lifecycle events & DeepSeek guards
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(init_out.status.success());
+    let ext_ts = fs::read_to_string(
+        fake_home
+            .join(".pi")
+            .join("agent")
+            .join("extensions")
+            .join("zz-ap-accelerator.ts"),
+    )
+    .unwrap();
+    assert!(!ext_ts.contains("\"session_switch\""));
+    assert!(ext_ts.contains("\"session_before_switch\""));
+    assert!(ext_ts.contains("\"session_before_compact\""));
+    assert!(ext_ts.contains("\"session_compact\""));
+    assert!(ext_ts.contains("extractDsmlToolCalls"));
+    assert!(ext_ts.contains("[ap reread-guard]"));
+    assert!(ext_ts.contains("[ap edit-tip]"));
+    assert!(ext_ts.contains("[ap thinking-guard]"));
+    assert!(ext_ts.contains("structuredContent: event.structuredContent"));
+
+    // 2. Verify `ap audit` captures heavy_thinking_turns, dsml_tool_leaks, cache hit tokens & sliding-window loops
+    let heavy_think = "x".repeat(9500);
+    let sess_lines = [
+        json!({
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "usage": { "input": 2000, "cacheRead": 8000 },
+                "content": [
+                    { "type": "thinking", "thinking": heavy_think },
+                    { "type": "text", "text": "<｜DSML｜invoke name=\"read\"><｜DSML｜parameter name=\"path\">src/app.ts</｜DSML｜parameter></｜DSML｜invoke>" }
+                ]
+            }
+        }),
+        json!({
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "usage": { "input": 1000, "cacheRead": 9000 },
+                "content": [
+                    { "type": "toolCall", "id": "c1", "name": "bash", "arguments": { "command": "cargo test --lib" } },
+                    { "type": "toolCall", "id": "c2", "name": "bash", "arguments": { "command": "git status" } },
+                    { "type": "toolCall", "id": "c3", "name": "bash", "arguments": { "command": "cargo test --lib" } },
+                    { "type": "toolCall", "id": "c4", "name": "bash", "arguments": { "command": "cargo test --lib" } }
+                ]
+            }
+        }),
+    ]
+    .iter()
+    .map(|v| v.to_string())
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+    fs::write(pi_sess_dir.join("session_001.jsonl"), sess_lines).unwrap();
+
+    let aud = run_ap(
+        root,
+        &["audit", "--home", fake_home.to_str().unwrap(), "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(aud.status.success());
+    let aj: Value = serde_json::from_slice(&aud.stdout).unwrap();
+    let agg = &aj["aggregate_friction_counts"];
+    assert_eq!(agg["heavy_thinking_turns"], 1);
+    assert_eq!(agg["dsml_tool_leaks"], 1);
+    assert_eq!(agg["identical_retry_loops"], 1);
+    assert_eq!(agg["prompt_input_tokens"], 3000);
+    assert_eq!(agg["prompt_cache_read_tokens"], 17000);
+
+    // 3. Verify `deepseek-lean-coding` MCP prompt
+    let mcp_in = format!(
+        "{}\n{}\n",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": {"name": "deepseek-lean-coding", "arguments": {"task": "Add retry backoff"}}})
+    );
+    let mcp_out = run_ap(root, &["mcp"], Some(&mcp_in), &[("AP_HOME", &ap_home)]);
+    assert!(mcp_out.status.success());
+    let resps: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(resps.len(), 2);
+    assert!(resps[0]["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "deepseek-lean-coding"));
+    assert!(resps[1]["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Add retry backoff"));
 }

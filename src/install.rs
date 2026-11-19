@@ -776,7 +776,7 @@ fn merge_pi_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
             "command": ap_bin_posix,
             "args": ["mcp"],
             "exposure": "codemode",
-            "description": "Fast Pure-Rust AST edit/rename/orient/impact/trace, batch read/search, SQLite/Office/SourceMap/PE/ELF parsing, compiler/test/diff sieve, baton/recall memory, CDP/HTTP/TCP/WS/TLS probes & multi-agent claims/dedup"
+            "description": "Fast Pure-Rust MCP 2025-06-18 (34 annotated tools, Resources, Prompts): AST edit/rename/orient/impact/changes/trace, parallel search, SQLite/Office/SourceMap/PE/ELF read, compiler/test/diff sieve, baton/recall memory & CDP/HTTP/TCP/WS/TLS probes"
         }),
     );
     if let Some(p) = cfg_path.parent() {
@@ -796,14 +796,17 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
     let escaped = ap_bin_posix.replace('\\', "/").replace('"', "\\\"");
     format!(
         r#"// Managed by agent-primitives (`ap init`). Zero system-prompt token overhead.
-// Safely accelerates slow bash patterns, breaks 3x repetitive shell doom-loops
-// (resetting cleanly on file edits & session switches), and sieves >28KB noisy
-// direct-to-LLM outputs into `~/.ap/sieve` (zero workspace `.sieve` clutter)
-// while leaving destructive commands, write/edit tools, and codemode child calls untouched.
+// Designed for Pi v1.5+ and interleaved-thinking models (e.g. DeepSeek Flash / Reasoner):
+// - Accelerates slow `grep -rn`, heals Windows `> NUL`, non-raw `python -c` paths & UTF-8
+// - Auto-sieves >28KB direct-to-LLM shell outputs into `~/.ap/sieve` (zero `.sieve` clutter)
+// - Breaks 3x shell doom-loops, 3x unchanged file re-reads & 3-turn heavy-thinking stalls
+// - Recovers leaked DSML XML tool blocks when 0 native tool calls were emitted (zero conflict)
+// - Auto-checkpoints `.baton/` on compaction (only if `.baton` already exists) + TUI context HUD
 import {{ spawnSync }} from "node:child_process";
+import {{ existsSync }} from "node:fs";
 import {{ homedir }} from "node:os";
 import {{ join }} from "node:path";
-import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
+import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
 
 const AP_BIN = "{escaped}";
 const SIEVE_HOME = process.env.SIEVE_HOME || join(homedir(), ".ap", "sieve");
@@ -818,6 +821,9 @@ const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
 const EDIT_TOOLS = new Set(["write", "edit", "ap_edit", "ap_rename"]);
 const LOOP_WINDOW = 6;
 const LOOP_THRESHOLD = 3;
+const REREAD_THRESHOLD = 3;
+const HEAVY_THINKING_CHARS = 12000;
+const STAGNATION_TURNS = 3;
 
 export function normCmdFingerprint(raw: string): string {{
 	return raw
@@ -834,7 +840,7 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 	let cmd = raw;
 	let changed = false;
 
-	// 1. Bare recursive GNU `grep -rn <pat> [path]` -> `<50ms` `ap search`
+	// 1. Bare recursive GNU `grep -rn <pat> [path]` -> `<50ms` parallel `ap search`
 	if (!/[|;&>]/.test(cmd)) {{
 		const gm = cmd.match(BARE_SLOW_GREP);
 		if (gm) {{
@@ -860,7 +866,7 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 		changed = true;
 	}}
 
-	// 4. Auto-lock UTF-8 across the full command chain (including `cd ... && python ...`) to eliminate GBK codec crashes
+	// 4. Auto-lock UTF-8 across the full command chain (including `cd ... && python ...`)
 	if (toolName === "bash" && PY_INVOKE.test(cmd) && !HAS_UTF8_ENV.test(cmd)) {{
 		cmd = `export PYTHONUTF8=1 PYTHONIOENCODING=utf-8; ${{cmd}}`;
 		changed = true;
@@ -869,22 +875,208 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 	return changed ? cmd : undefined;
 }}
 
+export interface DsmlRecoveredCall {{
+	type: "toolCall";
+	id: string;
+	name: string;
+	arguments: Record<string, unknown>;
+}}
+
+/**
+ * Recover leaked DeepSeek DSML XML tool invocations into native Pi `toolCall` blocks.
+ * Strictly gated to currently active tools (`allowedTools`) so unknown names never run.
+ */
+export function extractDsmlToolCalls(
+	text: string,
+	allowedTools: ReadonlySet<string>,
+): {{ cleanedText: string; calls: DsmlRecoveredCall[] }} | undefined {{
+	if (!text || !text.includes("DSML") || !text.includes("invoke")) return undefined;
+	const invokeRe =
+		/<[|｜]DSML[|｜]invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/[|｜]DSML[|｜]invoke>/g;
+	const paramRe =
+		/<[|｜]DSML[|｜]parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?[^>]*>([\s\S]*?)<\/[|｜]DSML[|｜]parameter>/g;
+
+	const calls: DsmlRecoveredCall[] = [];
+	let match: RegExpExecArray | null;
+	let seq = 0;
+	while ((match = invokeRe.exec(text)) !== null) {{
+		const toolName = (match[1] || "").trim();
+		if (!toolName || !allowedTools.has(toolName)) continue;
+		const body = match[2] || "";
+		const args: Record<string, unknown> = {{}};
+		let pm: RegExpExecArray | null;
+		paramRe.lastIndex = 0;
+		while ((pm = paramRe.exec(body)) !== null) {{
+			const key = (pm[1] || "").trim();
+			const isStr = pm[2] !== "false";
+			const rawVal = pm[3] ?? "";
+			if (!key) continue;
+			if (!isStr) {{
+				try {{
+					args[key] = JSON.parse(rawVal.trim());
+					continue;
+				}} catch {{
+					// fall through to raw string
+				}}
+			}}
+			args[key] = rawVal;
+		}}
+		seq += 1;
+		calls.push({{
+			type: "toolCall",
+			id: `ap_dsml_${{Date.now()}}_${{seq}}`,
+			name: toolName,
+			arguments: args,
+		}});
+	}}
+	if (calls.length === 0) return undefined;
+	const cleanedText = text
+		.replace(/<[|｜]DSML[|｜]function_calls>[\s\S]*?<\/[|｜]DSML[|｜]function_calls>/g, "")
+		.replace(invokeRe, "")
+		.trim();
+	return {{ cleanedText, calls }};
+}}
+
 export default function (pi: ExtensionAPI) {{
 	const recentShellFps: string[] = [];
-	const resetLoopTracker = () => {{
+	const unchangedReads = new Map<string, number>();
+	let stagnantHeavyTurns = 0;
+	let pendingThinkingNudge = false;
+	let sievedCount = 0;
+	let guardsTriggered = 0;
+
+	const resetTransientState = () => {{
 		recentShellFps.length = 0;
+		unchangedReads.clear();
+		stagnantHeavyTurns = 0;
+		pendingThinkingNudge = false;
 	}};
 
-	pi.on("session_start", resetLoopTracker);
-	pi.on("session_switch", resetLoopTracker);
+	const updateHud = (ctx?: ExtensionContext) => {{
+		if (!ctx || !ctx.hasUI) return;
+		const usage = ctx.getContextUsage?.();
+		const pct = typeof usage?.percent === "number" ? Math.round(usage.percent) : null;
+		const parts: string[] = [];
+		if (sievedCount > 0) parts.push(`${{sievedCount}} sieved`);
+		if (guardsTriggered > 0) parts.push(`${{guardsTriggered}} guarded`);
+		if (pct !== null && pct >= 75) parts.push(`CTX HIGH ${{pct}}%`);
+		else if (pct !== null && pct >= 55 && parts.length > 0) parts.push(`ctx ${{pct}}%`);
+		ctx.ui.setStatus("ap", parts.length > 0 ? `ap: ${{parts.join(" | ")}}` : undefined);
+	}};
+
+	pi.on("session_start", (_event, ctx) => {{
+		resetTransientState();
+		sievedCount = 0;
+		guardsTriggered = 0;
+		updateHud(ctx);
+	}});
+
+	pi.on("session_before_switch", () => {{
+		resetTransientState();
+	}});
+
+	pi.on("session_compact", (_event, ctx) => {{
+		resetTransientState();
+		updateHud(ctx);
+	}});
+
+	pi.on("session_before_compact", (_event, ctx) => {{
+		// Zero-clutter compaction sync: only checkpoint `.baton` if the workspace already uses it
+		if (ctx?.cwd && existsSync(join(ctx.cwd, ".baton"))) {{
+			spawnSync(AP_BIN, ["baton", "checkpoint", "--note", "pi-compact"], {{
+				cwd: ctx.cwd,
+				encoding: "utf8",
+				timeout: 2500,
+				windowsHide: true,
+			}});
+		}}
+	}});
+
+	pi.on("message_end", (event) => {{
+		const msg = event.message as {{
+			role?: string;
+			content?: Array<{{ type?: string; text?: string; [k: string]: unknown }}>;
+		}} | undefined;
+		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return undefined;
+		// Never interfere when native toolCall blocks already exist (or an earlier extension recovered them)
+		if (msg.content.some((b) => b?.type === "toolCall")) return undefined;
+
+		const active = new Set(pi.getActiveTools?.() ?? []);
+		if (active.size === 0) return undefined;
+
+		let recoveredAny = false;
+		const nextContent: Array<Record<string, unknown>> = [];
+		for (const blk of msg.content) {{
+			if (blk?.type === "text" && typeof blk.text === "string" && blk.text.includes("DSML")) {{
+				const rec = extractDsmlToolCalls(blk.text, active);
+				if (rec) {{
+					recoveredAny = true;
+					if (rec.cleanedText) {{
+						nextContent.push({{ ...blk, text: rec.cleanedText }});
+					}}
+					for (const call of rec.calls) {{
+						nextContent.push(call as unknown as Record<string, unknown>);
+					}}
+					continue;
+				}}
+			}}
+			nextContent.push(blk as Record<string, unknown>);
+		}}
+		if (!recoveredAny) return undefined;
+		guardsTriggered += 1;
+		return {{
+			message: {{
+				...(msg as Record<string, unknown>),
+				content: nextContent,
+			}} as typeof event.message,
+		}};
+	}});
+
+	pi.on("turn_end", (event, ctx) => {{
+		const msg = event.message as {{
+			role?: string;
+			content?: Array<{{ type?: string; thinking?: string; name?: string }}>;
+		}} | undefined;
+		if (msg?.role === "assistant" && Array.isArray(msg.content)) {{
+			let thinkChars = 0;
+			let didEdit = false;
+			for (const blk of msg.content) {{
+				if (blk?.type === "thinking" && typeof blk.thinking === "string") {{
+					thinkChars += blk.thinking.length;
+				}} else if (blk?.type === "toolCall" && typeof blk.name === "string" && EDIT_TOOLS.has(blk.name)) {{
+					didEdit = true;
+				}}
+			}}
+			if (didEdit) {{
+				stagnantHeavyTurns = 0;
+				pendingThinkingNudge = false;
+			}} else if (thinkChars >= HEAVY_THINKING_CHARS) {{
+				stagnantHeavyTurns += 1;
+				if (stagnantHeavyTurns >= STAGNATION_TURNS) {{
+					pendingThinkingNudge = true;
+				}}
+			}} else {{
+				stagnantHeavyTurns = Math.max(0, stagnantHeavyTurns - 1);
+			}}
+		}}
+		updateHud(ctx);
+		return undefined;
+	}});
 
 	pi.on("tool_call", (event) => {{
 		if (EDIT_TOOLS.has(event.toolName)) {{
-			resetLoopTracker();
+			recentShellFps.length = 0;
+			unchangedReads.clear();
+			stagnantHeavyTurns = 0;
+			pendingThinkingNudge = false;
 			return undefined;
 		}}
 		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
 		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
+		if (DESTRUCTIVE_OR_WRITE.test(cmd)) {{
+			unchangedReads.clear();
+			return undefined;
+		}}
 		const healed = healCommand(cmd, event.toolName);
 		if (healed && healed !== cmd) {{
 			event.input.command = healed;
@@ -892,11 +1084,9 @@ export default function (pi: ExtensionAPI) {{
 		return undefined;
 	}});
 
-	pi.on("tool_result", (event) => {{
+	pi.on("tool_result", (event, ctx) => {{
 		// Leave codemode child calls (`parentToolCallId`) untouched so JS scripts keep raw structuredContent!
 		if (event.parentToolCallId) return undefined;
-		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
-		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
 		if (!Array.isArray(event.content) || event.content.length === 0) return undefined;
 		const textBlock = event.content.find(
 			(c: {{ type?: string; text?: string }}) => c?.type === "text" && typeof c.text === "string",
@@ -906,50 +1096,88 @@ export default function (pi: ExtensionAPI) {{
 		let outText = textBlock.text;
 		let mutated = false;
 
-		// 1. Auto-sieve noisy >28KB outputs (or giant minified lines) into `~/.ap/sieve`
-		const skipSieve =
-			cmd.includes("ap.exe") ||
-			/\bap\s+(?:read|search|query|atlas|probe|guard|sieve|baton|splice|recall)\b/.test(cmd);
-		if (!skipSieve) {{
-			const hasGiantLine = outText.split("\n").some((l: string) => l.length > 4500);
-			if (outText.length >= 28000 || hasGiantLine) {{
-				const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
-					input: outText,
-					encoding: "utf8",
-					timeout: 4000,
-					windowsHide: true,
-					env: {{ ...process.env, SIEVE_HOME }},
-				}});
-				if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < outText.length * 0.8) {{
-					outText = res.stdout;
+		// A. Built-in `read` redundant re-read guard (resets automatically on any write/edit/compaction)
+		if (event.toolName === "read" && !event.isError) {{
+			const p = String(event.input?.path ?? event.input?.file_path ?? "");
+			const off = String(event.input?.offset ?? "");
+			const lim = String(event.input?.limit ?? "");
+			if (p) {{
+				const key = `${{p}}::${{off}}::${{lim}}`;
+				const hits = (unchangedReads.get(key) ?? 0) + 1;
+				unchangedReads.set(key, hits);
+				if (hits >= REREAD_THRESHOLD) {{
+					outText += `\n[ap reread-guard] Exact unchanged slice (${{p}}) read ${{hits}}x already in this session. Avoid re-reading; use ap_search/ap_locate or proceed directly to edits.`;
+					guardsTriggered += 1;
 					mutated = true;
 				}}
 			}}
 		}}
 
-		// 2. Non-blocking stateful doom-loop circuit-breaker (resets on edits & session switches)
-		const fp = normCmdFingerprint(cmd);
-		if (fp.length >= 8) {{
-			recentShellFps.push(fp);
-			if (recentShellFps.length > LOOP_WINDOW) {{
-				recentShellFps.shift();
+		// B. Built-in `edit` error self-healing tip (guides DeepSeek straight to fuzzy/AST recovery)
+		if (event.toolName === "edit" && event.isError) {{
+			outText += `\n[ap edit-tip] Patch target missed; use ap_edit (4-tier indentation/blank-line fuzzy match + AST symbols) or ap splice view for exact lines.`;
+			mutated = true;
+		}}
+
+		// C. Shell output auto-sieve (>28KB or giant single line) + 3x doom-loop circuit-breaker
+		if (event.toolName === "bash" || event.toolName === "powershell") {{
+			const cmd = typeof event.input?.command === "string" ? event.input.command : "";
+			const skipSieve =
+				cmd.includes("ap.exe") ||
+				/\bap\s+(?:read|search|query|atlas|probe|guard|sieve|baton|splice|recall)\b/.test(cmd);
+			if (!skipSieve) {{
+				const hasGiantLine = outText.split("\n").some((l: string) => l.length > 4500);
+				if (outText.length >= 28000 || hasGiantLine) {{
+					const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
+						input: outText,
+						encoding: "utf8",
+						timeout: 4000,
+						windowsHide: true,
+						env: {{ ...process.env, SIEVE_HOME }},
+					}});
+					if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < outText.length * 0.8) {{
+						outText = res.stdout;
+						sievedCount += 1;
+						mutated = true;
+					}}
+				}}
 			}}
-			const repeats = recentShellFps.filter((x) => x === fp).length;
-			if (repeats >= LOOP_THRESHOLD) {{
-				const hint = event.isError
-					? `\n[ap loop-breaker] Repeated failing shell command (${{repeats}}/${{LOOP_WINDOW}} calls) without intervening edits. Pause, inspect root cause, edit code or switch strategy/primitive instead of retrying identically.`
-					: `\n[ap loop-breaker] Near-identical shell command repeated (${{repeats}}/${{LOOP_WINDOW}} calls) without edits. Avoid redundant polling; summarize findings or pivot to the next concrete action.`;
-				outText = `${{outText}}${{hint}}`;
-				mutated = true;
+
+			const fp = normCmdFingerprint(cmd);
+			if (fp.length >= 8) {{
+				recentShellFps.push(fp);
+				if (recentShellFps.length > LOOP_WINDOW) {{
+					recentShellFps.shift();
+				}}
+				const repeats = recentShellFps.filter((x) => x === fp).length;
+				if (repeats >= LOOP_THRESHOLD) {{
+					const hint = event.isError
+						? `\n[ap loop-breaker] Repeated failing shell command (${{repeats}}/${{LOOP_WINDOW}} calls) without intervening edits. Pause, inspect root cause, edit code or switch strategy instead of retrying identically.`
+						: `\n[ap loop-breaker] Near-identical shell command repeated (${{repeats}}/${{LOOP_WINDOW}} calls) without edits. Avoid redundant polling; summarize findings or pivot to the next concrete action.`;
+					outText = `${{outText}}${{hint}}`;
+					guardsTriggered += 1;
+					mutated = true;
+				}}
 			}}
 		}}
 
+		// D. DeepSeek overthinking stagnation nudge (emitted once after 3 consecutive >12k-char thinking turns without edits)
+		if (pendingThinkingNudge) {{
+			outText += `\n[ap thinking-guard] 3 consecutive heavy-thinking turns without code changes. Commit to one concrete edit, focused test, or ap_locate/ap_changes call now.`;
+			pendingThinkingNudge = false;
+			stagnantHeavyTurns = 0;
+			guardsTriggered += 1;
+			mutated = true;
+		}}
+
 		if (!mutated) return undefined;
-		return {{
-			content: event.content.map((c: {{ type?: string; text?: string }}) =>
-				c === textBlock ? {{ ...c, text: outText }} : c,
-			),
-		}};
+		updateHud(ctx);
+		const patchedContent = event.content.map((c: {{ type?: string; text?: string }}) =>
+			c === textBlock ? {{ ...c, text: outText }} : c,
+		);
+		return event.structuredContent !== undefined
+			? {{ content: patchedContent, structuredContent: event.structuredContent }}
+			: {{ content: patchedContent }};
 	}});
 }}
 "#
