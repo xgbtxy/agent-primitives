@@ -3366,6 +3366,9 @@ fn test_multi_agent_claims_dedup_pack_ws_and_pi_codemode_wiring() {
     let pi_ext = pi_home.join(".pi/agent/extensions/zz-ap-accelerator.ts");
     assert!(pi_mcp.is_file(), "Expected ~/.pi/agent/mcp.json created");
     assert!(pi_ext.is_file(), "Expected zz-ap-accelerator.ts created");
+    assert!(fs::read_to_string(&pi_ext)
+        .unwrap()
+        .contains("\"sieve\", \"pipe\""));
     assert!(fs::read_to_string(&pi_mcp)
         .unwrap()
         .contains("\"exposure\": \"codemode\""));

@@ -874,7 +874,7 @@ export default function (pi: ExtensionAPI) {{
 		const hasGiantLine = rawText.split("\n").some((l: string) => l.length > 4500);
 		if (rawText.length < 28000 && !hasGiantLine) return undefined;
 
-		const res = spawnSync(AP_BIN, ["sieve", "--stdin", "--label", "pi-bash"], {{
+		const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
 			input: rawText,
 			encoding: "utf8",
 			timeout: 4000,
