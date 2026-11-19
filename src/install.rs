@@ -912,7 +912,71 @@ export function resolveSafeShellTimeout(cmd: string, currentTimeout: unknown): n
 }}
 
 /**
- * Targeted QuickJS `codemode` failure recovery classifier (addresses live ReferenceError/TypeError/Timeout/Syntax errors).
+ * Deterministic ASCII lexicographical tool-schema ordering for `before_provider_request`
+ * (inspired by pi-deepseek-cache): prevents DeepSeek KV-cache prefix invalidation from
+ * tool-list order jitter across MCP reconnects or reloads while preserving Anthropic `cache_control`.
+ */
+export function stabilizeProviderTools(payload: unknown): unknown {{
+	if (!payload || typeof payload !== "object") return undefined;
+	const p = payload as {{ tools?: unknown }};
+	if (!Array.isArray(p.tools) || p.tools.length < 2) return undefined;
+	const toolKey = (t: unknown): string => {{
+		if (!t || typeof t !== "object") return "";
+		const rec = t as {{
+			name?: unknown;
+			function?: {{ name?: unknown }};
+			custom?: {{ name?: unknown }};
+		}};
+		if (typeof rec.function?.name === "string") return rec.function.name;
+		if (typeof rec.custom?.name === "string") return rec.custom.name;
+		if (typeof rec.name === "string") return rec.name;
+		return "";
+	}};
+	// Never reorder if any tool carries provider-specific `cache_control` breakpoint markers
+	for (const t of p.tools) {{
+		if (t && typeof t === "object" && "cache_control" in (t as Record<string, unknown>)) {{
+			return undefined;
+		}}
+	}}
+	let prev = "";
+	let needsSort = false;
+	for (let i = 0; i < p.tools.length; i++) {{
+		const k = toolKey(p.tools[i]);
+		if (!k) return undefined;
+		if (i > 0 && prev > k) {{
+			needsSort = true;
+		}}
+		prev = k;
+	}}
+	if (!needsSort) return undefined;
+	const sorted = [...p.tools].sort((a, b) => {{
+		const ka = toolKey(a);
+		const kb = toolKey(b);
+		return ka < kb ? -1 : ka > kb ? 1 : 0;
+	}});
+	return {{ ...(p as Record<string, unknown>), tools: sorted }};
+}}
+
+/**
+ * Lossless pre-execution auto-heal for Pi `codemode` JS scripts:
+ * 1) Strips outer markdown code fences (```js ... ```) that break QuickJS parsing / `// @options:` line 1.
+ * 2) Repairs `tools.mcp__agent-primitives__` -> `tools.mcp__agent_primitives__` (avoids JS subtraction ReferenceError).
+ */
+export function healCodemodeSource(code: string): string | undefined {{
+	if (!code) return undefined;
+	let next = code;
+	const fenced = next.match(/^\s*```(?:js|javascript|ts|typescript)?[ \t]*\r?\n([\s\S]*?)\r?\n```\s*$/i);
+	if (fenced) {{
+		next = fenced[1];
+	}}
+	if (next.includes("tools.mcp__agent-primitives__")) {{
+		next = next.replace(/tools\.mcp__agent-primitives__/g, "tools.mcp__agent_primitives__");
+	}}
+	return next !== code ? next : undefined;
+}}
+
+/**
+ * Targeted QuickJS `codemode` failure recovery classifier (addresses live ReferenceError/TypeError/Timeout/Syntax/OOM errors).
  */
 export function classifyCodemodeFailureTip(outText: string): string {{
 	if (/\bReferenceError\b|is not defined/i.test(outText)) {{
@@ -921,8 +985,14 @@ export function classifyCodemodeFailureTip(outText: string): string {{
 	if (/\bSyntaxError\b|options line/i.test(outText)) {{
 		return `[ap codemode-tip] Pass raw JS body only (no markdown code fences); // @options: {{...}} must be line 1 if used.`;
 	}}
+	if (/\bout of memory\b/i.test(outText)) {{
+		return `[ap codemode-tip] Hit QuickJS 256MB WASM heap limit; filter/slice large payloads inside ap_search/ap_query or process files in smaller batches instead of buffering everything in RAM.`;
+	}}
 	if (/\b(?:timed out|timeout|deadline)\b/i.test(outText)) {{
 		return `[ap codemode-tip] Codemode script timed out; parallelize independent calls with Promise.allSettled([...]) or raise // @options: {{"timeout_ms": 90000}}.`;
+	}}
+	if (/\bvalidation\b|must be|required property/i.test(outText)) {{
+		return `[ap codemode-tip] Tool argument schema mismatch; run await describeTool("mcp__agent_primitives__<name>") to inspect exact required fields and types.`;
 	}}
 	return `[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs (dashes become underscores on tools.*) & typed structuredContent fields.`;
 }}
@@ -1032,6 +1102,10 @@ export function classifyShellFailureTip(
 		if (toolName === "bash" && BASH_BS_PATH_RE.test(cmd)) {{
 			return `[ap path-tip] Unquoted Windows backslashes in Git Bash are stripped as escapes; use forward slashes (C:/path/to/file) or single quotes.`;
 		}}
+		return `[ap enoent-tip] Path not found; verify actual paths via \`ap atlas map\` / \`ap search -l\` or check cwd before retrying.`;
+	}}
+	if (/\b(?:ModuleNotFoundError|ImportError)\b/i.test(outText)) {{
+		return `[ap py-tip] Missing Python package; zero-dependency \`ap read\` (.docx/.xlsx/.pdf/PE/ELF/hex/JSON-path), \`ap query\` (SQLite/CSV/Excel) & \`ap search\` work without pip packages.`;
 	}}
 	return undefined;
 }}
@@ -1189,6 +1263,96 @@ export function healEditBlock(
 		}}
 	}}
 	return undefined;
+}}
+
+/**
+ * Normalize legacy or double-encoded `edit` argument shapes in place (pi-edit-guard pattern):
+ * `file_path -> path`, `old_string -> oldText`, `new_string -> newText`, and stringified `edits[]`.
+ */
+export function normalizeEditArgs(input: Record<string, unknown>): boolean {{
+	if (!input || typeof input !== "object") return false;
+	let changed = false;
+	if (typeof input.path !== "string" && typeof input.file_path === "string") {{
+		input.path = input.file_path;
+		delete input.file_path;
+		changed = true;
+	}}
+	if (typeof input.edits === "string" && input.edits.trim().startsWith("[")) {{
+		try {{
+			const parsed = JSON.parse(input.edits);
+			if (Array.isArray(parsed)) {{
+				input.edits = parsed;
+				changed = true;
+			}}
+		}} catch {{
+			// leave invalid JSON untouched
+		}}
+	}}
+	if (Array.isArray(input.edits)) {{
+		for (const item of input.edits) {{
+			if (!item || typeof item !== "object") continue;
+			const rec = item as Record<string, unknown>;
+			if (typeof rec.oldText !== "string" && typeof rec.old_string === "string") {{
+				rec.oldText = rec.old_string;
+				delete rec.old_string;
+				changed = true;
+			}}
+			if (typeof rec.newText !== "string" && typeof rec.new_string === "string") {{
+				rec.newText = rec.new_string;
+				delete rec.new_string;
+				changed = true;
+			}}
+		}}
+	}} else {{
+		if (typeof input.oldText !== "string" && typeof input.old_string === "string") {{
+			input.oldText = input.old_string;
+			delete input.old_string;
+			changed = true;
+		}}
+		if (typeof input.newText !== "string" && typeof input.new_string === "string") {{
+			input.newText = input.new_string;
+			delete input.new_string;
+			changed = true;
+		}}
+	}}
+	return changed;
+}}
+
+/**
+ * Locate all exact (or trimmed-indent) occurrences when built-in `edit` fails due to multiple matches,
+ * reporting exact 1-based line numbers + surrounding context so the next turn disambiguates in 1 shot.
+ */
+export function findAllEditOccurrenceLines(
+	fileContent: string,
+	oldText: string,
+	maxHits = 6,
+): string | undefined {{
+	if (!fileContent || !oldText) return undefined;
+	const lines = fileContent.replace(/\r\n/g, "\n").split("\n");
+	const needleLines = oldText.replace(/\r\n/g, "\n").split("\n");
+	const n = needleLines.length;
+	if (n === 0 || n > lines.length) return undefined;
+	const hits: number[] = [];
+	for (let i = 0; i <= lines.length - n; i++) {{
+		let ok = true;
+		for (let j = 0; j < n; j++) {{
+			if (lines[i + j].trim() !== needleLines[j].trim()) {{
+				ok = false;
+				break;
+			}}
+		}}
+		if (ok) {{
+			hits.push(i);
+		}}
+	}}
+	if (hits.length < 2) return undefined;
+	const shown = hits.slice(0, maxHits).map((idx) => {{
+		const prev = idx > 0 ? lines[idx - 1].trim().slice(0, 60) : "<BOF>";
+		const cur = lines[idx].trim().slice(0, 70);
+		return `L${{idx + 1}} (after: ${{prev}}): ${{cur}}`;
+	}});
+	const more = hits.length > maxHits ? ` (+${{hits.length - maxHits}} more)` : "";
+	return `[ap edit-multi] Found ${{hits.length}} occurrences${{more}} — add 1 unique surrounding line to oldText:\n${{shown.join("\n")}}`;
 }}
 
 /**
@@ -1840,6 +2004,7 @@ export default function (pi: ExtensionAPI) {{
 	let maskedCount = 0;
 	let guardsTriggered = 0;
 	let healedEditsCount = 0;
+	let extCompactionsCount = 0;
 	let totalToolTurns = 0;
 	let serialSingleTotalTurns = 0;
 
@@ -1981,9 +2146,14 @@ export default function (pi: ExtensionAPI) {{
 		maskedCount = 0;
 		guardsTriggered = 0;
 		healedEditsCount = 0;
+		extCompactionsCount = 0;
 		totalToolTurns = 0;
 		serialSingleTotalTurns = 0;
 		updateHud(ctx);
+	}});
+
+	pi.on("before_provider_request", (event) => {{
+		return stabilizeProviderTools(event?.payload);
 	}});
 
 	pi.on("agent_start", () => {{
@@ -1999,7 +2169,10 @@ export default function (pi: ExtensionAPI) {{
 		expectedCacheReset = false;
 	}});
 
-	pi.on("session_compact", (_event, ctx) => {{
+	pi.on("session_compact", (event, ctx) => {{
+		if ((event as {{ fromExtension?: boolean }} | undefined)?.fromExtension) {{
+			extCompactionsCount += 1;
+		}}
 		resetTransientState();
 		expectedCacheReset = true;
 		updateHud(ctx);
@@ -2431,8 +2604,9 @@ export default function (pi: ExtensionAPI) {{
 					totalToolTurns > 0 ? `${{Math.round((serialSingleTotalTurns / totalToolTurns) * 100)}}%` : "n/a";
 				const branch = ctx.sessionManager?.getBranch?.() ?? [];
 				const storeKeys = countCodemodeStoreKeys(branch as unknown as Array<Record<string, unknown>>);
+				const compactSuffix = extCompactionsCount > 0 ? ` extCompacts=${{extCompactionsCount}}` : "";
 				ctx.ui.notify(
-					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} healedEdits=${{healedEditsCount}} guarded=${{guardsTriggered}} | serial1=${{serialPct}} storeKeys=${{storeKeys}}`,
+					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} healedEdits=${{healedEditsCount}} guarded=${{guardsTriggered}}${{compactSuffix}} | serial1=${{serialPct}} storeKeys=${{storeKeys}}`,
 					"info",
 				);
 			}},
@@ -2745,8 +2919,11 @@ export default function (pi: ExtensionAPI) {{
 				}}
 			}}
 
-			// Proactive <1ms pre-execution indent/blank-line repair for Pi built-in `edit` (pi-edit-guard pattern)
+			// Proactive <1ms pre-execution legacy-arg normalization + indent/blank-line repair for Pi built-in `edit` (pi-edit-guard pattern)
 			if (event.toolName === "edit" && event.input && typeof event.input === "object") {{
+				if (normalizeEditArgs(event.input as Record<string, unknown>)) {{
+					healedEditsCount += 1;
+				}}
 				const inp = event.input as {{
 					path?: string;
 					file_path?: string;
@@ -2787,6 +2964,14 @@ export default function (pi: ExtensionAPI) {{
 						}}
 					}}
 				}}
+			}}
+			return undefined;
+		}}
+		if (event.toolName === "codemode" && event.input && typeof event.input === "object") {{
+			const code = typeof event.input.code === "string" ? event.input.code : "";
+			const healedCode = healCodemodeSource(code);
+			if (healedCode && healedCode !== code) {{
+				event.input.code = healedCode;
 			}}
 			return undefined;
 		}}
@@ -2895,8 +3080,11 @@ export default function (pi: ExtensionAPI) {{
 					try {{
 						const content = readFileSync(absPath, "utf8");
 						if (content.length <= 2_000_000) {{
-							const win = findClosestEditWindow(content, targetOld);
-							if (win) closestSnippet = `\n${{win}}`;
+							const isMulti = /multiple|occurrences|more than once/i.test(outText);
+							const diag = isMulti
+								? findAllEditOccurrenceLines(content, targetOld) ?? findClosestEditWindow(content, targetOld)
+								: findClosestEditWindow(content, targetOld);
+							if (diag) closestSnippet = `\n${{diag}}`;
 						}}
 					}} catch {{
 						// ignore unreadable file
@@ -3719,6 +3907,11 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("classifyCodemodeFailureTip")
                 && s.contains("resolveSafeShellTimeout")
                 && s.contains("serializeMessagesForCompaction")
+                && s.contains("stabilizeProviderTools")
+                && s.contains("healCodemodeSource")
+                && s.contains("normalizeEditArgs")
+                && s.contains("findAllEditOccurrenceLines")
+                && s.contains("before_provider_request")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")

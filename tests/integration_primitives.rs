@@ -5363,3 +5363,54 @@ fn test_v218_fast_low_compaction_truncated_read_outline_codemode_classifier_and_
     let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
 }
+
+#[test]
+fn test_v219_tool_prefix_sort_codemode_heal_edit_guard_multi_and_enoent_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v219");
+    let ap_home = root.join("ap_home_v219");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function stabilizeProviderTools",
+        "export function healCodemodeSource",
+        "export function normalizeEditArgs",
+        "export function findAllEditOccurrenceLines",
+        "before_provider_request",
+        "[ap edit-multi]",
+        "[ap enoent-tip]",
+        "[ap py-tip]",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.19 feature '{needle}'");
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}
