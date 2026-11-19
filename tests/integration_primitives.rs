@@ -3434,3 +3434,241 @@ fn test_multi_agent_claims_dedup_pack_ws_and_pi_codemode_wiring() {
     assert!(!pi_mcp.exists());
     assert!(!pi_ext.exists());
 }
+
+#[test]
+fn test_cdp_diff_ports_and_http_single_field_vary_outliers() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v25_home");
+
+    // 1. Concurrent dual-port CDP differential probe (`ap probe cdp --diff-ports`)
+    fn spawn_mock_cdp(
+        target_id: &'static str,
+        eval_json: &'static str,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        let srv = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = srv.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            // Serve 2 connections: /json/list + WebSocket upgrade
+            for _ in 0..2 {
+                let Ok((mut s, _)) = srv.accept() else { break };
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                if req.starts_with("GET /json") {
+                    let body = format!(
+                        r#"[{{"id":"{target_id}","type":"page","title":"App","url":"https://app.test","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/{target_id}"}}]"#
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                } else if req.contains("Upgrade: websocket") {
+                    let hs = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+                    let _ = s.write_all(hs.as_bytes());
+                    // Handle up to 6 CDP calls (Runtime.enable, Log.enable, Network.enable, Page.enable, Runtime.evaluate)
+                    for _ in 0..8 {
+                        let mut hdr = [0u8; 2];
+                        if s.read_exact(&mut hdr).is_err() {
+                            break;
+                        }
+                        let masked = (hdr[1] & 0x80) != 0;
+                        let mut len = (hdr[1] & 0x7F) as usize;
+                        if len == 126 {
+                            let mut ext = [0u8; 2];
+                            if s.read_exact(&mut ext).is_err() {
+                                break;
+                            }
+                            len = u16::from_be_bytes(ext) as usize;
+                        }
+                        let mut mask = [0u8; 4];
+                        if masked && s.read_exact(&mut mask).is_err() {
+                            break;
+                        }
+                        let mut payload = vec![0u8; len];
+                        if len > 0 && s.read_exact(&mut payload).is_err() {
+                            break;
+                        }
+                        if masked {
+                            for (i, b) in payload.iter_mut().enumerate() {
+                                *b ^= mask[i & 3];
+                            }
+                        }
+                        let Ok(v) = serde_json::from_slice::<Value>(&payload) else {
+                            continue;
+                        };
+                        let id = v.get("id").and_then(Value::as_u64).unwrap_or(0);
+                        let method = v.get("method").and_then(Value::as_str).unwrap_or("");
+                        let reply = if method == "Runtime.evaluate" {
+                            serde_json::json!({
+                                "id": id,
+                                "result": {
+                                    "result": {
+                                        "type": "string",
+                                        "value": eval_json
+                                    }
+                                }
+                            })
+                            .to_string()
+                        } else {
+                            serde_json::json!({"id": id, "result": {}}).to_string()
+                        };
+                        let rb = reply.as_bytes();
+                        let mut frame = vec![0x81u8];
+                        if rb.len() <= 125 {
+                            frame.push(rb.len() as u8);
+                        } else {
+                            frame.push(126);
+                            frame.extend_from_slice(&(rb.len() as u16).to_be_bytes());
+                        }
+                        frame.extend_from_slice(rb);
+                        let _ = s.write_all(&frame);
+                        if method == "Runtime.evaluate" {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    let (port_a, thr_a) = spawn_mock_cdp("TAB_A", r#"{"role":"owner","secret":"A1"}"#);
+    let (port_b, thr_b) = spawn_mock_cdp("TAB_B", r#"{"role":"guest"}"#);
+
+    let cdp_diff = run_ap(
+        root,
+        &[
+            "probe",
+            "cdp",
+            "--diff-ports",
+            &format!("{port_a},{port_b}"),
+            "--target-ids",
+            "TAB_A,TAB_B",
+            "--eval",
+            "window.__state",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    let _ = thr_a.join();
+    let _ = thr_b.join();
+    assert!(
+        cdp_diff.status.success(),
+        "ap probe cdp --diff-ports failed: {}{}",
+        String::from_utf8_lossy(&cdp_diff.stdout),
+        String::from_utf8_lossy(&cdp_diff.stderr)
+    );
+    let dj: Value = serde_json::from_slice(&cdp_diff.stdout).unwrap();
+    assert_eq!(dj["same_result"], false);
+    assert_eq!(dj["json_diff"]["only_in_a"], serde_json::json!(["secret"]));
+    assert_eq!(dj["json_diff"]["changed_keys"], serde_json::json!(["role"]));
+
+    // 2. Single-field HTTP variation + outlier clustering (`ap probe http --vary-field`)
+    let http_srv = TcpListener::bind("127.0.0.1:0").unwrap();
+    let http_port = http_srv.local_addr().unwrap().port();
+    let http_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let http_stop_c = http_stop.clone();
+    http_srv.set_nonblocking(true).unwrap();
+    let http_thr = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !http_stop_c.load(std::sync::atomic::Ordering::Relaxed)
+            && std::time::Instant::now() < deadline
+        {
+            match http_srv.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let is_admin = req.contains(r#""role":"admin""#);
+                    let (status, body) = if is_admin {
+                        ("200 OK", r#"{"granted":true,"scope":"all_tenants"}"#)
+                    } else {
+                        ("403 Forbidden", r#"{"granted":false}"#)
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let req_file = root.join("saved_req.json");
+    fs::write(
+        &req_file,
+        format!(
+            r#"{{"method":"POST","url":"http://127.0.0.1:{http_port}/api/check","headers":["X-Test: 1"],"body":{{"role":"user","id":1}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let dry = run_ap(
+        root,
+        &[
+            "probe",
+            "http",
+            "--vary-request",
+            req_file.to_str().unwrap(),
+            "--vary-field",
+            "role",
+            "--alt-value",
+            "admin",
+            "--dry-run",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(dry.status.success());
+    let dry_j: Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert!(dry_j["count"].as_u64().unwrap_or(0) >= 6);
+
+    let live = run_ap(
+        root,
+        &[
+            "probe",
+            "http",
+            "--vary-request",
+            req_file.to_str().unwrap(),
+            "--vary-field",
+            "role",
+            "--alt-value",
+            "admin",
+            "--max-variants",
+            "8",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    http_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = http_thr.join();
+    assert!(
+        live.status.success(),
+        "ap probe http --vary-field failed: {}{}",
+        String::from_utf8_lossy(&live.stdout),
+        String::from_utf8_lossy(&live.stderr)
+    );
+    let lv_j: Value = serde_json::from_slice(&live.stdout).unwrap();
+    assert!(
+        lv_j["outliers"].to_string().contains("json:alt:role"),
+        "Expected outlier json:alt:role, got: {lv_j}"
+    );
+}

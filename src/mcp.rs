@@ -231,12 +231,14 @@ fn mcp_tools_schema() -> Value {
     },
     {
         "name": "ap_cdp",
-        "description": "Attach directly to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list targets, --target filter, --eval async JS, --watch-ms non-blocking console/network capture, --audit layout, --screenshot PNG) without killing the host app.",
+        "description": "Attach directly to ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port(s) (--list targets, --target filter, --eval async JS, --diff-ports concurrent dual-port diff, --watch-ms non-blocking console/network capture, --audit layout, --screenshot PNG) without killing host apps.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "host": { "type": "string", "description": "CDP host (default: '127.0.0.1')" },
                 "port": { "type": "integer", "description": "CDP debugging port (default: 9222)" },
+                "diff_ports": { "type": "string", "description": "Optional 'portA,portB' pair to run `--eval` concurrently on two CDP ports and compute structured JSON diff" },
+                "target_ids": { "type": "string", "description": "Optional 'targetA,targetB' filters paired with `diff_ports`" },
                 "list": { "type": "boolean", "description": "List all live debuggable targets" },
                 "target": { "type": "string", "description": "Substring matching target title, url, or id" },
                 "eval": { "type": "string", "description": "JavaScript expression to evaluate (awaits Promises)" },
@@ -248,7 +250,7 @@ fn mcp_tools_schema() -> Value {
     },
     {
         "name": "ap_http",
-        "description": "Zero-dependency HTTP/API diagnostic probe: execute single or batch (`batch_requests`) HTTP requests with custom headers, body, timeout, and automatic loopback proxy bypass.",
+        "description": "Zero-dependency HTTP/API diagnostic probe: execute single, batch (`batch_requests`), or single-field boundary variation (`vary_field`) requests with outlier clustering, headers, body, timeout, and loopback proxy bypass.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -265,6 +267,12 @@ fn mcp_tools_schema() -> Value {
                     "description": "Optional list of 'METHOD URL [BODY]' lines to run in one batch call",
                     "items": { "type": "string" }
                 },
+                "vary_request": { "type": "string", "description": "Optional path to saved JSON/raw HTTP request file for `vary_field`" },
+                "vary_field": { "type": "string", "description": "Single JSON/query/header field name to vary across boundary variants" },
+                "alt_value": { "type": "string", "description": "Optional alternate value for `vary_field`" },
+                "rate_ms": { "type": "integer", "description": "Delay in ms between serial `vary_field` requests (default: 0, max: 5000)" },
+                "max_variants": { "type": "integer", "description": "Max variants for `vary_field` (default: 20, max: 100)" },
+                "dry_run": { "type": "boolean", "description": "Generate `vary_field` variants without sending requests" },
                 "timeout": { "type": "integer", "description": "Per-request timeout in seconds (default: 15)" },
                 "insecure": { "type": "boolean", "description": "Skip TLS verification (-k)" },
                 "follow": { "type": "boolean", "description": "Follow HTTP redirects (-L)" }
@@ -1027,6 +1035,22 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 "--port".into(),
                 port.to_string(),
             ];
+            if let Some(dp) = args
+                .get("diff_ports")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--diff-ports".into());
+                cli.push(dp.trim().to_string());
+            }
+            if let Some(tids) = args
+                .get("target_ids")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--target-ids".into());
+                cli.push(tids.trim().to_string());
+            }
             if args.get("list").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--list".into());
             }
@@ -1109,6 +1133,45 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             if args.get("follow").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--follow".into());
+            }
+            if let Some(vr) = args
+                .get("vary_request")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--vary-request".into());
+                cli.push(vr.trim().to_string());
+            }
+            if let Some(vf) = args
+                .get("vary_field")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--vary-field".into());
+                cli.push(vf.trim().to_string());
+            }
+            if let Some(av) = args
+                .get("alt_value")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--alt-value".into());
+                cli.push(av.to_string());
+            }
+            if let Some(rm) = args.get("rate_ms").and_then(Value::as_u64) {
+                cli.push("--rate-ms".into());
+                cli.push(rm.to_string());
+            }
+            if let Some(mv) = args.get("max_variants").and_then(Value::as_u64) {
+                cli.push("--max-variants".into());
+                cli.push(mv.to_string());
+            }
+            if args
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli.push("--dry-run".into());
             }
             let batch_lines: Vec<&str> = args
                 .get("batch_requests")

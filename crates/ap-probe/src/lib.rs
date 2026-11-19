@@ -159,12 +159,18 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Attach to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list, --target, --eval, --audit, --screenshot, --watch-ms, --stdin) without killing the host app
+    /// Attach to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list, --target, --eval, --audit, --screenshot, --watch-ms, --diff-ports, --stdin) without killing the host app
     Cdp {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(short = 'p', long, default_value_t = 9222)]
         port: u16,
+        /// Optional pair of ports `portA,portB` to concurrently evaluate `--eval` and compute structured diff
+        #[arg(long)]
+        diff_ports: Option<String>,
+        /// Optional pair of target filters/IDs `targetA,targetB` paired with `--diff-ports`
+        #[arg(long)]
+        target_ids: Option<String>,
         #[arg(long)]
         list: bool,
         #[arg(short = 't', long)]
@@ -193,9 +199,9 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Zero-dependency HTTP/API diagnostic probe (single URL or `--batch-stdin` multi-request batch with headers, timeout & loopback proxy bypass)
+    /// Zero-dependency HTTP/API diagnostic probe (single URL, `--batch-stdin`, or single-field `--vary-field` outlier analyzer)
     Http {
-        /// Optional single target URL (omit when using `--batch-stdin`)
+        /// Optional single target URL (omit when using `--batch-stdin` or `--vary-request`)
         url: Option<String>,
         #[arg(short = 'X', long, default_value = "GET")]
         method: String,
@@ -212,6 +218,24 @@ enum SubCmd {
         /// Read `METHOD URL [BODY]` lines from stdin to probe up to 25 endpoints in one call
         #[arg(long)]
         batch_stdin: bool,
+        /// Optional saved JSON or raw HTTP request file for `--vary-field` single-field testing
+        #[arg(long)]
+        vary_request: Option<PathBuf>,
+        /// Vary one single JSON/query/header field across boundary variants and cluster response outliers
+        #[arg(long)]
+        vary_field: Option<String>,
+        /// Optional alternate value used by `--vary-field`
+        #[arg(long)]
+        alt_value: Option<String>,
+        /// Delay in ms between serial `--vary-field` requests (default: 0, max: 5000)
+        #[arg(long, default_value_t = 0)]
+        rate_ms: u64,
+        /// Maximum number of `--vary-field` variants (default: 20, max: 100)
+        #[arg(long, default_value_t = 20)]
+        max_variants: usize,
+        /// Generate `--vary-field` variants without sending any network request
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -485,6 +509,8 @@ pub fn run_cli(args: &[String]) -> i32 {
         SubCmd::Cdp {
             host,
             port,
+            diff_ports,
+            target_ids,
             list,
             target,
             eval,
@@ -494,6 +520,29 @@ pub fn run_cli(args: &[String]) -> i32 {
             watch_ms,
             json,
         } => {
+            if let Some(dp) = diff_ports.as_deref().filter(|s| !s.trim().is_empty()) {
+                let parts: Vec<u16> = dp
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u16>().ok())
+                    .collect();
+                if parts.len() != 2 {
+                    eprintln!("[probe cdp] --diff-ports requires two comma-separated ports, e.g. `9222,9223`");
+                    return 2;
+                }
+                let Some(expr) = eval.as_deref().filter(|s| !s.trim().is_empty()) else {
+                    eprintln!("[probe cdp] --diff-ports requires `--eval <JS>`");
+                    return 2;
+                };
+                let (ta, tb) = if let Some(tids) = target_ids.as_deref() {
+                    let mut it = tids.splitn(2, ',');
+                    let a = it.next().map(str::trim).filter(|s| !s.is_empty());
+                    let b = it.next().map(str::trim).filter(|s| !s.is_empty());
+                    (a, b)
+                } else {
+                    (target.as_deref(), target.as_deref())
+                };
+                return cdp::run_cdp_diff_ports(&host, parts[0], parts[1], ta, tb, expr, json);
+            }
             let mut steps = String::new();
             if stdin {
                 let _ = std::io::stdin().read_to_string(&mut steps);
@@ -525,18 +574,44 @@ pub fn run_cli(args: &[String]) -> i32 {
             insecure,
             follow,
             batch_stdin,
+            vary_request,
+            vary_field,
+            alt_value,
+            rate_ms,
+            max_variants,
+            dry_run,
             json,
-        } => http_probe::run_http_cli(
-            url.as_deref(),
-            &method,
-            &headers,
-            body.as_deref(),
-            timeout,
-            insecure,
-            follow,
-            batch_stdin,
-            json,
-        ),
+        } => {
+            if let Some(vf) = vary_field.as_deref().filter(|s| !s.trim().is_empty()) {
+                return http_probe::run_http_vary(
+                    vary_request.as_deref(),
+                    url.as_deref(),
+                    &method,
+                    &headers,
+                    body.as_deref(),
+                    vf,
+                    alt_value.as_deref(),
+                    rate_ms,
+                    max_variants,
+                    dry_run,
+                    timeout,
+                    insecure,
+                    follow,
+                    json,
+                );
+            }
+            http_probe::run_http_cli(
+                url.as_deref(),
+                &method,
+                &headers,
+                body.as_deref(),
+                timeout,
+                insecure,
+                follow,
+                batch_stdin,
+                json,
+            )
+        }
         SubCmd::Ps {
             filter,
             pid,

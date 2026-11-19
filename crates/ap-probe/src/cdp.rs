@@ -540,11 +540,11 @@ impl CdpSession {
                 .unwrap_or("JS evaluation error");
             return Err(txt.lines().next().unwrap_or(txt).to_string());
         }
-        Ok(res
-            .pointer("/result/value")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string())
+        Ok(match res.pointer("/result/value") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        })
     }
 
     pub fn navigate(&mut self, url: &str) -> Result<String, String> {
@@ -966,6 +966,177 @@ pub fn run_cdp_attach(
         }
         for ne in &sess.network_errors {
             println!("  ! {ne}");
+        }
+    }
+    if ok {
+        0
+    } else {
+        1
+    }
+}
+
+fn eval_single_cdp_endpoint(
+    host: &str,
+    port: u16,
+    target_filter: Option<&str>,
+    eval_expr: &str,
+) -> (Option<CdpTarget>, Option<String>, Option<String>) {
+    let targets = match CdpSession::list_targets(host, port) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                None,
+                None,
+                Some(format!("list targets on {host}:{port}: {e}")),
+            )
+        }
+    };
+    let picked = if let Some(filt) = target_filter.filter(|s| !s.trim().is_empty()) {
+        let low = filt.to_ascii_lowercase();
+        targets.iter().find(|t| {
+            t.id.eq_ignore_ascii_case(filt.trim())
+                || t.title.to_ascii_lowercase().contains(&low)
+                || t.url.to_ascii_lowercase().contains(&low)
+                || t.id.to_ascii_lowercase().contains(&low)
+        })
+    } else {
+        targets
+            .iter()
+            .find(|t| t.target_type == "page")
+            .or_else(|| targets.first())
+    };
+    let Some(tgt) = picked.cloned() else {
+        return (
+            None,
+            None,
+            Some(format!("no matching CDP target on {host}:{port}")),
+        );
+    };
+    let mut sess = match CdpSession::attach(&tgt.ws_url) {
+        Ok(s) => s,
+        Err(e) => return (Some(tgt), None, Some(format!("attach failed: {e}"))),
+    };
+    match sess.eval_js(eval_expr) {
+        Ok(val) => (Some(tgt), Some(val), None),
+        Err(e) => (Some(tgt), None, Some(format!("eval failed: {e}"))),
+    }
+}
+
+fn json_object_diff(a: &str, b: &str) -> Option<Value> {
+    let va: Value = serde_json::from_str(a).ok()?;
+    let vb: Value = serde_json::from_str(b).ok()?;
+    let (Some(oa), Some(ob)) = (va.as_object(), vb.as_object()) else {
+        return None;
+    };
+    let mut only_in_a = Vec::new();
+    let mut only_in_b = Vec::new();
+    let mut changed_keys = Vec::new();
+    for (k, val_a) in oa {
+        match ob.get(k) {
+            None => only_in_a.push(k.clone()),
+            Some(val_b) if val_b != val_a => changed_keys.push(k.clone()),
+            _ => {}
+        }
+    }
+    for k in ob.keys() {
+        if !oa.contains_key(k) {
+            only_in_b.push(k.clone());
+        }
+    }
+    only_in_a.sort();
+    only_in_b.sort();
+    changed_keys.sort();
+    Some(json!({
+        "only_in_a": only_in_a,
+        "only_in_b": only_in_b,
+        "changed_keys": changed_keys,
+    }))
+}
+
+/// Concurrently evaluate the same JS expression across two live CDP ports and report structured diff.
+pub fn run_cdp_diff_ports(
+    host: &str,
+    port_a: u16,
+    port_b: u16,
+    target_a: Option<&str>,
+    target_b: Option<&str>,
+    eval_expr: &str,
+    as_json: bool,
+) -> i32 {
+    let t0 = Instant::now();
+    let (res_a, res_b) = thread::scope(|s| {
+        let ha = s.spawn(|| eval_single_cdp_endpoint(host, port_a, target_a, eval_expr));
+        let hb = s.spawn(|| eval_single_cdp_endpoint(host, port_b, target_b, eval_expr));
+        let ra = ha
+            .join()
+            .unwrap_or((None, None, Some("worker A panicked".to_string())));
+        let rb = hb
+            .join()
+            .unwrap_or((None, None, Some("worker B panicked".to_string())));
+        (ra, rb)
+    });
+
+    let ok = res_a.2.is_none() && res_b.2.is_none();
+    let same_result = ok && res_a.1 == res_b.1;
+    let json_diff = match (&res_a.1, &res_b.1) {
+        (Some(a), Some(b)) => json_object_diff(a, b),
+        _ => None,
+    };
+    let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0).round();
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": ok,
+                "elapsed_ms": elapsed_ms,
+                "same_result": same_result,
+                "port_a": port_a,
+                "port_b": port_b,
+                "target_a": res_a.0,
+                "target_b": res_b.0,
+                "eval_a": res_a.1,
+                "eval_b": res_b.1,
+                "error_a": res_a.2,
+                "error_b": res_b.2,
+                "json_diff": json_diff,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "[probe cdp diff] {}:{} vs {}:{} -> {} ({}ms)",
+            host,
+            port_a,
+            host,
+            port_b,
+            if !ok {
+                "ERROR"
+            } else if same_result {
+                "IDENTICAL"
+            } else {
+                "DIFFERENT"
+            },
+            elapsed_ms
+        );
+        if let Some(ea) = &res_a.2 {
+            println!("  A({port_a}) ERR: {ea}");
+        } else if let Some(va) = &res_a.1 {
+            println!(
+                "  A({port_a}): {}",
+                va.chars().take(400).collect::<String>()
+            );
+        }
+        if let Some(eb) = &res_b.2 {
+            println!("  B({port_b}) ERR: {eb}");
+        } else if let Some(vb) = &res_b.1 {
+            println!(
+                "  B({port_b}): {}",
+                vb.chars().take(400).collect::<String>()
+            );
+        }
+        if let Some(d) = &json_diff {
+            println!("  json_diff: {d}");
         }
     }
     if ok {
