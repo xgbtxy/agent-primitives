@@ -60,6 +60,52 @@ fn has_debug_leftover(s: &str) -> Option<&'static str> {
     None
 }
 
+fn has_test_skip_marker(s: &str) -> Option<&'static str> {
+    let trim = s.trim();
+    if trim.starts_with("//") || trim.starts_with('#') && !trim.starts_with("#[ignore") {
+        return None;
+    }
+    if trim.contains(".only(") {
+        return Some(".only(");
+    }
+    if trim.contains(".skip(") {
+        return Some(".skip(");
+    }
+    if trim.contains("#[ignore") {
+        return Some("#[ignore]");
+    }
+    if trim.contains("@pytest.mark.skip") {
+        return Some("@pytest.mark.skip");
+    }
+    if trim.contains("t.Skip(") || trim.contains("t.SkipNow(") {
+        return Some("t.Skip()");
+    }
+    None
+}
+
+fn has_incomplete_stub(s: &str) -> Option<&'static str> {
+    let trim = s.trim();
+    if trim.starts_with("//") || trim.starts_with('#') || trim.starts_with('*') {
+        return None;
+    }
+    if trim.contains("todo!(") {
+        return Some("todo!()");
+    }
+    if trim.contains("unimplemented!(") {
+        return Some("unimplemented!()");
+    }
+    if trim.contains("raise NotImplementedError") {
+        return Some("raise NotImplementedError");
+    }
+    let low = trim.to_ascii_lowercase();
+    if low.contains("throw new error(\"not implemented")
+        || low.contains("throw new error('not implemented")
+    {
+        return Some("throw new Error('not implemented')");
+    }
+    None
+}
+
 pub fn audit_git_diff(root: &Path) -> DiffAuditReport {
     let check_git = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -123,16 +169,49 @@ pub fn audit_git_diff(root: &Path) -> DiffAuditReport {
                 if is_assertion_line(added) {
                     *per_file_assert_add.entry(cur_file.clone()).or_insert(0) += 1;
                 }
-            } else if let Some(tok) = has_debug_leftover(added) {
-                findings.push(DiffFinding {
-                    kind: "DEBUG-LEFTOVER".to_string(),
-                    file: cur_file.clone(),
-                    detail: format!(
-                        "Added `{tok}` in `{}`: `{}`",
-                        cur_file,
-                        added.trim().chars().take(100).collect::<String>()
-                    ),
-                });
+                if let Some(tok) = has_test_skip_marker(added) {
+                    findings.push(DiffFinding {
+                        kind: "TEST-SKIPPED".to_string(),
+                        file: cur_file.clone(),
+                        detail: format!(
+                            "Added test focus/skip `{tok}` in `{}`: `{}`",
+                            cur_file,
+                            added.trim().chars().take(100).collect::<String>()
+                        ),
+                    });
+                }
+            } else {
+                if let Some(tok) = has_debug_leftover(added) {
+                    findings.push(DiffFinding {
+                        kind: "DEBUG-LEFTOVER".to_string(),
+                        file: cur_file.clone(),
+                        detail: format!(
+                            "Added `{tok}` in `{}`: `{}`",
+                            cur_file,
+                            added.trim().chars().take(100).collect::<String>()
+                        ),
+                    });
+                }
+                if let Some(tok) = has_incomplete_stub(added) {
+                    findings.push(DiffFinding {
+                        kind: "INCOMPLETE-STUB".to_string(),
+                        file: cur_file.clone(),
+                        detail: format!(
+                            "Added unfinished stub `{tok}` in `{}`: `{}`",
+                            cur_file,
+                            added.trim().chars().take(100).collect::<String>()
+                        ),
+                    });
+                }
+                for sec_hit in crate::inspect_text_safety(added) {
+                    if sec_hit.starts_with("Credential/secret") {
+                        findings.push(DiffFinding {
+                            kind: "SECRET-ADDED".to_string(),
+                            file: cur_file.clone(),
+                            detail: format!("{sec_hit} in `{cur_file}`"),
+                        });
+                    }
+                }
             }
         } else if let Some(deleted) = ln.strip_prefix('-') {
             total_del += 1;

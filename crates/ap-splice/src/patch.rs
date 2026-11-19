@@ -490,17 +490,63 @@ pub fn replace_crlf_tolerant(
         }
     }
 
-    // SWE-agent ACI diagnostic hint: surface closest matching first line so the LLM fixes without re-reading
+    // SWE-agent ACI diagnostic hint: surface closest matching line or sliding window so the LLM self-corrects without re-reading
     if let Some(first_anchor) = old_stripped.iter().map(|l| l.trim()).find(|l| l.len() >= 6) {
         if let Some((ln_idx, actual)) = src_lines
             .iter()
             .enumerate()
             .find(|(_, l)| l.contains(first_anchor))
         {
+            let ctx_end = (ln_idx + n_old.clamp(1, 6)).min(src_lines.len());
+            let preview = (ln_idx..ctx_end)
+                .map(|k| format!("  {:4}: {}", k + 1, src_lines[k]))
+                .collect::<Vec<_>>()
+                .join("\n");
             return Err(format!(
-                "`old` target block not found (closest anchor at L{}: `{}`).",
+                "`old` target block not found (closest anchor at L{}: `{}`). Actual file lines:\n{preview}",
                 ln_idx + 1,
                 actual.trim()
+            ));
+        }
+    }
+
+    // Token-similarity sliding window fallback when even line 1 had a typo
+    fn line_tokens(s: &str) -> std::collections::HashSet<String> {
+        s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| t.len() >= 2)
+            .map(|t| t.to_ascii_lowercase())
+            .collect()
+    }
+    let old_toks = line_tokens(old_lf);
+    if !old_toks.is_empty() && !src_lines.is_empty() {
+        let win_sz = n_old.clamp(1, 8).min(src_lines.len());
+        let mut best_score = 0.0f64;
+        let mut best_start = 0usize;
+        for i in 0..=(src_lines.len() - win_sz) {
+            let chunk = src_lines[i..i + win_sz].join("\n");
+            let w_toks = line_tokens(&chunk);
+            if w_toks.is_empty() {
+                continue;
+            }
+            let inter = old_toks.intersection(&w_toks).count();
+            let union = old_toks.union(&w_toks).count();
+            let score = (inter as f64) / (union.max(1) as f64);
+            if score > best_score {
+                best_score = score;
+                best_start = i;
+            }
+        }
+        if best_score >= 0.30 {
+            let ctx_end = (best_start + win_sz).min(src_lines.len());
+            let pct = (best_score * 100.0).round() as usize;
+            let preview = (best_start..ctx_end)
+                .map(|k| format!("  {:4}: {}", k + 1, src_lines[k]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(format!(
+                "`old` target block not found (closest window L{}-L{}, {pct}% token match):\n{preview}",
+                best_start + 1,
+                ctx_end
             ));
         }
     }

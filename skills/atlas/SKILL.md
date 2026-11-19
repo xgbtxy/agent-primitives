@@ -21,4 +21,7 @@ ap atlas trace readDiskAsset . --depth 3
 
 # 4. Extract UI controls, registered API routes, broken frontend<->backend links & slop smells
 ap atlas product . --write PRODUCT_MAP.md
+
+# 5. Git-diff-aware Change Impact Brief: modified AST symbols, untouched callers & related tests (<30ms)
+ap atlas changes . --base HEAD
 ```

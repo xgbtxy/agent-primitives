@@ -1,13 +1,15 @@
 use crate::read::{decode_any_bytes, extract_office_or_pdf_plain};
 use crate::stats::record_event;
 use clap::Parser;
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const SKIP_DIRS: &[&str] = &[
@@ -73,6 +75,15 @@ struct SearchCli {
     /// Emit full enclosing Tree-sitter AST function/class block around each code match
     #[arg(long)]
     block: bool,
+    /// Show N surrounding context lines before & after each match (like `rg -C N`)
+    #[arg(short = 'C', long, default_value_t = 0)]
+    context: usize,
+    /// Only list unique matching file paths (like `rg -l`)
+    #[arg(short = 'l', long)]
+    files_only: bool,
+    /// Emit per-file match counts (like `rg -c`)
+    #[arg(short = 'c', long)]
+    count: bool,
     /// Emit structured JSON output
     #[arg(long)]
     json: bool,
@@ -84,6 +95,7 @@ struct SearchOpts {
     pretty: bool,
     multiline: bool,
     block: bool,
+    context: usize,
     max_hits: usize,
 }
 
@@ -222,6 +234,17 @@ fn push_text_matches(
                     } else {
                         ln_clean.trim().chars().take(180).collect()
                     }
+                } else if opts.context > 0 && !all_lines.is_empty() {
+                    let s = idx.saturating_sub(opts.context);
+                    let e = (idx + opts.context + 1).min(all_lines.len());
+                    (s..e)
+                        .map(|k| {
+                            let mark = if k == idx { '>' } else { ' ' };
+                            let txt: String = all_lines[k].chars().take(160).collect();
+                            format!("{mark}L{}: {txt}", k + 1)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 } else {
                     ln_clean.trim().chars().take(180).collect()
                 };
@@ -310,7 +333,12 @@ pub fn run_cli(args: &[String]) -> i32 {
         pretty: cli.pretty,
         multiline: cli.multiline,
         block: cli.block,
-        max_hits: cli.max_hits,
+        context: cli.context,
+        max_hits: if cli.count || cli.files_only {
+            cli.max_hits.max(500)
+        } else {
+            cli.max_hits
+        },
     };
 
     let root = Path::new(&cli.path);
@@ -326,28 +354,33 @@ pub fn run_cli(args: &[String]) -> i32 {
         .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
-    let skip_set: HashSet<&str> = SKIP_DIRS.iter().copied().collect();
+    let skip_set: HashSet<&'static str> = SKIP_DIRS.iter().copied().collect();
 
-    let mut matches: Vec<SearchMatch> = Vec::new();
-    let mut scanned_files = 0usize;
-    let mut total_bytes = 0u64;
+    let explicit_file = root_canon.is_file();
+    let compiled_arc = Arc::new(compiled);
+    let ext_allow_arc = Arc::new(ext_allow);
+    let root_canon_arc = Arc::new(root_canon.clone());
+    let all_matches: Arc<Mutex<Vec<SearchMatch>>> = Arc::new(Mutex::new(Vec::new()));
+    let hit_counter = Arc::new(AtomicUsize::new(0));
+    let scanned_files_cnt = Arc::new(AtomicUsize::new(0));
+    let total_bytes_cnt = Arc::new(AtomicU64::new(0));
+    let hit_cap = s_opts.max_hits;
 
-    let walker = WalkBuilder::new(&root_canon)
-        .hidden(false)
-        .git_ignore(true)
-        .filter_entry(move |e| {
-            if e.depth() == 0 {
-                return true;
-            }
-            let nm = e.file_name().to_str().unwrap_or("");
-            !skip_set.contains(nm)
-        })
-        .build();
-
-    for entry in walker.flatten() {
-        let p = entry.path();
+    #[allow(clippy::too_many_arguments)]
+    fn process_file(
+        p: &Path,
+        root_canon: &Path,
+        explicit_file: bool,
+        ext_allow: &HashSet<String>,
+        compiled: &[(String, Regex)],
+        multi_mode: bool,
+        s_opts: SearchOpts,
+        scanned_files_cnt: &AtomicUsize,
+        total_bytes_cnt: &AtomicU64,
+    ) -> Vec<SearchMatch> {
+        let mut local_matches = Vec::new();
         if !p.is_file() {
-            continue;
+            return local_matches;
         }
         let ext = p
             .extension()
@@ -355,9 +388,8 @@ pub fn run_cli(args: &[String]) -> i32 {
             .unwrap_or("")
             .to_ascii_lowercase();
         if !ext_allow.is_empty() && !ext_allow.contains(&ext) {
-            continue;
+            return local_matches;
         }
-        let explicit_file = root_canon.is_file();
         if matches!(
             ext.as_str(),
             "png"
@@ -373,17 +405,17 @@ pub fn run_cli(args: &[String]) -> i32 {
                 | "db"
                 | "lock"
         ) {
-            continue;
+            return local_matches;
         }
         let is_bin_ext = matches!(
             ext.as_str(),
             "exe" | "dll" | "so" | "dylib" | "node" | "wasm" | "bin"
         );
         if is_bin_ext && !explicit_file && ext_allow.is_empty() {
-            continue;
+            return local_matches;
         }
         let Ok(meta) = p.metadata() else {
-            continue;
+            return local_matches;
         };
         let size_cap = if explicit_file {
             64 * 1024 * 1024
@@ -391,13 +423,13 @@ pub fn run_cli(args: &[String]) -> i32 {
             16 * 1024 * 1024
         };
         if meta.len() > size_cap {
-            continue;
+            return local_matches;
         }
         let Ok(bytes) = fs::read(p) else {
-            continue;
+            return local_matches;
         };
-        scanned_files += 1;
-        total_bytes += bytes.len() as u64;
+        scanned_files_cnt.fetch_add(1, Ordering::Relaxed);
+        total_bytes_cnt.fetch_add(bytes.len() as u64, Ordering::Relaxed);
 
         let rel = if explicit_file {
             p.file_name()
@@ -405,7 +437,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 .unwrap_or("")
                 .to_string()
         } else {
-            p.strip_prefix(&root_canon)
+            p.strip_prefix(root_canon)
                 .unwrap_or(p)
                 .to_string_lossy()
                 .replace('\\', "/")
@@ -432,7 +464,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                                 .unwrap_or("js")
                                 .to_ascii_lowercase();
                             let virt_rel = format!("{rel}::{sname}");
-                            for (pl, r) in &compiled {
+                            for (pl, r) in compiled {
                                 let lbl = if multi_mode { pl.as_str() } else { "" };
                                 push_text_matches(
                                     lbl,
@@ -442,21 +474,15 @@ pub fn run_cli(args: &[String]) -> i32 {
                                     false,
                                     r,
                                     s_opts,
-                                    &mut matches,
+                                    &mut local_matches,
                                 );
-                                if matches.len() >= cli.max_hits {
-                                    break;
+                                if local_matches.len() >= s_opts.max_hits {
+                                    return local_matches;
                                 }
-                            }
-                            if matches.len() >= cli.max_hits {
-                                break;
                             }
                         }
                     }
-                    if matches.len() >= cli.max_hits {
-                        break;
-                    }
-                    continue;
+                    return local_matches;
                 }
             }
         }
@@ -498,7 +524,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                     if en <= bytes.len() {
                         let txt = decode_any_bytes(&bytes[st..en]).0;
                         let virt_rel = format!("{rel}::{}", ent.path);
-                        for (pl, r) in &compiled {
+                        for (pl, r) in compiled {
                             let lbl = if multi_mode { pl.as_str() } else { "" };
                             push_text_matches(
                                 lbl,
@@ -508,25 +534,19 @@ pub fn run_cli(args: &[String]) -> i32 {
                                 false,
                                 r,
                                 s_opts,
-                                &mut matches,
+                                &mut local_matches,
                             );
-                            if matches.len() >= cli.max_hits {
-                                break;
+                            if local_matches.len() >= s_opts.max_hits {
+                                return local_matches;
                             }
-                        }
-                        if matches.len() >= cli.max_hits {
-                            break;
                         }
                     }
                 }
             }
-            if matches.len() >= cli.max_hits {
-                break;
-            }
-            continue;
+            return local_matches;
         }
 
-        // Virtual .zip / .vsix / .jar / .whl archive search (when explicitly targeted or via --ext)
+        // Virtual .zip / .vsix / .jar / .whl archive search
         if matches!(ext.as_str(), "zip" | "vsix" | "jar" | "whl")
             && (explicit_file || !ext_allow.is_empty())
         {
@@ -563,7 +583,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                         if std::io::Read::read_to_end(&mut zf, &mut eb).is_ok() {
                             let txt = decode_any_bytes(&eb).0;
                             let virt_rel = format!("{rel}::{nm}");
-                            for (pl, r) in &compiled {
+                            for (pl, r) in compiled {
                                 let lbl = if multi_mode { pl.as_str() } else { "" };
                                 push_text_matches(
                                     lbl,
@@ -573,128 +593,269 @@ pub fn run_cli(args: &[String]) -> i32 {
                                     false,
                                     r,
                                     s_opts,
-                                    &mut matches,
+                                    &mut local_matches,
                                 );
-                                if matches.len() >= cli.max_hits {
-                                    break;
+                                if local_matches.len() >= s_opts.max_hits {
+                                    return local_matches;
                                 }
-                            }
-                            if matches.len() >= cli.max_hits {
-                                break;
                             }
                         }
                     }
                 }
             }
-            if matches.len() >= cli.max_hits {
-                break;
-            }
-            continue;
+            return local_matches;
         }
 
         // Binary ASCII + Windows UTF-16LE strings search when explicitly targeted
         if is_bin_ext || (explicit_file && crate::binary::is_binary_magic(&bytes)) {
-            for (pl, _) in &compiled {
+            for (pl, _) in compiled {
                 let lbl = if multi_mode {
                     pl.clone()
                 } else {
                     String::new()
                 };
-                let md = crate::binary::inspect_binary_md(&bytes, Some(pl), cli.max_hits);
+                let md = crate::binary::inspect_binary_md(&bytes, Some(pl), s_opts.max_hits);
                 for (idx, ln) in md.lines().enumerate() {
                     if ln.starts_with("[ascii ") || ln.starts_with("[utf16le ") {
-                        matches.push(SearchMatch {
+                        local_matches.push(SearchMatch {
                             pattern: lbl.clone(),
                             file: rel.clone(),
                             line: idx + 1,
                             scope: "BINARY".to_string(),
                             snippet: ln.chars().take(200).collect(),
                         });
-                        if matches.len() >= cli.max_hits {
-                            break;
+                        if local_matches.len() >= s_opts.max_hits {
+                            return local_matches;
                         }
                     }
                 }
-                if matches.len() >= cli.max_hits {
-                    break;
-                }
             }
-            if matches.len() >= cli.max_hits {
-                break;
-            }
-            continue;
+            return local_matches;
         }
 
         let is_office = matches!(ext.as_str(), "docx" | "xlsx" | "pptx" | "pdf");
         let text = if is_office {
             match extract_office_or_pdf_plain(&bytes, &ext) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(_) => return local_matches,
             }
         } else {
             if bytes.iter().take(512).filter(|&&b| b == 0).count() > 4
                 && !bytes.starts_with(b"\xFF\xFE")
                 && !bytes.starts_with(b"\xFE\xFF")
             {
-                continue; // Binary file
+                return local_matches;
             }
             decode_any_bytes(&bytes).0
         };
 
-        for (pl, r) in &compiled {
+        for (pl, r) in compiled {
             let lbl = if multi_mode { pl.as_str() } else { "" };
-            push_text_matches(lbl, &text, &rel, &ext, is_office, r, s_opts, &mut matches);
-            if matches.len() >= cli.max_hits {
+            push_text_matches(
+                lbl,
+                &text,
+                &rel,
+                &ext,
+                is_office,
+                r,
+                s_opts,
+                &mut local_matches,
+            );
+            if local_matches.len() >= s_opts.max_hits {
                 break;
             }
         }
-        if matches.len() >= cli.max_hits {
-            break;
+        local_matches
+    }
+
+    if explicit_file {
+        let local = process_file(
+            &root_canon,
+            &root_canon,
+            true,
+            &ext_allow_arc,
+            &compiled_arc,
+            multi_mode,
+            s_opts,
+            &scanned_files_cnt,
+            &total_bytes_cnt,
+        );
+        if let Ok(mut guard) = all_matches.lock() {
+            guard.extend(local);
         }
+    } else {
+        let walker = WalkBuilder::new(&root_canon)
+            .hidden(false)
+            .git_ignore(true)
+            .filter_entry(move |e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                let nm = e.file_name().to_str().unwrap_or("");
+                !skip_set.contains(nm)
+            })
+            .build_parallel();
+
+        walker.run(|| {
+            let compiled_c = Arc::clone(&compiled_arc);
+            let ext_allow_c = Arc::clone(&ext_allow_arc);
+            let root_c = Arc::clone(&root_canon_arc);
+            let matches_c = Arc::clone(&all_matches);
+            let hit_c = Arc::clone(&hit_counter);
+            let scanned_c = Arc::clone(&scanned_files_cnt);
+            let bytes_c = Arc::clone(&total_bytes_cnt);
+
+            Box::new(move |res| {
+                if hit_c.load(Ordering::Relaxed) >= hit_cap {
+                    return WalkState::Quit;
+                }
+                let Ok(entry) = res else {
+                    return WalkState::Continue;
+                };
+                let local = process_file(
+                    entry.path(),
+                    &root_c,
+                    false,
+                    &ext_allow_c,
+                    &compiled_c,
+                    multi_mode,
+                    s_opts,
+                    &scanned_c,
+                    &bytes_c,
+                );
+                if !local.is_empty() {
+                    let added = local.len();
+                    if let Ok(mut guard) = matches_c.lock() {
+                        guard.extend(local);
+                    }
+                    let prev = hit_c.fetch_add(added, Ordering::Relaxed);
+                    if prev + added >= hit_cap {
+                        return WalkState::Quit;
+                    }
+                }
+                WalkState::Continue
+            })
+        });
+    }
+
+    let scanned_files = scanned_files_cnt.load(Ordering::Relaxed);
+    let total_bytes = total_bytes_cnt.load(Ordering::Relaxed);
+    let mut matches = match Arc::try_unwrap(all_matches) {
+        Ok(m) => m.into_inner().unwrap_or_default(),
+        Err(arc) => arc.lock().map(|g| g.clone()).unwrap_or_default(),
+    };
+    matches.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.pattern.cmp(&b.pattern))
+    });
+    if !cli.count && !cli.files_only && matches.len() > cli.max_hits {
+        matches.truncate(cli.max_hits);
     }
 
     let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
-    let mut out_lines = vec![format!(
-        "# SEARCH `{combined_label}` ({} hit(s) across {scanned_files} files in {elapsed_ms}ms)",
-        matches.len()
-    )];
+    let mut per_file_counts: BTreeMap<String, usize> = BTreeMap::new();
     for m in &matches {
-        let ptag = if m.pattern.is_empty() {
-            String::new()
-        } else {
-            format!("[pat:`{}`] ", m.pattern)
-        };
-        let sc = if m.scope.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", m.scope)
-        };
-        out_lines.push(format!(
-            "- {ptag}`{}:{}`{sc} — `{}`",
-            m.file, m.line, m.snippet
-        ));
+        *per_file_counts.entry(m.file.clone()).or_insert(0) += 1;
     }
-    let rendered = out_lines.join("\n");
+
+    let rendered = if cli.files_only {
+        let mut out_lines = vec![format!(
+            "# SEARCH FILES `{combined_label}` ({} file(s) across {scanned_files} scanned in {elapsed_ms}ms)",
+            per_file_counts.len()
+        )];
+        for f in per_file_counts.keys() {
+            out_lines.push(format!("- `{f}`"));
+        }
+        out_lines.join("\n")
+    } else if cli.count {
+        let mut out_lines = vec![format!(
+            "# SEARCH COUNT `{combined_label}` ({} hit(s) in {} file(s) across {scanned_files} scanned in {elapsed_ms}ms)",
+            matches.len(),
+            per_file_counts.len()
+        )];
+        for (f, c) in &per_file_counts {
+            out_lines.push(format!("- `{f}`: {c}"));
+        }
+        out_lines.join("\n")
+    } else {
+        let mut out_lines = vec![format!(
+            "# SEARCH `{combined_label}` ({} hit(s) across {scanned_files} files in {elapsed_ms}ms)",
+            matches.len()
+        )];
+        for m in &matches {
+            let ptag = if m.pattern.is_empty() {
+                String::new()
+            } else {
+                format!("[pat:`{}`] ", m.pattern)
+            };
+            let sc = if m.scope.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", m.scope)
+            };
+            if m.snippet.contains('\n') {
+                out_lines.push(format!(
+                    "- {ptag}`{}:{}`{sc}\n{}",
+                    m.file, m.line, m.snippet
+                ));
+            } else {
+                out_lines.push(format!(
+                    "- {ptag}`{}:{}`{sc} — `{}`",
+                    m.file, m.line, m.snippet
+                ));
+            }
+        }
+        out_lines.join("\n")
+    };
+
     record_event(
         "search",
         total_bytes,
         rendered.len() as u64,
         0,
         0,
-        "ast-office-search",
+        "parallel-ast-office-search",
     );
 
     if cli.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "ok": true,
-                "elapsed_ms": elapsed_ms,
-                "scanned_files": scanned_files,
-                "matches": matches,
-            }))
-            .unwrap_or_default()
-        );
+        if cli.files_only {
+            let files: Vec<&String> = per_file_counts.keys().collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "elapsed_ms": elapsed_ms,
+                    "scanned_files": scanned_files,
+                    "files": files,
+                }))
+                .unwrap_or_default()
+            );
+        } else if cli.count {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "elapsed_ms": elapsed_ms,
+                    "scanned_files": scanned_files,
+                    "total_matches": matches.len(),
+                    "counts": per_file_counts,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "elapsed_ms": elapsed_ms,
+                    "scanned_files": scanned_files,
+                    "matches": matches,
+                }))
+                .unwrap_or_default()
+            );
+        }
     } else {
         println!("{rendered}");
     }

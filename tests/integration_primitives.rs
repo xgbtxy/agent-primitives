@@ -3990,3 +3990,246 @@ fn test_v260_ast_rename_semantic_sieve_mcp_2025_and_loop_breaker() {
     assert!(st_j["by_kind"]["orient"].as_u64().unwrap_or(0) >= 1);
     assert!(st_j["by_kind"]["rename"].as_u64().unwrap_or(0) >= 1);
 }
+
+#[test]
+fn test_v270_parallel_search_git_changes_mcp_resources_prompts_and_smart_patch() {
+    use serde_json::json;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_home");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+
+    // 1. Multi-file repo for parallel `ap search` (-l, -c, -C) + Git `atlas changes` + `guard diff`
+    fs::write(
+        root.join("src/billing.ts"),
+        "export function applyDiscount(price: number, pct: number): number {\n  const rate = pct / 100;\n  return Math.round(price * (1 - rate));\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/checkout.ts"),
+        "import { applyDiscount } from './billing';\nexport function checkoutTotal(p: number): number {\n  return applyDiscount(p, 15);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tests/billing.test.ts"),
+        "import assert from 'node:assert/strict';\nimport { applyDiscount } from '../src/billing';\nassert.equal(applyDiscount(100, 10), 90);\n",
+    )
+    .unwrap();
+
+    // Initialize git commit baseline
+    let git_ok = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "Tester")
+            .env("GIT_AUTHOR_EMAIL", "tester@example.com")
+            .env("GIT_COMMITTER_NAME", "Tester")
+            .env("GIT_COMMITTER_EMAIL", "tester@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            st.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&st.stderr)
+        );
+    };
+    git_ok(&["init"]);
+    git_ok(&["add", "."]);
+    git_ok(&["commit", "-m", "baseline"]);
+
+    // 1a. Parallel search: `--files-only`, `--count`, and `-C 1` context lines
+    let s_files = run_ap(
+        root,
+        &["search", "applyDiscount", ".", "--files-only", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(s_files.status.success());
+    let sf_j: Value = serde_json::from_slice(&s_files.stdout).unwrap();
+    assert_eq!(sf_j["files"].as_array().unwrap().len(), 3);
+
+    let s_cnt = run_ap(
+        root,
+        &["search", "applyDiscount", ".", "--count", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(s_cnt.status.success());
+    let sc_j: Value = serde_json::from_slice(&s_cnt.stdout).unwrap();
+    assert!(sc_j["total_matches"].as_u64().unwrap_or(0) >= 5);
+    assert_eq!(sc_j["counts"]["src/billing.ts"], 1);
+
+    let s_ctx = run_ap(
+        root,
+        &["search", "const rate", ".", "-C", "1", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(s_ctx.status.success());
+    let sctx_j: Value = serde_json::from_slice(&s_ctx.stdout).unwrap();
+    let snip = sctx_j["matches"][0]["snippet"].as_str().unwrap();
+    assert!(snip.contains("L1:"));
+    assert!(snip.contains(">L2:"));
+    assert!(snip.contains("L3:"));
+
+    // 2. Smart closest-window patch diagnostic + TOML/JSONC syntax gate
+    let bad_patch = "@@ FILE: src/billing.ts\n<<<\nexport function applyDiscount(price: number, percent: number): number {\n  const ratio = percent / 100;\n===\nexport function applyDiscount(price: number, pct: number): number {\n  return price;\n>>>\n";
+    let p_err = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(bad_patch),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(!p_err.status.success());
+    let err_txt = format!(
+        "{}{}",
+        String::from_utf8_lossy(&p_err.stdout),
+        String::from_utf8_lossy(&p_err.stderr)
+    );
+    assert!(
+        err_txt.contains("closest window") && err_txt.contains("const rate = pct / 100;"),
+        "Expected closest-window diagnostic snippet, got: {err_txt}"
+    );
+
+    // Broken TOML rejected BEFORE write
+    let bad_toml = "@@ WRITE: config.toml\n<<<\n[package\nname = \"demo\"\n>>>\n";
+    let t_err = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(bad_toml),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(!t_err.status.success());
+    assert!(!root.join("config.toml").exists());
+
+    // Valid JSONC accepted cleanly
+    let ok_jsonc =
+        "@@ WRITE: tsconfig.jsonc\n<<<\n{\n  // compiler options\n  \"strict\": true\n}\n>>>\n";
+    let jc_ok = run_ap(
+        root,
+        &["splice", "apply", "--cwd", ".", "--stdin"],
+        Some(ok_jsonc),
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(jc_ok.status.success());
+
+    // 3. Modify `src/billing.ts` + add test skip & stub -> verify `atlas changes` + `guard diff`
+    fs::write(
+        root.join("src/billing.ts"),
+        "export function applyDiscount(price: number, pct: number): number {\n  const rate = Math.min(pct, 90) / 100;\n  if (price < 0) { throw new Error('not implemented'); }\n  return Math.round(price * (1 - rate));\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tests/billing.test.ts"),
+        "import assert from 'node:assert/strict';\nimport { applyDiscount } from '../src/billing';\ntest.skip('disabled', () => { assert.equal(applyDiscount(100, 10), 90); });\n",
+    )
+    .unwrap();
+
+    let ch_out = run_ap(
+        root,
+        &["atlas", "changes", ".", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ch_out.status.success());
+    let ch_j: Value = serde_json::from_slice(&ch_out.stdout).unwrap();
+    assert_eq!(ch_j["is_git_repo"], true);
+    assert!(ch_j["modified_symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "applyDiscount"));
+    assert!(
+        ch_j["external_callers"]
+            .to_string()
+            .contains("src/checkout.ts"),
+        "Expected untouched caller src/checkout.ts, got: {ch_j}"
+    );
+    assert!(ch_j["related_tests"]
+        .to_string()
+        .contains("tests/billing.test.ts"));
+
+    let diff_out = run_ap(
+        root,
+        &["guard", "diff", ".", "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(!diff_out.status.success());
+    let dj: Value = serde_json::from_slice(&diff_out.stdout).unwrap();
+    let d_str = dj["findings"].to_string();
+    assert!(d_str.contains("TEST-SKIPPED"), "Missing TEST-SKIPPED: {dj}");
+    assert!(
+        d_str.contains("INCOMPLETE-STUB"),
+        "Missing INCOMPLETE-STUB: {dj}"
+    );
+
+    // 4. Full MCP 2025-06-18: capabilities (tools+resources+prompts), resources/list+read, prompts/list+get, in-process ap_changes & ap_diff_audit
+    let root_s = root.to_string_lossy().replace('\\', "/");
+    let mcp_in = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": "ap://workspace/map"}}),
+        json!({"jsonrpc": "2.0", "id": 5, "method": "prompts/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 6, "method": "prompts/get", "params": {"name": "safe-refactor", "arguments": {"symbol": "applyDiscount", "new_name": "computeDiscount"}}}),
+        json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "ap_changes", "arguments": {"path": root_s}}}),
+        json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "ap_diff_audit", "arguments": {"cwd": root_s}}}),
+    ]
+    .iter()
+    .map(|v| v.to_string())
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+
+    let mcp_out = run_ap(root, &["mcp"], Some(&mcp_in), &[("AP_HOME", &ap_home)]);
+    assert!(mcp_out.status.success());
+    let resps: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(resps.len(), 8);
+
+    // 4a. Capabilities advertise tools, resources, prompts
+    assert!(resps[0]["result"]["capabilities"]["resources"].is_object());
+    assert!(resps[0]["result"]["capabilities"]["prompts"].is_object());
+
+    // 4b. >= 34 MCP tools including ap_changes
+    let tools = resps[1]["result"]["tools"].as_array().unwrap();
+    assert!(
+        tools.len() >= 34,
+        "Expected >=34 MCP tools, got {}",
+        tools.len()
+    );
+    assert!(tools.iter().any(|t| t["name"] == "ap_changes"));
+
+    // 4c. resources/list & resources/read return live workspace map
+    assert_eq!(resps[2]["result"]["resources"].as_array().unwrap().len(), 3);
+    assert!(resps[3]["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("billing.ts"));
+
+    // 4d. prompts/list & prompts/get return workflow messages
+    assert_eq!(resps[4]["result"]["prompts"].as_array().unwrap().len(), 3);
+    assert!(resps[5]["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("ap_rename"));
+
+    // 4e. In-process ap_changes returns structuredContent with modified_symbols & external_callers
+    assert_eq!(resps[6]["result"]["isError"], false);
+    assert!(resps[6]["result"]["structuredContent"]["external_callers"]
+        .to_string()
+        .contains("src/checkout.ts"));
+
+    // 4f. In-process ap_diff_audit flags TEST-SKIPPED & INCOMPLETE-STUB cleanly
+    assert_eq!(resps[7]["result"]["isError"], true);
+    assert!(resps[7]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("TEST-SKIPPED"));
+}

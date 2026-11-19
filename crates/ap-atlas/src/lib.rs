@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
+pub mod changes;
 pub mod impact;
 pub mod locate;
 pub mod product;
@@ -193,6 +194,15 @@ enum SubCmd {
         root: String,
         #[arg(short = 'd', long, default_value_t = 3)]
         depth: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Git-diff-aware change impact brief: extracts modified AST symbols, untouched downstream callers & related tests in 1 pass
+    Changes {
+        #[arg(default_value = ".")]
+        root: String,
+        #[arg(long, default_value = "HEAD")]
+        base: String,
         #[arg(long)]
         json: bool,
     },
@@ -1464,6 +1474,20 @@ pub fn run_cli(args: &[String]) -> i32 {
                 println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
             } else {
                 println!("{}", trace::render_trace_md(&rep));
+            }
+            return 0;
+        }
+        Some(SubCmd::Changes { root, base, json }) => {
+            let root_p = PathBuf::from(&root);
+            if !root_p.exists() {
+                eprintln!("[atlas] path not found: {root}");
+                return 1;
+            }
+            let rep = changes::analyze_git_changes(&root_p, Some(&base), SKIP_DIRS);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+            } else {
+                println!("{}", changes::render_changes_md(&rep));
             }
             return 0;
         }

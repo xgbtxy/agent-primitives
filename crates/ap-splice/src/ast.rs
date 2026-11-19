@@ -40,12 +40,184 @@ fn find_first_error(node: Node) -> Option<Node> {
     Some(node)
 }
 
+fn strip_jsonc_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0usize;
+    let mut in_str = false;
+    while i < bytes.len() {
+        if in_str {
+            let ch = source[i..].chars().next().unwrap();
+            out.push(ch);
+            if ch == '\\' && i + 1 < bytes.len() {
+                i += 1;
+                let nxt = source[i..].chars().next().unwrap();
+                out.push(nxt);
+                i += nxt.len_utf8();
+                continue;
+            }
+            if ch == '"' {
+                in_str = false;
+            }
+            i += ch.len_utf8();
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                if bytes[i] == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+        } else {
+            let ch = source[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn verify_toml_basic(source: &str) -> Result<(), String> {
+    let mut bracket_depth: i32 = 0;
+    let mut brace_depth: i32 = 0;
+    let mut in_ml_basic = false;
+    let mut in_ml_lit = false;
+
+    for (idx, raw_ln) in source.lines().enumerate() {
+        let ln_no = idx + 1;
+        let ln = raw_ln.trim();
+        if !in_ml_basic && !in_ml_lit {
+            if ln.is_empty() || ln.starts_with('#') {
+                continue;
+            }
+            if ln.starts_with('[') && bracket_depth == 0 && brace_depth == 0 {
+                let head = ln.split('#').next().unwrap_or(ln).trim();
+                let valid_arr = head.starts_with("[[") && head.ends_with("]]") && head.len() > 4;
+                let valid_tbl = !head.starts_with("[[")
+                    && head.starts_with('[')
+                    && head.ends_with(']')
+                    && head.len() > 2;
+                if !valid_arr && !valid_tbl {
+                    return Err(format!(
+                        "Invalid TOML table header at L{ln_no}: `{}`",
+                        head.chars().take(60).collect::<String>()
+                    ));
+                }
+                continue;
+            }
+        }
+
+        let b = raw_ln.as_bytes();
+        let mut i = 0usize;
+        let mut in_dq = false;
+        let mut in_sq = false;
+        while i < b.len() {
+            if in_ml_basic {
+                if b[i..].starts_with(b"\"\"\"") {
+                    in_ml_basic = false;
+                    i += 3;
+                } else if b[i] == b'\\' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if in_ml_lit {
+                if b[i..].starts_with(b"'''") {
+                    in_ml_lit = false;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if in_dq {
+                if b[i] == b'\\' {
+                    i += 2;
+                } else if b[i] == b'"' {
+                    in_dq = false;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if in_sq {
+                if b[i] == b'\'' {
+                    in_sq = false;
+                }
+                i += 1;
+                continue;
+            }
+            if b[i] == b'#' {
+                break;
+            } else if b[i..].starts_with(b"\"\"\"") {
+                in_ml_basic = true;
+                i += 3;
+            } else if b[i..].starts_with(b"'''") {
+                in_ml_lit = true;
+                i += 3;
+            } else if b[i] == b'"' {
+                in_dq = true;
+                i += 1;
+            } else if b[i] == b'\'' {
+                in_sq = true;
+                i += 1;
+            } else {
+                match b[i] {
+                    b'[' => bracket_depth += 1,
+                    b']' => bracket_depth -= 1,
+                    b'{' => brace_depth += 1,
+                    b'}' => brace_depth -= 1,
+                    _ => {}
+                }
+                if bracket_depth < 0 || brace_depth < 0 {
+                    return Err(format!("Unbalanced TOML delimiter at L{ln_no}"));
+                }
+                i += 1;
+            }
+        }
+        if in_dq || in_sq {
+            return Err(format!("Unterminated TOML string literal at L{ln_no}"));
+        }
+    }
+    if in_ml_basic || in_ml_lit {
+        return Err("Unterminated multiline TOML string".to_string());
+    }
+    if bracket_depth != 0 || brace_depth != 0 {
+        return Err("Unclosed TOML array or inline table".to_string());
+    }
+    Ok(())
+}
+
 pub fn verify_syntax(source: &str, ext: &str) -> Result<(), String> {
     let ext_l = ext.trim_start_matches('.').to_ascii_lowercase();
     if ext_l == "json" {
         return serde_json::from_str::<serde_json::Value>(source)
             .map(|_| ())
             .map_err(|e| format!("Invalid JSON: {e}"));
+    }
+    if ext_l == "jsonc" {
+        let stripped = strip_jsonc_comments(source);
+        return serde_json::from_str::<serde_json::Value>(&stripped)
+            .map(|_| ())
+            .map_err(|e| format!("Invalid JSONC: {e}"));
+    }
+    if ext_l == "toml" {
+        return verify_toml_basic(source);
     }
     let Some(lang) = language_for_ext(&ext_l) else {
         return Ok(());

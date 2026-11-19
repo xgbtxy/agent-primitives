@@ -61,7 +61,10 @@ fn mcp_tools_schema() -> Value {
                     "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'asar,vsix,map'" },
                     "pretty": { "type": "boolean", "description": "Pretty-format matches inside minified single-line bundles" },
                     "multiline": { "type": "boolean", "description": "Enable cross-line multiline regex matching" },
-                    "block": { "type": "boolean", "description": "Emit full enclosing Tree-sitter AST function/class block around each hit" }
+                    "block": { "type": "boolean", "description": "Emit full enclosing Tree-sitter AST function/class block around each hit" },
+                    "context": { "type": "integer", "description": "Show N surrounding lines before & after each match (like `rg -C N`)" },
+                    "files_only": { "type": "boolean", "description": "Return only unique matching file paths (like `rg -l`)" },
+                    "count": { "type": "boolean", "description": "Return per-file match counts (like `rg -c`)" }
                 }
             }
         },
@@ -543,6 +546,17 @@ fn mcp_tools_schema() -> Value {
                 "required": ["action"]
             }
         }),
+        json!({
+            "name": "ap_changes",
+            "description": "Git-diff-aware Change Impact Brief (<30ms in-process): inspects modified files, extracts exact modified Tree-sitter AST symbols, maps untouched downstream callers across the repo, and lists related tests to run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Git repository root directory (default: '.')" },
+                    "base": { "type": "string", "description": "Git base ref to diff against (default: 'HEAD')" }
+                }
+            }
+        }),
     ];
     if let Value::Array(ref mut arr) = tools {
         arr.append(&mut extra);
@@ -670,6 +684,7 @@ fn tool_annotations_for(name: &str) -> (&'static str, bool, bool, bool, bool) {
             false,
             false,
         ),
+        "ap_changes" => ("Git-Diff AST Change Impact Brief", true, false, true, false),
         _ => ("Agent Primitive Tool", false, false, false, false),
     }
 }
@@ -928,6 +943,22 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             if args.get("block").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--block".to_string());
+            }
+            if let Some(ctx) = args.get("context").and_then(Value::as_u64) {
+                if ctx > 0 {
+                    cli.push("--context".to_string());
+                    cli.push(ctx.to_string());
+                }
+            }
+            if args
+                .get("files_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli.push("--files-only".to_string());
+            }
+            if args.get("count").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--count".to_string());
             }
             run_self_captured(&cli, None)
         }
@@ -1699,7 +1730,19 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
         }
         "ap_diff_audit" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
-            run_self_captured(&["guard".into(), "diff".into(), cwd.into()], None)
+            let rep = ap_guard::diff_audit::audit_git_diff(std::path::Path::new(cwd));
+            let ok = rep.findings.is_empty();
+            let js = serde_json::to_string_pretty(&json!({
+                "ok": ok,
+                "is_git_repo": rep.is_git_repo,
+                "files_changed": rep.files_changed,
+                "lines_added": rep.lines_added,
+                "lines_deleted": rep.lines_deleted,
+                "findings": rep.findings,
+            }))
+            .unwrap_or_default();
+            crate::stats::record_event("diff-audit", 0, js.len() as u64, 0, 1, "mcp-diff-audit");
+            (ok, js)
         }
         "ap_verify" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
@@ -1891,19 +1934,33 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                             "Pass non-empty `query` for `ap_sieve` action='search'.".to_string(),
                         );
                     }
-                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8);
-                    run_self_captured_in(
-                        cwd,
-                        &[
-                            "sieve".into(),
-                            "search".into(),
-                            q.into(),
-                            "--limit".into(),
-                            limit.to_string(),
-                            "--json".into(),
-                        ],
-                        None,
-                    )
+                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+                    let base_dir = std::env::var("SIEVE_HOME")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(cwd.unwrap_or(".")).join(".sieve")
+                        });
+                    let (mut hits, mut elapsed_ms) = ap_sieve::search_archives(&base_dir, q, limit);
+                    if hits.is_empty() {
+                        if let Some(g) = ap_sieve::global_sieve_dir() {
+                            if g != base_dir && g.join("index.sqlite").is_file() {
+                                let (ghits, gms) = ap_sieve::search_archives(&g, q, limit);
+                                if !ghits.is_empty() {
+                                    hits = ghits;
+                                    elapsed_ms = gms;
+                                }
+                            }
+                        }
+                    }
+                    let js = serde_json::to_string_pretty(&json!({
+                        "query": q,
+                        "elapsed_ms": elapsed_ms,
+                        "hits": hits,
+                    }))
+                    .unwrap_or_default();
+                    (true, js)
                 }
                 _ => (
                     false,
@@ -2026,31 +2083,37 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 .unwrap_or("match")
                 .trim()
                 .to_ascii_lowercase();
-            let cwd = args.get("cwd").and_then(Value::as_str);
+            let cwd_p =
+                std::path::Path::new(args.get("cwd").and_then(Value::as_str).unwrap_or("."));
+            let vp = ap_recall::vault_path(cwd_p);
+            let Ok(conn) = ap_recall::open_vault(&vp) else {
+                return (
+                    false,
+                    format!("Failed to open recall vault at {}", vp.display()),
+                );
+            };
             match action.as_str() {
                 "match" => {
-                    let mut cli = vec!["recall".into(), "match".into(), "--json".into()];
-                    if let Some(q) = args
-                        .get("query")
-                        .and_then(Value::as_str)
+                    let q = args.get("query").and_then(Value::as_str).unwrap_or("");
+                    let files_raw = args.get("files").and_then(Value::as_str).unwrap_or("");
+                    let file_list: Vec<String> = files_raw
+                        .split(',')
+                        .map(str::trim)
                         .filter(|s| !s.is_empty())
-                    {
-                        cli.push("--query".into());
-                        cli.push(q.into());
+                        .map(String::from)
+                        .collect();
+                    let top = args.get("top").and_then(Value::as_u64).unwrap_or(3) as usize;
+                    match ap_recall::match_rules(&conn, q, &file_list, top) {
+                        Ok((hits, elapsed_ms)) => (
+                            true,
+                            serde_json::to_string_pretty(&json!({
+                                "elapsed_ms": (elapsed_ms * 100.0).round() / 100.0,
+                                "matches": hits
+                            }))
+                            .unwrap_or_default(),
+                        ),
+                        Err(e) => (false, format!("recall match failed: {e}")),
                     }
-                    if let Some(f) = args
-                        .get("files")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                    {
-                        cli.push("--files".into());
-                        cli.push(f.into());
-                    }
-                    if let Some(top) = args.get("top").and_then(Value::as_u64) {
-                        cli.push("--top".into());
-                        cli.push(top.to_string());
-                    }
-                    run_self_captured_in(cwd, &cli, None)
                 }
                 "add" => {
                     let triggers = args
@@ -2075,33 +2138,200 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
                         .unwrap_or("gotcha");
-                    run_self_captured_in(
-                        cwd,
-                        &[
-                            "recall".into(),
-                            "add".into(),
-                            "--triggers".into(),
-                            triggers.into(),
-                            "--rule".into(),
-                            rule.into(),
-                            "--kind".into(),
-                            kind.into(),
-                        ],
-                        None,
-                    )
+                    match ap_recall::add_rule(&conn, triggers, rule, kind) {
+                        Ok(id) => (
+                            true,
+                            serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "id": id,
+                                "kind": kind,
+                                "triggers": triggers,
+                            }))
+                            .unwrap_or_default(),
+                        ),
+                        Err(e) => (false, format!("recall add failed: {e}")),
+                    }
                 }
-                "stats" => run_self_captured_in(
-                    cwd,
-                    &["recall".into(), "stats".into(), "--json".into()],
-                    None,
-                ),
+                "stats" => match ap_recall::compute_stats(&conn) {
+                    Ok(st) => (true, serde_json::to_string_pretty(&st).unwrap_or_default()),
+                    Err(e) => (false, format!("recall stats failed: {e}")),
+                },
                 _ => (
                     false,
                     "Pass `action`: 'match', 'add', or 'stats' to `ap_recall`.".to_string(),
                 ),
             }
         }
+        "ap_changes" => {
+            let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let root_p = std::path::Path::new(root);
+            if !root_p.exists() {
+                return (false, format!("[atlas] path not found: {root}"));
+            }
+            let base = args.get("base").and_then(Value::as_str);
+            let rep = ap_atlas::changes::analyze_git_changes(root_p, base, ap_atlas::SKIP_DIRS);
+            let js = serde_json::to_string_pretty(&rep).unwrap_or_default();
+            crate::stats::record_event("changes", 0, js.len() as u64, 0, 1, "mcp-changes");
+            (true, js)
+        }
         other => (false, format!("Unknown tool: {other}")),
+    }
+}
+
+fn mcp_resources_list() -> Value {
+    json!([
+        {
+            "uri": "ap://workspace/map",
+            "name": "Workspace Structural Map",
+            "description": "Live <25ms Tree-sitter workspace X-ray & product contract map for current directory",
+            "mimeType": "text/markdown"
+        },
+        {
+            "uri": "ap://baton/state",
+            "name": "Compaction-Proof Task Baton",
+            "description": "Current goal, constraints, verified facts, falsified dead-ends, and next step capsule",
+            "mimeType": "application/json"
+        },
+        {
+            "uri": "ap://stats/summary",
+            "name": "Local Agent Efficiency Ledger",
+            "description": "Offline coding-agent efficiency metrics, prevented shell crashes, and per-primitive breakdown",
+            "mimeType": "application/json"
+        }
+    ])
+}
+
+fn read_mcp_resource(uri: &str) -> Result<Value, String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match uri {
+        "ap://workspace/map" => {
+            let data = ap_atlas::scan_workspace(&cwd, "", 35, 14);
+            let map_txt = ap_atlas::render_atlas_md(&data);
+            let pm = ap_atlas::product::build_product_map(&cwd, ap_atlas::SKIP_DIRS);
+            let prod_txt = ap_atlas::product::render_product_map(&pm);
+            Ok(json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "text/markdown",
+                    "text": format!("{map_txt}\n{prod_txt}")
+                }]
+            }))
+        }
+        "ap://baton/state" => {
+            let base = ap_baton::baton_dir(&cwd);
+            let mut st = ap_baton::load_state(&base);
+            st.workspace = ap_baton::probe_workspace(&cwd);
+            let txt = serde_json::to_string_pretty(&st).unwrap_or_else(|_| "{}".to_string());
+            Ok(json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": txt
+                }]
+            }))
+        }
+        "ap://stats/summary" => {
+            let (_, txt) = run_self_captured(&["stats".into(), "--json".into()], None);
+            Ok(json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": txt
+                }]
+            }))
+        }
+        _ => Err(format!("Unknown resource URI: {uri}")),
+    }
+}
+
+fn mcp_prompts_list() -> Value {
+    json!([
+        {
+            "name": "orient-and-plan",
+            "description": "Orient in an unfamiliar repository with 0 blind file reads, inspect blast radius, apply atomic edits, and verify with deep gates",
+            "arguments": [
+                { "name": "task", "description": "Engineering goal or change request", "required": false }
+            ]
+        },
+        {
+            "name": "safe-refactor",
+            "description": "AST-exact multi-file symbol rename with blast-radius impact map, dry-run preview, atomic test rollback, and diff self-audit",
+            "arguments": [
+                { "name": "symbol", "description": "Existing symbol name to refactor", "required": true },
+                { "name": "new_name", "description": "New symbol name (optional)", "required": false }
+            ]
+        },
+        {
+            "name": "debug-root-cause",
+            "description": "Locate suspect functions via BM25+Tree-sitter, trace multi-hop call chains, verify with runtime probe, and lock in regression tests",
+            "arguments": [
+                { "name": "symptom", "description": "Error message, failing test, or bug symptom", "required": true }
+            ]
+        }
+    ])
+}
+
+fn get_mcp_prompt(name: &str, args: &Value) -> Result<Value, String> {
+    match name {
+        "orient-and-plan" => {
+            let task = args
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or("the requested engineering change");
+            Ok(json!({
+                "description": "Zero-blind-read orientation, atomic editing, and deep verification workflow",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!("Execute `{task}` using ap primitives cleanly:\n1. Call `ap_orient` first to map workspace structure, runtimes, and UI/API contracts.\n2. Before changing shared symbols, call `ap_impact` or `ap_changes` to inspect downstream callers.\n3. Apply multi-file edits atomically with `ap_edit` (using `edits`, `symbols`, or `writes`).\n4. Run `ap_diff_audit` and `ap_verify` before concluding.")
+                    }
+                }]
+            }))
+        }
+        "safe-refactor" => {
+            let sym = args
+                .get("symbol")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "Missing required argument `symbol`".to_string())?;
+            let target_clause = match args
+                .get("new_name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(nn) => format!("to `{nn}`"),
+                None => "safely across the workspace".to_string(),
+            };
+            Ok(json!({
+                "description": "AST-exact multi-file refactoring workflow",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!("Refactor `{sym}` {target_clause}:\n1. Run `ap_impact(symbol=\"{sym}\")` to inspect definitions, callers, and related tests.\n2. Preview the AST-exact rename via `ap_rename(..., dry_run=true)`.\n3. Apply with `ap_rename(..., run_tests=true, rollback_on_test_fail=true)`.\n4. Confirm zero regressions via `ap_changes` and `ap_diff_audit`.")
+                    }
+                }]
+            }))
+        }
+        "debug-root-cause" => {
+            let symptom = args
+                .get("symptom")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "Missing required argument `symptom`".to_string())?;
+            Ok(json!({
+                "description": "Structured root-cause localization and fix workflow",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!("Diagnose and fix `{symptom}`:\n1. Run `ap_locate(query=\"{symptom}\")` to rank Top-K suspect functions.\n2. Trace callers/sinks with `ap_trace`.\n3. Reproduce with `ap_probe` or a focused test, apply fix via `ap_edit(run_tests=true)`, and verify via `ap_verify`.")
+                    }
+                }]
+            }))
+        }
+        _ => Err(format!("Unknown prompt: {name}")),
     }
 }
 
@@ -2118,14 +2348,16 @@ fn handle_rpc_request(req: &Value) -> Option<Value> {
             let client_proto = req
                 .pointer("/params/protocolVersion")
                 .and_then(Value::as_str)
-                .unwrap_or("2024-11-05");
+                .unwrap_or("2025-06-18");
             Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
                     "protocolVersion": client_proto,
                     "capabilities": {
-                        "tools": {}
+                        "tools": {},
+                        "resources": {},
+                        "prompts": {}
                     },
                     "serverInfo": {
                         "name": "agent-primitives",
@@ -2145,13 +2377,45 @@ fn handle_rpc_request(req: &Value) -> Option<Value> {
         "resources/list" => Some(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "resources": [] }
+            "result": { "resources": mcp_resources_list() }
         })),
+        "resources/read" => {
+            let uri = req
+                .pointer("/params/uri")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match read_mcp_resource(uri) {
+                Ok(res) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": res })),
+                Err(msg) => Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32602, "message": msg }
+                })),
+            }
+        }
         "prompts/list" => Some(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "prompts": [] }
+            "result": { "prompts": mcp_prompts_list() }
         })),
+        "prompts/get" => {
+            let pname = req
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let pargs = req
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            match get_mcp_prompt(pname, &pargs) {
+                Ok(res) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": res })),
+                Err(msg) => Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32602, "message": msg }
+                })),
+            }
+        }
         "tools/call" => {
             let tname = req
                 .pointer("/params/name")
