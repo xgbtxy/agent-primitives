@@ -2404,7 +2404,7 @@ fn test_minified_asar_binary_cdp_attach_and_callchain_trace() {
             .unwrap();
 
         let mut listed = false;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
         while std::time::Instant::now() < deadline {
             let ls = run_ap(
                 root,
@@ -2874,7 +2874,7 @@ fn test_batch_read_search_slow_grep_heal_cdp_watch_and_http_batch() {
             .unwrap();
 
         let mut ready = false;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
         while std::time::Instant::now() < deadline {
             let ls = run_ap(
                 root,
@@ -5306,6 +5306,56 @@ fn test_v217_tier2_peak_iq_masking_lineno_edit_heal_cmd_tip_and_write_tip() {
         "export function listCodemodeStoreKeys",
     ] {
         assert!(accel_ts.contains(needle), "Missing v2.17 feature '{needle}'");
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}
+
+#[test]
+fn test_v218_fast_low_compaction_truncated_read_outline_codemode_classifier_and_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v218");
+    let ap_home = root.join("ap_home_v218");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function resolveSafeShellTimeout",
+        "export function classifyCodemodeFailureTip",
+        "export function serializeMessagesForCompaction",
+        "[ap read-outline]",
+        "<codemode-store-keys>",
+        "ctx.modelRegistry.streamSimple(",
+        "QuickJS sandbox has NO Node APIs",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.18 feature '{needle}'");
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);

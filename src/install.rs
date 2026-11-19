@@ -895,6 +895,101 @@ export function isBenignGrepNoMatch(cmd: string, outText: string): boolean {{
 	return body.length < 15;
 }}
 
+const READONLY_PROBE_TIMEOUT_RE =
+	/^\s*(?:export\s+\S+\s*;?\s*|\$env:\w+\s*=\s*\S+\s*;?\s*)*(?:grep|egrep|fgrep|rg|find|fd|ls|dir|tree|cat|head|tail|sed|awk|nl|wc|curl(?:\.exe)?|wget|Get-Content|Get-ChildItem|Select-String)\b/i;
+const LONG_BUILD_TEST_RE =
+	/\b(?:cargo|rustc|npm|pnpm|yarn|bun|pytest|vitest|jest|go\s+test|make|cmake|gradle|mvn|docker|pip\s+install|uv\s+sync)\b/i;
+
+/**
+ * Guard unbounded read-only shell probes with a 90s default timeout when omitted so a hung
+ * search/HTTP call fails fast BEFORE crossing DeepSeek's 2-5m KV-cache eviction cliff.
+ */
+export function resolveSafeShellTimeout(cmd: string, currentTimeout: unknown): number | undefined {{
+	if (currentTimeout !== undefined && currentTimeout !== null) return undefined;
+	if (!cmd || LONG_BUILD_TEST_RE.test(cmd) || DESTRUCTIVE_OR_WRITE.test(cmd)) return undefined;
+	if (READONLY_PROBE_TIMEOUT_RE.test(cmd)) return 90;
+	return undefined;
+}}
+
+/**
+ * Targeted QuickJS `codemode` failure recovery classifier (addresses live ReferenceError/TypeError/Timeout/Syntax errors).
+ */
+export function classifyCodemodeFailureTip(outText: string): string {{
+	if (/\bReferenceError\b|is not defined/i.test(outText)) {{
+		return `[ap codemode-tip] QuickJS sandbox has NO Node APIs (fs/path/require/process/fetch/Buffer/setTimeout). Call tools via tools.<name>(args) (e.g. tools.read, tools.bash, tools.mcp__agent_primitives__ap_search) or inspect ALL_TOOLS.`;
+	}}
+	if (/\bSyntaxError\b|options line/i.test(outText)) {{
+		return `[ap codemode-tip] Pass raw JS body only (no markdown code fences); // @options: {{...}} must be line 1 if used.`;
+	}}
+	if (/\b(?:timed out|timeout|deadline)\b/i.test(outText)) {{
+		return `[ap codemode-tip] Codemode script timed out; parallelize independent calls with Promise.allSettled([...]) or raise // @options: {{"timeout_ms": 90000}}.`;
+	}}
+	return `[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs (dashes become underscores on tools.*) & typed structuredContent fields.`;
+}}
+
+/**
+ * Standalone serializer for fast `reasoning: "low"` dead-end-preserving auto-compaction
+ * (zero runtime SDK imports; preserves previousSummary, exact TOOL_ERROR signatures, file ops & store keys).
+ */
+export function serializeMessagesForCompaction(
+	messages: ReadonlyArray<Record<string, unknown>>,
+	previousSummary?: string,
+	readFiles: readonly string[] = [],
+	modifiedFiles: readonly string[] = [],
+	storeKeys: readonly string[] = [],
+): string {{
+	const parts: string[] = [];
+	if (previousSummary && previousSummary.trim()) {{
+		parts.push(`## Previous Summary\n${{previousSummary.trim().slice(0, 6000)}}`);
+	}}
+	const errors: string[] = [];
+	const trace: string[] = [];
+	for (const raw of messages ?? []) {{
+		const m = raw as {{
+			role?: string;
+			toolName?: string;
+			isError?: boolean;
+			content?: string | Array<{{ type?: string; text?: string; name?: string; arguments?: Record<string, unknown> }}>;
+		}};
+		if (m?.role === "user" || m?.role === "assistant") {{
+			let txt = "";
+			if (typeof m.content === "string") {{
+				txt = m.content;
+			}} else if (Array.isArray(m.content)) {{
+				const segs: string[] = [];
+				for (const b of m.content) {{
+					if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {{
+						segs.push(b.text.trim());
+					}} else if (b?.type === "toolCall" && typeof b.name === "string") {{
+						const pArg =
+							typeof b.arguments?.path === "string"
+								? `(${{b.arguments.path}})`
+								: typeof b.arguments?.command === "string"
+									? `(${{String(b.arguments.command).replace(/\s+/g, " ").slice(0, 80)}})`
+									: "";
+						segs.push(`[call:${{b.name}}${{pArg}}]`);
+					}}
+				}}
+				txt = segs.join("\n");
+			}}
+			if (txt.trim()) trace.push(`${{m.role.toUpperCase()}}: ${{txt.trim().slice(0, 1000)}}`);
+		}} else if (m?.role === "toolResult" && m.isError) {{
+			const rawTxt = Array.isArray(m.content)
+				? m.content.map((b) => (typeof b.text === "string" ? b.text : "")).join("\n")
+				: "";
+			const sigs = extractErrorSignatureLines(rawTxt);
+			const line = `(${{m.toolName ?? "tool"}}) ${{(sigs.join(" | ") || rawTxt.replace(/\s+/g, " ").slice(0, 180)).trim()}}`;
+			if (errors.length < 18 && !errors.includes(line)) errors.push(line);
+		}}
+	}}
+	if (trace.length > 0) parts.push(`## Conversation Trace\n${{trace.join("\n").slice(-26000)}}`);
+	if (errors.length > 0) parts.push(`## Exact Failing Errors Observed\n- ${{errors.join("\n- ")}}`);
+	if (modifiedFiles.length > 0) parts.push(`## Modified Files\n${{modifiedFiles.slice(0, 40).join(", ")}}`);
+	if (readFiles.length > 0) parts.push(`## Read-Only Files\n${{readFiles.slice(0, 40).join(", ")}}`);
+	if (storeKeys.length > 0) parts.push(`## Active codemode-store Keys (recoverable via load(key))\n${{storeKeys.slice(0, 20).join(", ")}}`);
+	return parts.join("\n\n");
+}}
+
 export function shouldAutoSieveShellOutput(text: string): boolean {{
 	if (!text) return false;
 	if (text.length >= SIEVE_HARD_CHARS) return true;
@@ -1910,8 +2005,9 @@ export default function (pi: ExtensionAPI) {{
 		updateHud(ctx);
 	}});
 
-	pi.on("session_before_compact", (_event, ctx) => {{
-		// Zero-clutter compaction sync: only checkpoint `.baton` if the workspace already uses it
+	pi.on("session_before_compact", async (event, ctx) => {{
+		// 1. Zero-clutter compaction sync: checkpoint `.baton` if the workspace already uses it
+		let batonBrief = "";
 		if (ctx?.cwd && existsSync(join(ctx.cwd, ".baton"))) {{
 			spawnSync(AP_BIN, ["baton", "checkpoint", "--note", "pi-compact"], {{
 				cwd: ctx.cwd,
@@ -1919,6 +2015,138 @@ export default function (pi: ExtensionAPI) {{
 				timeout: 2500,
 				windowsHide: true,
 			}});
+			const bt = spawnSync(AP_BIN, ["baton", "resume"], {{
+				cwd: ctx.cwd,
+				encoding: "utf8",
+				timeout: 2000,
+				windowsHide: true,
+			}});
+			if (bt.status === 0 && bt.stdout?.trim()) {{
+				batonBrief = `\n\n## Baton Task State\n${{bt.stdout.trim().slice(0, 1500)}}`;
+			}}
+		}}
+
+		// 2. Fast `reasoning: "low"` dead-end-preserving auto-compaction for DeepSeek models
+		//    (5-10x faster than max-effort default compaction; safely falls back to Pi built-in on any issue)
+		const model = ctx?.model;
+		const prep = event?.preparation as {{
+			firstKeptEntryId?: string;
+			messagesToSummarize?: Array<Record<string, unknown>>;
+			turnPrefixMessages?: Array<Record<string, unknown>>;
+			tokensBefore?: number;
+			previousSummary?: string;
+			fileOps?: {{ read?: Iterable<string>; written?: Iterable<string>; edited?: Iterable<string> }};
+		}} | undefined;
+		const isDeepSeek = Boolean(
+			model &&
+				(String(model.provider ?? "").toLowerCase().includes("deepseek") ||
+					String(model.id ?? "").toLowerCase().includes("deepseek") ||
+					String(model.id ?? "").toLowerCase().includes("flash-auto")),
+		);
+		const hasSimpleComplete =
+			typeof ctx?.modelRegistry?.streamSimple === "function" ||
+			typeof ctx?.modelRegistry?.complete === "function";
+		if (
+			!isDeepSeek ||
+			!model ||
+			!prep?.firstKeptEntryId ||
+			typeof prep.tokensBefore !== "number" ||
+			event?.signal?.aborted ||
+			!hasSimpleComplete
+		) {{
+			return undefined;
+		}}
+
+		try {{
+			const modSet = new Set<string>([
+				...(prep.fileOps?.written ? [...prep.fileOps.written] : []),
+				...(prep.fileOps?.edited ? [...prep.fileOps.edited] : []),
+			]);
+			const readFiles = prep.fileOps?.read
+				? [...prep.fileOps.read].filter((f) => !modSet.has(f)).sort()
+				: [];
+			const modifiedFiles = [...modSet].sort();
+			const storeKeys = listCodemodeStoreKeys(
+				(event.branchEntries ?? []) as unknown as Array<Record<string, unknown>>,
+			);
+			const allMsgs = [
+				...(Array.isArray(prep.messagesToSummarize) ? prep.messagesToSummarize : []),
+				...(Array.isArray(prep.turnPrefixMessages) ? prep.turnPrefixMessages : []),
+			];
+			if (allMsgs.length === 0) return undefined;
+			const serialized = serializeMessagesForCompaction(
+				allMsgs,
+				prep.previousSummary,
+				readFiles,
+				modifiedFiles,
+				storeKeys,
+			);
+			const extraInstr = event.customInstructions?.trim()
+				? `\n\n## Additional Focus\n${{event.customInstructions.trim()}}`
+				: "";
+			const compCtx = {{
+				systemPrompt:
+					"You are a context compaction summarizer for a coding agent. Output ONLY a crisp, structured handoff summary with these exact headings: ## Goal & Constraints, ## Verified Facts & Progress, ## Falsified Dead-Ends (DO NOT RETRY), ## Key Decisions & File Map, ## Next Immediate Action. Preserve exact file paths, symbol names, build/test commands, and error signatures. Do NOT continue the conversation.",
+				messages: [
+					{{
+						role: "user" as const,
+						content: [
+							{{
+								type: "text" as const,
+								text: `${{serialized}}${{batonBrief}}${{extraInstr}}`,
+							}},
+						],
+						timestamp: Date.now(),
+					}},
+				],
+			}};
+			const compOpts = {{
+				reasoning: "low" as const,
+				maxTokens: 6144,
+				cacheRetention: "none" as const,
+				signal: event.signal,
+			}};
+			// Use `streamSimple().result()` (NOT `complete()`): in Pi v1.5+, `complete()` bypasses
+			// `streamSimple`, dropping `reasoning` effort mapping and rejecting virtual models like `flash-auto`.
+			const response =
+				typeof ctx.modelRegistry.streamSimple === "function"
+					? await ctx.modelRegistry.streamSimple(model, compCtx, compOpts).result()
+					: await ctx.modelRegistry.complete(model, compCtx, compOpts as never);
+			if (
+				!response ||
+				response.stopReason === "error" ||
+				response.stopReason === "aborted" ||
+				response.stopReason === "length"
+			) {{
+				return undefined;
+			}}
+			let summary = (response.content ?? [])
+				.filter((c): c is {{ type: "text"; text: string }} => c?.type === "text" && typeof c.text === "string")
+				.map((c) => c.text)
+				.join("\n")
+				.trim();
+			if (summary.length < 40) return undefined;
+			if (readFiles.length > 0) {{
+				summary += `\n\n<read-files>\n${{readFiles.join("\n")}}\n</read-files>`;
+			}}
+			if (modifiedFiles.length > 0) {{
+				summary += `\n\n<modified-files>\n${{modifiedFiles.join("\n")}}\n</modified-files>`;
+			}}
+			if (storeKeys.length > 0) {{
+				summary += `\n\n<codemode-store-keys>\n${{storeKeys.join(", ")}}\n</codemode-store-keys>`;
+			}}
+			return {{
+				compaction: {{
+					summary,
+					firstKeptEntryId: prep.firstKeptEntryId,
+					tokensBefore: prep.tokensBefore,
+					usage: response.usage,
+					details: {{ readFiles, modifiedFiles }},
+				}},
+			}};
+		}} catch {{
+			// Fall back cleanly to Pi's built-in compactor
+			return undefined;
 		}}
 	}});
 
@@ -2026,29 +2254,31 @@ export default function (pi: ExtensionAPI) {{
 					}}
 					ctx.ui.notify("[ap handoff] Generating clean transfer brief (low effort)...", "info");
 					try {{
-						const response = await ctx.modelRegistry.complete(
-							ctx.model,
-							{{
-								systemPrompt:
-									"Generate a concise, self-contained handoff prompt for a brand-new coding-agent session. Include: ## Context (verified facts & key decisions), ## Falsified Dead-Ends (what NOT to retry), ## Relevant Files, and ## Next Task. Output ONLY the prompt itself.",
-								messages: [
-									{{
-										role: "user",
-										content: [
-											{{
-												type: "text",
-												text: `## Conversation Branch\n${{transcript}}${{envFacts}}\n\n## Goal For New Session\n${{rest}}`,
-											}},
-										],
-										timestamp: Date.now(),
-									}},
-								],
-							}},
-							{{
-								reasoning: "low",
-								cacheRetention: "none",
-							}},
-						);
+						const handoffCtx = {{
+							systemPrompt:
+								"Generate a concise, self-contained handoff prompt for a brand-new coding-agent session. Include: ## Context (verified facts & key decisions), ## Falsified Dead-Ends (what NOT to retry), ## Relevant Files, and ## Next Task. Output ONLY the prompt itself.",
+							messages: [
+								{{
+									role: "user" as const,
+									content: [
+										{{
+											type: "text" as const,
+											text: `## Conversation Branch\n${{transcript}}${{envFacts}}\n\n## Goal For New Session\n${{rest}}`,
+										}},
+									],
+									timestamp: Date.now(),
+								}},
+							],
+						}};
+						const handoffOpts = {{
+							reasoning: "low" as const,
+							maxTokens: 6144,
+							cacheRetention: "none" as const,
+						}};
+						const response =
+							typeof ctx.modelRegistry.streamSimple === "function"
+								? await ctx.modelRegistry.streamSimple(ctx.model, handoffCtx, handoffOpts).result()
+								: await ctx.modelRegistry.complete(ctx.model, handoffCtx, handoffOpts as never);
 						const draft = response.content
 							.filter((c): c is {{ type: "text"; text: string }} => c.type === "text")
 							.map((c) => c.text)
@@ -2133,29 +2363,36 @@ export default function (pi: ExtensionAPI) {{
 					ctx.ui.notify("[ap review] Running isolated skeptical diff review (0 parent context bloat)...", "info");
 					try {{
 						const focusLine = rest ? `\n\n## Specific Review Focus\n${{rest}}` : "";
-						const response = await ctx.modelRegistry.complete(
-							ctx.model,
-							{{
-								systemPrompt:
-									"You are an independent, skeptical senior code reviewer seeing this Git diff with fresh eyes (zero bias from the author). Identify ONLY concrete, verified defects: logic bugs, edge cases, regressions, missing error handling, concurrency/resource leaks, or skipped/weak tests. Cite exact file:line. If the diff is solid, say LGTM concisely.",
-								messages: [
-									{{
-										role: "user",
-										content: [
-											{{
-												type: "text",
-												text: `## Git Diff\n\`\`\`diff\n${{diffText.slice(0, 24000)}}\n\`\`\`${{guardSummary}}${{focusLine}}`,
-											}},
-										],
-										timestamp: Date.now(),
-									}},
-								],
-							}},
-							{{
-								reasoning: "high",
-								cacheRetention: "none",
-							}},
-						);
+						// Resolve physical deepseek-flash if active model is virtual `flash-auto` so `/ap review` always runs at true `high` effort
+						const reviewModel =
+							ctx.model.id === "flash-auto"
+								? ctx.modelRegistry.find?.("deepseek", "deepseek-flash") ?? ctx.model
+								: ctx.model;
+						const reviewCtx = {{
+							systemPrompt:
+								"You are an independent, skeptical senior code reviewer seeing this Git diff with fresh eyes (zero bias from the author). Identify ONLY concrete, verified defects: logic bugs, edge cases, regressions, missing error handling, concurrency/resource leaks, or skipped/weak tests. Cite exact file:line. If the diff is solid, say LGTM concisely.",
+							messages: [
+								{{
+									role: "user" as const,
+									content: [
+										{{
+											type: "text" as const,
+											text: `## Git Diff\n\`\`\`diff\n${{diffText.slice(0, 24000)}}\n\`\`\`${{guardSummary}}${{focusLine}}`,
+										}},
+									],
+									timestamp: Date.now(),
+								}},
+							],
+						}};
+						const reviewOpts = {{
+							reasoning: "high" as const,
+							maxTokens: 8192,
+							cacheRetention: "none" as const,
+						}};
+						const response =
+							typeof ctx.modelRegistry.streamSimple === "function"
+								? await ctx.modelRegistry.streamSimple(reviewModel, reviewCtx, reviewOpts).result()
+								: await ctx.modelRegistry.complete(reviewModel, reviewCtx, reviewOpts as never);
 						const report = response.content
 							.filter((c): c is {{ type: "text"; text: string }} => c.type === "text")
 							.map((c) => c.text)
@@ -2563,6 +2800,13 @@ export default function (pi: ExtensionAPI) {{
 		if (healed && healed !== cmd) {{
 			event.input.command = healed;
 		}}
+		const safeTimeout = resolveSafeShellTimeout(
+			typeof event.input?.command === "string" ? event.input.command : cmd,
+			event.input?.timeout,
+		);
+		if (safeTimeout !== undefined) {{
+			event.input.timeout = safeTimeout;
+		}}
 		return undefined;
 	}});
 
@@ -2588,7 +2832,7 @@ export default function (pi: ExtensionAPI) {{
 		let outText = textBlock.text;
 		let mutated = false;
 
-		// A. Built-in `read` redundant re-read guard + one-time large code file AST tip
+		// A. Built-in `read` redundant re-read guard + truncated code file AST outline injection (<15ms)
 		if (event.toolName === "read" && !event.isError) {{
 			const p = String(event.input?.path ?? event.input?.file_path ?? "");
 			const off = String(event.input?.offset ?? "");
@@ -2597,10 +2841,29 @@ export default function (pi: ExtensionAPI) {{
 				const key = `${{p}}::${{off}}::${{lim}}`;
 				const hits = (unchangedReads.get(key) ?? 0) + 1;
 				unchangedReads.set(key, hits);
+				const readDetails = event.details as {{ truncation?: {{ truncated?: boolean }} }} | undefined;
+				const isTruncated =
+					readDetails?.truncation?.truncated === true ||
+					/use offset=\d+|lines remaining|truncated to \d+/i.test(outText);
 				if (hits >= REREAD_THRESHOLD) {{
 					outText += `\n[ap reread-guard] Exact unchanged slice (${{p}}) read ${{hits}}x already in this session. Avoid re-reading; use ap_search/ap_locate or proceed directly to edits.`;
 					guardsTriggered += 1;
 					mutated = true;
+				}} else if (isTruncated && CODE_FILE_EXT.test(p)) {{
+					const cwd = ctx?.cwd || process.cwd();
+					const absPath = isAbsolute(p) ? p : resolve(cwd, p);
+					if (existsSync(absPath)) {{
+						const ol = spawnSync(AP_BIN, ["read", absPath, "--outline"], {{
+							cwd,
+							encoding: "utf8",
+							timeout: 1500,
+							windowsHide: true,
+						}});
+						if (ol.status === 0 && ol.stdout?.trim()) {{
+							outText += `\n[ap read-outline] File was truncated; full AST symbol map (jump directly via read(offset=...) or ap_read(symbol=...)):\n${{ol.stdout.trim().slice(0, 1800)}}`;
+							mutated = true;
+						}}
+					}}
 				}} else if (!largeReadTipShown && outText.length >= LARGE_CODE_READ_CHARS && CODE_FILE_EXT.test(p)) {{
 					outText += `\n[ap read-tip] Large code file loaded; use ap_read(outline=true) or ap_read(symbol="...") for AST-exact slices (~85% fewer tokens).`;
 					largeReadTipShown = true;
@@ -2655,10 +2918,10 @@ export default function (pi: ExtensionAPI) {{
 			}}
 		}}
 
-		// B2. Pi `codemode` error self-healing tip + one-time Promise.allSettled parallelism tip
+		// B2. Pi `codemode` targeted error self-healing classifier + one-time Promise.allSettled parallelism tip
 		if (event.toolName === "codemode") {{
 			if (event.isError || outText.includes("Script failed") || outText.includes("is not a function")) {{
-				outText += `\n[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs & structuredContent fields.`;
+				outText += `\n${{classifyCodemodeFailureTip(outText)}}`;
 				mutated = true;
 			}} else if (!codemodeParallelTipShown) {{
 				const code = typeof event.input?.code === "string" ? event.input.code : "";
@@ -3453,6 +3716,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("listCodemodeStoreKeys")
                 && s.contains("isBenignGrepNoMatch")
                 && s.contains("MASK_TIER2_TOKENS")
+                && s.contains("classifyCodemodeFailureTip")
+                && s.contains("resolveSafeShellTimeout")
+                && s.contains("serializeMessagesForCompaction")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
