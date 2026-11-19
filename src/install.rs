@@ -1094,6 +1094,53 @@ export function classifyCodemodeFailureTip(outText: string): string {{
 }}
 
 /**
+ * Static, 100% KV-cache-locked DeepSeek Flash execution guidelines (~85 tokens total, cached at $0.006/1M)
+ * injected via `before_agent_start` -> `systemPromptOptions.promptGuidelines` to crush serial 1-tool streaks
+ * and QuickJS `codemode` ReferenceError/TypeError mistakes at Turn 0.
+ */
+export const AP_DEEPSEEK_GUIDELINES: readonly string[] = [
+	"Batch independent read/search/check calls in parallel tool calls or a single codemode script with Promise.allSettled([...]); keep cross-turn structured state in store(key, value)/load(key).",
+	"In codemode (QuickJS sandbox, no Node fs/path/require/process/fetch): tools.bash(...) returns {{ output, exit_code, truncated }} (read .output), tools.read(...) returns a string, and tools.mcp__agent_primitives__* returns parsed {{ content, structuredContent, isError }}.",
+	"Prefer ap CLI or tools.mcp__agent_primitives__* (ap_read/ap_search/ap_query/ap_atlas/ap_edit/ap_verify) for AST symbol reads, multi-pattern search, Office/PDF/SQLite/PE/ELF/hex inspection, and verification; keep read-only shell probes <=90s.",
+];
+
+export function injectDeepSeekGuidelines(guidelines: string[]): boolean {{
+	if (!Array.isArray(guidelines)) return false;
+	let added = false;
+	for (const rule of AP_DEEPSEEK_GUIDELINES) {{
+		if (!guidelines.includes(rule)) {{
+			guidelines.push(rule);
+			added = true;
+		}}
+	}}
+	return added;
+}}
+
+/**
+ * Calibrate Pi v1.5+ native `CacheWarmer` for DeepSeek V4.1 Flash economics ($0.006/1M cacheRead vs
+ * $0.30/1M cold miss = 49x ROI). Overrides Pi's Opus-calibrated $0.05 floor when missCost >= $0.024
+ * (~82k+ tokens) and ROI >= 20x so long tool runs & brief pauses stay at ~99% KV-cache hit rate.
+ */
+export function decideDeepSeekCacheWarming(input: {{
+	provider?: string;
+	modelId?: string;
+	warmCost?: number;
+	missCost?: number;
+	action?: string;
+}}): {{ action: "warm" }} | undefined {{
+	const prov = String(input.provider ?? "").toLowerCase();
+	const mid = String(input.modelId ?? "").toLowerCase();
+	const isDs = prov.includes("deepseek") || mid.includes("deepseek") || mid.includes("flash-auto");
+	if (!isDs) return undefined;
+	const warm = typeof input.warmCost === "number" ? input.warmCost : 0;
+	const miss = typeof input.missCost === "number" ? input.missCost : 0;
+	if (warm > 0 && miss >= 0.024 && miss / warm >= 20) {{
+		return {{ action: "warm" }};
+	}}
+	return undefined;
+}}
+
+/**
  * Standalone serializer for fast `reasoning: "low"` dead-end-preserving auto-compaction
  * (zero runtime SDK imports; preserves previousSummary, exact TOOL_ERROR signatures, file ops & store keys).
  */
@@ -2101,6 +2148,7 @@ export default function (pi: ExtensionAPI) {{
 	let guardsTriggered = 0;
 	let healedEditsCount = 0;
 	let extCompactionsCount = 0;
+	let cacheWarmsCount = 0;
 	let totalToolTurns = 0;
 	let serialSingleTotalTurns = 0;
 
@@ -2243,9 +2291,39 @@ export default function (pi: ExtensionAPI) {{
 		guardsTriggered = 0;
 		healedEditsCount = 0;
 		extCompactionsCount = 0;
+		cacheWarmsCount = 0;
 		totalToolTurns = 0;
 		serialSingleTotalTurns = 0;
 		updateHud(ctx);
+	}});
+
+	pi.on("before_agent_start", (event, ctx) => {{
+		const m = ctx?.model;
+		const isDs = Boolean(
+			m &&
+				(String(m.provider ?? "").toLowerCase().includes("deepseek") ||
+					String(m.id ?? "").toLowerCase().includes("deepseek") ||
+					String(m.id ?? "").toLowerCase().includes("flash-auto")),
+		);
+		if (isDs && Array.isArray(event?.systemPromptOptions?.promptGuidelines)) {{
+			injectDeepSeekGuidelines(event.systemPromptOptions.promptGuidelines);
+		}}
+		return undefined;
+	}});
+
+	pi.on("cache_warming_decision", (event, ctx) => {{
+		const override = decideDeepSeekCacheWarming({{
+			provider: ctx?.model?.provider,
+			modelId: ctx?.model?.id,
+			warmCost: event?.warmCost,
+			missCost: event?.missCost,
+			action: event?.action,
+		}});
+		if (override) {{
+			cacheWarmsCount += 1;
+			return override;
+		}}
+		return undefined;
 	}});
 
 	pi.on("before_provider_request", (event) => {{
@@ -2701,8 +2779,9 @@ export default function (pi: ExtensionAPI) {{
 				const branch = ctx.sessionManager?.getBranch?.() ?? [];
 				const storeKeys = countCodemodeStoreKeys(branch as unknown as Array<Record<string, unknown>>);
 				const compactSuffix = extCompactionsCount > 0 ? ` extCompacts=${{extCompactionsCount}}` : "";
+				const warmSuffix = cacheWarmsCount > 0 ? ` cacheWarms=${{cacheWarmsCount}}` : "";
 				ctx.ui.notify(
-					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} healedEdits=${{healedEditsCount}} guarded=${{guardsTriggered}}${{compactSuffix}} | serial1=${{serialPct}} storeKeys=${{storeKeys}}`,
+					`[ap telemetry] model=${{modelStr}} | ctx=${{ctxStr}} (mask@180k) | cache=${{hitPct}}% (saved ~$${{estUsdSaved}}) | sieved=${{sievedCount}} masked=${{maskedCount}} healedEdits=${{healedEditsCount}} guarded=${{guardsTriggered}}${{compactSuffix}}${{warmSuffix}} | serial1=${{serialPct}} storeKeys=${{storeKeys}}`,
 					"info",
 				);
 			}},
@@ -4080,6 +4159,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("extractAllToolResultText")
                 && s.contains("sieveCodemodeContentBlocks")
                 && s.contains("formatInstantSyntaxAlert")
+                && s.contains("decideDeepSeekCacheWarming")
+                && s.contains("injectDeepSeekGuidelines")
+                && s.contains("cache_warming_decision")
+                && s.contains("before_agent_start")
                 && s.contains("before_provider_request")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
@@ -4209,6 +4292,26 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 })
         })
         .and_then(Value::as_bool);
+    let deepseek_prompt_cache_ttl_s = models_json
+        .as_ref()
+        .and_then(|v| {
+            default_model_id
+                .as_deref()
+                .and_then(|mid| {
+                    v.pointer(&format!(
+                        "/providers/deepseek/modelOverrides/{mid}/promptCache/short"
+                    ))
+                })
+                .or_else(|| {
+                    v.pointer("/providers/deepseek/modelOverrides/deepseek-flash/promptCache/short")
+                })
+        })
+        .and_then(Value::as_u64);
+    let cache_warming_mode = settings_json
+        .as_ref()
+        .and_then(|v| v.get("cacheWarming"))
+        .and_then(Value::as_str)
+        .unwrap_or("idle");
 
     let mut hints: Vec<String> = Vec::new();
     if !accelerator_present || !accelerator_up_to_date {
@@ -4283,6 +4386,16 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 .to_string(),
         );
     }
+    if is_deepseek
+        && models_json.is_some()
+        && cache_warming_mode != "off"
+        && deepseek_prompt_cache_ttl_s.is_none()
+    {
+        recommendations.push(
+            "Add `\"promptCache\": { \"short\": 120 }` under providers.deepseek.modelOverrides.deepseek-flash in ~/.pi/agent/models.json to activate Pi's native CacheWarmer (108s keep-warm ping, 49x ROI)."
+                .to_string(),
+        );
+    }
 
     json!({
         "detected": true,
@@ -4298,7 +4411,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "retry_max_retries": retry_max_retries,
         "retry_base_delay_ms": retry_base_delay_ms,
         "http_idle_timeout_ms": http_idle_timeout_ms,
+        "cache_warming_mode": cache_warming_mode,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
+        "deepseek_prompt_cache_ttl_s": deepseek_prompt_cache_ttl_s,
         "hints": hints,
         "recommendations": recommendations,
     })

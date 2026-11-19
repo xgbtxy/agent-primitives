@@ -5514,3 +5514,111 @@ fn test_v220_codemode_multiblock_sieve_typeerror_instant_syntax_and_timeout_cap(
     assert_eq!(v2["pi_runtime"]["retry_base_delay_ms"], 1000);
     assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_v221_deepseek_cache_warmer_and_static_turn0_guidelines() {
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v221");
+    let ap_home = root.join("ap_home_v221");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export const AP_DEEPSEEK_GUIDELINES",
+        "export function injectDeepSeekGuidelines",
+        "export function decideDeepSeekCacheWarming",
+        "before_agent_start",
+        "cache_warming_decision",
+        "cacheWarms=",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.21 feature '{needle}'");
+    }
+
+    fs::write(
+        pi_agent.join("settings.json"),
+        serde_json::to_string_pretty(&json!({
+            "defaultProvider": "deepseek",
+            "defaultModel": "deepseek-flash",
+            "showCacheMissNotices": true,
+            "httpIdleTimeoutMs": 120000,
+            "defaultTools": ["+codemode"],
+            "retry": { "maxRetries": 6, "baseDelayMs": 1000 }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        pi_agent.join("models.json"),
+        serde_json::to_string_pretty(&json!({
+            "providers": {
+                "deepseek": {
+                    "modelOverrides": {
+                        "deepseek-flash": {
+                            "compat": { "supportsMidConvoSystemMessages": true }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let d1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(d1.status.success());
+    let v1: Value = serde_json::from_slice(&d1.stdout).unwrap();
+    assert!(v1["pi_runtime"]["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h.as_str().unwrap_or("").contains("promptCache")));
+
+    fs::write(
+        pi_agent.join("models.json"),
+        serde_json::to_string_pretty(&json!({
+            "providers": {
+                "deepseek": {
+                    "modelOverrides": {
+                        "deepseek-flash": {
+                            "compat": { "supportsMidConvoSystemMessages": true },
+                            "promptCache": { "short": 120 }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let d2 = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(d2.status.success());
+    let v2: Value = serde_json::from_slice(&d2.stdout).unwrap();
+    assert_eq!(v2["pi_runtime"]["deepseek_prompt_cache_ttl_s"], 120);
+    assert_eq!(v2["pi_runtime"]["hints"].as_array().unwrap().len(), 0);
+    assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+}
