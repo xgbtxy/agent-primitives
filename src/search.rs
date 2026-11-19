@@ -26,6 +26,8 @@ const SKIP_DIRS: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchMatch {
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub pattern: String,
     pub file: String,
     pub line: usize,
     pub scope: String,
@@ -35,14 +37,21 @@ pub struct SearchMatch {
 #[derive(Parser, Debug)]
 #[command(
     name = "search",
-    about = "Universal .gitignore-aware regex search with enclosing AST symbol spans + .docx/.xlsx/.pdf/GBK support (zero ripgrep needed)"
+    about = "Universal .gitignore-aware regex search with enclosing AST symbol spans + batch multi-pattern + .map/.asar/.vsix/Office/minified support"
 )]
 struct SearchCli {
-    /// Regex or literal pattern to search
+    /// Regex or literal pattern to search (or pass `--stdin` for 1 pattern per line)
+    #[arg(default_value = "")]
     pattern: String,
     /// Root file or directory to search (default: '.')
     #[arg(default_value = ".")]
     path: String,
+    /// Additional patterns to search in the SAME single pass (repeatable: `--pat A --pat B`)
+    #[arg(long = "pat")]
+    extra_pats: Vec<String>,
+    /// Read additional search patterns from stdin (1 regex per line)
+    #[arg(long)]
+    stdin: bool,
     /// Case-sensitive matching (default is smart case: case-insensitive unless pattern has uppercase)
     #[arg(short = 's', long)]
     case_sensitive: bool,
@@ -94,7 +103,9 @@ fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_text_matches(
+    pat_label: &str,
     text: &str,
     rel: &str,
     ext: &str,
@@ -143,6 +154,7 @@ fn push_text_matches(
                 m.as_str().trim().chars().take(240).collect()
             };
             matches.push(SearchMatch {
+                pattern: pat_label.to_string(),
                 file: rel.to_string(),
                 line: ln_no,
                 scope,
@@ -173,6 +185,7 @@ fn push_text_matches(
                     };
                     let abs_off = line_byte_start + m.start();
                     matches.push(SearchMatch {
+                        pattern: pat_label.to_string(),
                         file: rel.to_string(),
                         line: ln_no,
                         scope: format!("minified @off={abs_off}"),
@@ -213,6 +226,7 @@ fn push_text_matches(
                     ln_clean.trim().chars().take(180).collect()
                 };
                 matches.push(SearchMatch {
+                    pattern: pat_label.to_string(),
                     file: rel.to_string(),
                     line: ln_no,
                     scope,
@@ -252,13 +266,45 @@ pub fn run_cli(args: &[String]) -> i32 {
             return code;
         }
     };
-    let re = match build_search_regex(&cli.pattern, cli.case_sensitive, cli.multiline) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[ap search] {e}");
-            return 2;
+    let mut raw_pats: Vec<String> = Vec::new();
+    if !cli.pattern.trim().is_empty() {
+        raw_pats.push(cli.pattern.clone());
+    }
+    for ep in &cli.extra_pats {
+        if !ep.trim().is_empty() && !raw_pats.contains(ep) {
+            raw_pats.push(ep.clone());
         }
-    };
+    }
+    if cli.stdin {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf);
+        for ln in buf.lines() {
+            let t = ln.trim();
+            if !t.is_empty() && !t.starts_with('#') && !raw_pats.iter().any(|p| p == t) {
+                raw_pats.push(t.to_string());
+            }
+        }
+    }
+    if raw_pats.is_empty() {
+        eprintln!("[ap search] provide at least one pattern (positional, --pat, or --stdin)");
+        return 2;
+    }
+    let multi_mode = raw_pats.len() > 1;
+    let mut compiled: Vec<(String, Regex)> = Vec::new();
+    for p in raw_pats.into_iter().take(20) {
+        match build_search_regex(&p, cli.case_sensitive, cli.multiline) {
+            Ok(r) => compiled.push((p, r)),
+            Err(e) => {
+                eprintln!("[ap search] {e}");
+                return 2;
+            }
+        }
+    }
+    let combined_label = compiled
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
     let s_opts = SearchOpts {
         around: cli.around,
         pretty: cli.pretty,
@@ -386,15 +432,22 @@ pub fn run_cli(args: &[String]) -> i32 {
                                 .unwrap_or("js")
                                 .to_ascii_lowercase();
                             let virt_rel = format!("{rel}::{sname}");
-                            push_text_matches(
-                                body,
-                                &virt_rel,
-                                &eext,
-                                false,
-                                &re,
-                                s_opts,
-                                &mut matches,
-                            );
+                            for (pl, r) in &compiled {
+                                let lbl = if multi_mode { pl.as_str() } else { "" };
+                                push_text_matches(
+                                    lbl,
+                                    body,
+                                    &virt_rel,
+                                    &eext,
+                                    false,
+                                    r,
+                                    s_opts,
+                                    &mut matches,
+                                );
+                                if matches.len() >= cli.max_hits {
+                                    break;
+                                }
+                            }
                             if matches.len() >= cli.max_hits {
                                 break;
                             }
@@ -445,7 +498,22 @@ pub fn run_cli(args: &[String]) -> i32 {
                     if en <= bytes.len() {
                         let txt = decode_any_bytes(&bytes[st..en]).0;
                         let virt_rel = format!("{rel}::{}", ent.path);
-                        push_text_matches(&txt, &virt_rel, &eext, false, &re, s_opts, &mut matches);
+                        for (pl, r) in &compiled {
+                            let lbl = if multi_mode { pl.as_str() } else { "" };
+                            push_text_matches(
+                                lbl,
+                                &txt,
+                                &virt_rel,
+                                &eext,
+                                false,
+                                r,
+                                s_opts,
+                                &mut matches,
+                            );
+                            if matches.len() >= cli.max_hits {
+                                break;
+                            }
+                        }
                         if matches.len() >= cli.max_hits {
                             break;
                         }
@@ -495,15 +563,22 @@ pub fn run_cli(args: &[String]) -> i32 {
                         if std::io::Read::read_to_end(&mut zf, &mut eb).is_ok() {
                             let txt = decode_any_bytes(&eb).0;
                             let virt_rel = format!("{rel}::{nm}");
-                            push_text_matches(
-                                &txt,
-                                &virt_rel,
-                                &eext,
-                                false,
-                                &re,
-                                s_opts,
-                                &mut matches,
-                            );
+                            for (pl, r) in &compiled {
+                                let lbl = if multi_mode { pl.as_str() } else { "" };
+                                push_text_matches(
+                                    lbl,
+                                    &txt,
+                                    &virt_rel,
+                                    &eext,
+                                    false,
+                                    r,
+                                    s_opts,
+                                    &mut matches,
+                                );
+                                if matches.len() >= cli.max_hits {
+                                    break;
+                                }
+                            }
                             if matches.len() >= cli.max_hits {
                                 break;
                             }
@@ -519,18 +594,29 @@ pub fn run_cli(args: &[String]) -> i32 {
 
         // Binary ASCII + Windows UTF-16LE strings search when explicitly targeted
         if is_bin_ext || (explicit_file && crate::binary::is_binary_magic(&bytes)) {
-            let md = crate::binary::inspect_binary_md(&bytes, Some(&cli.pattern), cli.max_hits);
-            for (idx, ln) in md.lines().enumerate() {
-                if ln.starts_with("[ascii ") || ln.starts_with("[utf16le ") {
-                    matches.push(SearchMatch {
-                        file: rel.clone(),
-                        line: idx + 1,
-                        scope: "BINARY".to_string(),
-                        snippet: ln.chars().take(200).collect(),
-                    });
-                    if matches.len() >= cli.max_hits {
-                        break;
+            for (pl, _) in &compiled {
+                let lbl = if multi_mode {
+                    pl.clone()
+                } else {
+                    String::new()
+                };
+                let md = crate::binary::inspect_binary_md(&bytes, Some(pl), cli.max_hits);
+                for (idx, ln) in md.lines().enumerate() {
+                    if ln.starts_with("[ascii ") || ln.starts_with("[utf16le ") {
+                        matches.push(SearchMatch {
+                            pattern: lbl.clone(),
+                            file: rel.clone(),
+                            line: idx + 1,
+                            scope: "BINARY".to_string(),
+                            snippet: ln.chars().take(200).collect(),
+                        });
+                        if matches.len() >= cli.max_hits {
+                            break;
+                        }
                     }
+                }
+                if matches.len() >= cli.max_hits {
+                    break;
                 }
             }
             if matches.len() >= cli.max_hits {
@@ -555,7 +641,13 @@ pub fn run_cli(args: &[String]) -> i32 {
             decode_any_bytes(&bytes).0
         };
 
-        push_text_matches(&text, &rel, &ext, is_office, &re, s_opts, &mut matches);
+        for (pl, r) in &compiled {
+            let lbl = if multi_mode { pl.as_str() } else { "" };
+            push_text_matches(lbl, &text, &rel, &ext, is_office, r, s_opts, &mut matches);
+            if matches.len() >= cli.max_hits {
+                break;
+            }
+        }
         if matches.len() >= cli.max_hits {
             break;
         }
@@ -563,17 +655,24 @@ pub fn run_cli(args: &[String]) -> i32 {
 
     let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
     let mut out_lines = vec![format!(
-        "# SEARCH `{}` ({} hit(s) across {scanned_files} files in {elapsed_ms}ms)",
-        cli.pattern,
+        "# SEARCH `{combined_label}` ({} hit(s) across {scanned_files} files in {elapsed_ms}ms)",
         matches.len()
     )];
     for m in &matches {
+        let ptag = if m.pattern.is_empty() {
+            String::new()
+        } else {
+            format!("[pat:`{}`] ", m.pattern)
+        };
         let sc = if m.scope.is_empty() {
             String::new()
         } else {
             format!(" [{}]", m.scope)
         };
-        out_lines.push(format!("- `{}:{}`{sc} — `{}`", m.file, m.line, m.snippet));
+        out_lines.push(format!(
+            "- {ptag}`{}:{}`{sc} — `{}`",
+            m.file, m.line, m.snippet
+        ));
     }
     let rendered = out_lines.join("\n");
     record_event(

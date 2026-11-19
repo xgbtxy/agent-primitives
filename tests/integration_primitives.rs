@@ -2684,3 +2684,242 @@ fn test_sourcemap_vlq_jsonpath_decode_multiline_diff_audit_and_ports() {
     assert_eq!(pj["ok"], true);
     drop(listener);
 }
+
+#[test]
+fn test_batch_read_search_slow_grep_heal_cdp_watch_and_http_batch() {
+    use std::io::Read as _;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v22_home");
+
+    // 1. Multi-range `--lines` & multi-offset `--offset` batch reading
+    fs::write(
+        root.join("notes.txt"),
+        "L1_ALPHA\nL2_KEEP\nL3_SKIP\nL4_SKIP\nL5_BETA\nL6_END\n",
+    )
+    .unwrap();
+    let mr = run_ap(
+        root,
+        &["read", "notes.txt", "--lines", "1-2,5-6"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(mr.status.success());
+    let mr_s = String::from_utf8_lossy(&mr.stdout);
+    assert!(
+        mr_s.contains("L1_ALPHA")
+            && mr_s.contains("L5_BETA")
+            && !mr_s.contains("L3_SKIP")
+            && mr_s.contains("## L1-L2")
+            && mr_s.contains("## L5-L6"),
+        "Unexpected multi-range read output: {mr_s}"
+    );
+
+    let pad = "x".repeat(260);
+    fs::write(
+        root.join("bundle.min.js"),
+        format!("function initFirst(){{return 'SLICE_A';}}{pad}function initSecond(){{return 'SLICE_B';}}"),
+    )
+    .unwrap();
+    let mo = run_ap(
+        root,
+        &[
+            "read",
+            "bundle.min.js",
+            "--offset",
+            "0,280",
+            "--chars",
+            "90",
+            "--pretty",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(mo.status.success());
+    let mo_s = String::from_utf8_lossy(&mo.stdout);
+    assert!(
+        mo_s.contains("SLICE_A") && mo_s.contains("SLICE_B"),
+        "Expected both byte-offset slices, got: {mo_s}"
+    );
+
+    // 2. Single-pass multi-pattern `ap search --pat` + `--stdin`
+    fs::write(
+        root.join("service.ts"),
+        "export const ALPHA_TOKEN = 'a1';\nexport const BETA_ROUTE = '/v2/beta';\nexport const GAMMA_FLAG = true;\n",
+    )
+    .unwrap();
+    let ms = run_ap(
+        root,
+        &[
+            "search",
+            "ALPHA_TOKEN",
+            "service.ts",
+            "--pat",
+            "BETA_ROUTE",
+            "--pat",
+            "GAMMA_FLAG",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ms.status.success());
+    let ms_j: Value = serde_json::from_slice(&ms.stdout).unwrap();
+    let matches = ms_j["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3, "Expected 3 batch hits, got: {ms_j}");
+    assert!(matches.iter().any(|m| m["pattern"] == "BETA_ROUTE"));
+
+    // 3. Slow GNU `grep -rn` auto-acceleration inside `ap exec`
+    let gr = run_ap(
+        root,
+        &["exec", "--cwd", ".", "-c", "grep -rn BETA_ROUTE ."],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        gr.status.success(),
+        "Expected accelerated grep to succeed: {}",
+        String::from_utf8_lossy(&gr.stderr)
+    );
+    let gr_s = String::from_utf8_lossy(&gr.stdout);
+    assert!(
+        gr_s.contains("service.ts") && gr_s.contains("BETA_ROUTE"),
+        "Unexpected accelerated grep output: {gr_s}"
+    );
+
+    // 4. Zero-dependency `ap probe http --batch-stdin --json` against ephemeral HTTP server
+    let srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hport = srv.local_addr().unwrap().port();
+    let srv_thread = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut stream, _)) = srv.accept() else {
+                break;
+            };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let resp = if req.starts_with("POST /echo") {
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"echoed\":true}\n"
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"ok\":\"pong\"}"
+            };
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    let batch_in = format!(
+        "GET http://127.0.0.1:{hport}/health\n{{\"method\":\"POST\",\"url\":\"http://127.0.0.1:{hport}/echo\",\"body\":{{\"k\":1}}}}\n"
+    );
+    let hp = run_ap(
+        root,
+        &["probe", "http", "--batch-stdin", "--json"],
+        Some(&batch_in),
+        &[("AP_HOME", &ap_home)],
+    );
+    let _ = srv_thread.join();
+    assert!(
+        hp.status.success(),
+        "ap probe http batch failed: {}{}",
+        String::from_utf8_lossy(&hp.stdout),
+        String::from_utf8_lossy(&hp.stderr)
+    );
+    let hp_j: Value = serde_json::from_slice(&hp.stdout).unwrap();
+    assert_eq!(hp_j["count"], 2);
+    assert_eq!(hp_j["results"][0]["status"], 200);
+    assert_eq!(hp_j["results"][1]["status"], 201);
+    assert!(hp_j["results"][1]["body_preview"]
+        .as_str()
+        .unwrap_or("")
+        .contains("echoed"));
+
+    // 5. Non-blocking bounded CDP event watcher (`--watch-ms`) captures delayed async console.log without hanging
+    let browser_opt = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .find(|p| Path::new(p).is_file())
+    .copied();
+
+    if let Some(browser) = browser_opt {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let prof = root.join("v22_cdp_prof");
+        let _ = fs::create_dir_all(&prof);
+        let mut ext_browser = Command::new(browser)
+            .args([
+                "--headless=new",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+                "--no-sandbox",
+                "--no-first-run",
+                "--remote-debugging-address=127.0.0.1",
+                &format!("--remote-debugging-port={port}"),
+                "--remote-allow-origins=*",
+                &format!("--user-data-dir={}", prof.display()),
+                "about:blank",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let mut ready = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        while std::time::Instant::now() < deadline {
+            let ls = run_ap(
+                root,
+                &["probe", "cdp", "--port", &port.to_string(), "--list"],
+                None,
+                &[("AP_HOME", &ap_home)],
+            );
+            if ls.status.success() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        assert!(ready, "Browser CDP failed to come up");
+
+        let ev = run_ap(
+            root,
+            &[
+                "probe",
+                "cdp",
+                "--port",
+                &port.to_string(),
+                "--eval",
+                "setTimeout(() => console.log('ASYNC_WATCH_OK_22'), 150); 'armed'",
+                "--watch-ms",
+                "600",
+                "--json",
+            ],
+            None,
+            &[("AP_HOME", &ap_home)],
+        );
+        assert!(
+            ev.status.success(),
+            "cdp --watch-ms failed: {}{}",
+            String::from_utf8_lossy(&ev.stdout),
+            String::from_utf8_lossy(&ev.stderr)
+        );
+        let ej: Value = serde_json::from_slice(&ev.stdout).unwrap();
+        assert_eq!(ej["eval"], "armed");
+        assert!(
+            ej["console_logs"].to_string().contains("ASYNC_WATCH_OK_22"),
+            "Expected delayed console.log captured during watch_ms: {ej}"
+        );
+        assert!(ext_browser.try_wait().unwrap().is_none());
+        let _ = ext_browser.kill();
+        let _ = ext_browser.wait();
+    }
+}

@@ -256,7 +256,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     }
     if sel.contains("probe") || sel.contains("guard") {
         bullets.push(format!(
-            "3. **1-Call Deep Verify & Live CDP (`guard` / `probe`)**: Run `{ap_cmd} guard verify --cwd . --deep` (OWASP sec + git diff anti-test-cheating + vacuous/anti-slop + contracts + tests + API fuzz + Desktop/Mobile UI + active-file AST mutation in 1 pass). Discover local servers/CDP ports -> `{ap_cmd} probe ports`. Attach to live Chrome/Electron CDP -> `{ap_cmd} probe cdp --port <P> [--list|--target T --eval JS]`."
+            "3. **1-Call Deep Verify, Live CDP & HTTP (`guard` / `probe`)**: Run `{ap_cmd} guard verify --cwd . --deep` (OWASP sec + git diff anti-test-cheating + vacuous/anti-slop + contracts + tests + API fuzz + Desktop/Mobile UI + active-file AST mutation in 1 pass). Local ports/CDP -> `{ap_cmd} probe ports`; live CDP attach/watch -> `{ap_cmd} probe cdp --port <P> [--eval JS --watch-ms 1500]`; batch HTTP -> `{ap_cmd} probe http --batch-stdin`."
         ));
     }
     if ["probe", "sieve", "recall", "guard", "baton"]
@@ -264,7 +264,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Read, Search, SQL, Exec & Undo**: `{ap_cmd} read <target> [--json-path P|--decode|--map-pos L:C|--entry E|--offset N --pretty|--render]` (Office/PDF/SQLite/`.map`/`.asar`/`.vsix`/PE UTF-16LE/minified JS/SPA); `{ap_cmd} search <pat> <path> [--multiline --block --pretty]` (AST blocks + `.map`/`.asar`/minified/binaries); `{ap_cmd} query`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
+            "4. **Batch Read, Search, SQL, Exec & Undo**: `{ap_cmd} read <target> [--lines 1-30,90-120|--offset 18000,95000 --pretty|--json-path P|--decode|--map-pos L:C|--entry E|--render]`; `{ap_cmd} search <pat> <path> [--pat P2 --multiline --block --pretty]` (single-pass multi-pattern across code/`.map`/`.asar`/minified/binaries); `{ap_cmd} query`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
         ));
     }
     format!(

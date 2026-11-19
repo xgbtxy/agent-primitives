@@ -25,6 +25,8 @@ pub struct CdpSession {
     next_id: u64,
     pub js_errors: Vec<String>,
     pub network_errors: Vec<String>,
+    pub console_logs: Vec<String>,
+    pub network_events: Vec<String>,
 }
 
 fn free_port() -> Result<u16, String> {
@@ -247,6 +249,8 @@ impl CdpSession {
             next_id: 1,
             js_errors: Vec::new(),
             network_errors: Vec::new(),
+            console_logs: Vec::new(),
+            network_events: Vec::new(),
         };
         let _ = sess.call("Page.enable", json!({}));
         let _ = sess.call("Runtime.enable", json!({}));
@@ -309,6 +313,8 @@ impl CdpSession {
             next_id: 1,
             js_errors: Vec::new(),
             network_errors: Vec::new(),
+            console_logs: Vec::new(),
+            network_events: Vec::new(),
         };
         let _ = sess.call("Runtime.enable", json!({}));
         let _ = sess.call("Log.enable", json!({}));
@@ -339,6 +345,55 @@ impl CdpSession {
         }
     }
 
+    /// Drain incoming CDP events (console logs, network responses, JS exceptions) for a bounded window without hanging.
+    pub fn watch_events(&mut self, duration_ms: u64) {
+        let bounded = duration_ms.min(15_000);
+        if bounded == 0 {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_millis(bounded);
+        let _ = self
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(60)));
+        while Instant::now() < deadline {
+            let mut probe = [0u8; 1];
+            match self.stream.peek(&mut probe) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let _ = self
+                        .stream
+                        .set_read_timeout(Some(Duration::from_millis(2000)));
+                    let frame = ws_read_message(&mut self.stream);
+                    let _ = self
+                        .stream
+                        .set_read_timeout(Some(Duration::from_millis(60)));
+                    match frame {
+                        Ok(raw) => {
+                            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                                if let Some(ev) = v.get("method").and_then(Value::as_str) {
+                                    self.record_event(ev, v.get("params").unwrap_or(&Value::Null));
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = self
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(8000)));
+    }
+
     fn record_event(&mut self, ev: &str, params: &Value) {
         if ev == "Runtime.exceptionThrown" {
             let desc = params
@@ -350,9 +405,8 @@ impl CdpSession {
                 "[pageerror] {}",
                 desc.lines().next().unwrap_or(desc)
             ));
-        } else if ev == "Runtime.consoleAPICalled"
-            && params.get("type").and_then(Value::as_str) == Some("error")
-        {
+        } else if ev == "Runtime.consoleAPICalled" {
+            let kind = params.get("type").and_then(Value::as_str).unwrap_or("log");
             if let Some(args) = params.get("args").and_then(Value::as_array) {
                 let parts: Vec<String> = args
                     .iter()
@@ -360,8 +414,13 @@ impl CdpSession {
                     .map(|x| x.to_string().trim_matches('"').to_string())
                     .collect();
                 if !parts.is_empty() {
-                    self.js_errors
-                        .push(format!("[console.error] {}", parts.join(" ")));
+                    let msg = parts.join(" ");
+                    if self.console_logs.len() < 100 {
+                        self.console_logs.push(format!("[console.{kind}] {msg}"));
+                    }
+                    if kind == "error" {
+                        self.js_errors.push(format!("[console.error] {msg}"));
+                    }
                 }
             }
         } else if ev == "Network.responseReceived" {
@@ -373,9 +432,19 @@ impl CdpSession {
                 .pointer("/response/url")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if status >= 400 && !url.ends_with("/favicon.ico") && !url.starts_with("data:") {
-                self.network_errors
-                    .push(format!("[network {status}] {url}"));
+            let res_type = params
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("Other");
+            if !url.ends_with("/favicon.ico") && !url.starts_with("data:") {
+                if self.network_events.len() < 100 {
+                    self.network_events
+                        .push(format!("[{status} {res_type}] {url}"));
+                }
+                if status >= 400 {
+                    self.network_errors
+                        .push(format!("[network {status}] {url}"));
+                }
             }
         } else if ev == "Network.loadingFailed" {
             let err_txt = params
@@ -433,7 +502,7 @@ impl CdpSession {
         let wrapped = format!(
             "(async () => {{ const __r = await ({expr}); return typeof __r === 'string' ? __r : JSON.stringify(__r ?? ''); }})()"
         );
-        let res = self.call(
+        let mut res = self.call(
             "Runtime.evaluate",
             json!({
                 "expression": wrapped,
@@ -441,6 +510,28 @@ impl CdpSession {
                 "returnByValue": true
             }),
         )?;
+        // Auto-fallback for multi-statement JS snippets (e.g. `const x = 1; x + 2;` or `setTimeout(...); 'ok'`)
+        if let Some(exc) = res.get("exceptionDetails") {
+            let err_desc = exc
+                .pointer("/exception/description")
+                .or_else(|| exc.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if err_desc.contains("SyntaxError") {
+                let expr_json = serde_json::to_string(expr).unwrap_or_else(|_| "\"\"".to_string());
+                let stmt_wrapped = format!(
+                    "(async () => {{ const __r = await (0, eval)({expr_json}); return typeof __r === 'string' ? __r : JSON.stringify(__r ?? ''); }})()"
+                );
+                res = self.call(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": stmt_wrapped,
+                        "awaitPromise": true,
+                        "returnByValue": true
+                    }),
+                )?;
+            }
+        }
         if let Some(exc) = res.get("exceptionDetails") {
             let txt = exc
                 .pointer("/exception/description")
@@ -635,6 +726,7 @@ pub fn run_cdp_attach(
     audit: bool,
     screenshot: Option<&Path>,
     steps_text: &str,
+    watch_ms: u64,
     as_json: bool,
 ) -> i32 {
     let t0 = Instant::now();
@@ -647,7 +739,11 @@ pub fn run_cdp_attach(
     };
 
     if list_only
-        || (eval_expr.is_none() && !audit && screenshot.is_none() && steps_text.trim().is_empty())
+        || (eval_expr.is_none()
+            && !audit
+            && screenshot.is_none()
+            && steps_text.trim().is_empty()
+            && watch_ms == 0)
     {
         if as_json {
             println!(
@@ -816,6 +912,10 @@ pub fn run_cdp_attach(
         }
     }
 
+    if watch_ms > 0 {
+        sess.watch_events(watch_ms);
+    }
+
     let elapsed_ms = (t0.elapsed().as_secs_f64() * 1000.0).round();
     if as_json {
         println!(
@@ -828,6 +928,8 @@ pub fn run_cdp_attach(
                 "audit": audit_out,
                 "screenshot": shot_out,
                 "steps": step_logs,
+                "console_logs": sess.console_logs,
+                "network_events": sess.network_events,
                 "js_errors": sess.js_errors,
                 "network_errors": sess.network_errors,
             }))
@@ -852,6 +954,12 @@ pub fn run_cdp_attach(
         }
         for sl in &step_logs {
             println!("  - {sl}");
+        }
+        for cl in &sess.console_logs {
+            println!("  log: {cl}");
+        }
+        for ne in &sess.network_events {
+            println!("  net: {ne}");
         }
         for je in &sess.js_errors {
             println!("  ! {je}");

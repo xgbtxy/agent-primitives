@@ -56,6 +56,9 @@ struct ExecCli {
 #[cfg_attr(not(windows), allow(dead_code))]
 struct HealRegexes {
     posix_only: Regex,
+    ps_cmdlet: Regex,
+    slow_grep: Regex,
+    py_win_backslash: Regex,
     curl_cmd: Regex,
     dev_null: Regex,
     bare_amp_url: Regex,
@@ -69,11 +72,52 @@ fn heal_re() -> &'static HealRegexes {
             r"(<<-?\s*['\x22]?[A-Za-z_]\w*|(?:^|[;&|]\s*)export\s+[A-Za-z_]\w*=|(?:^|[;&|]\s*)(?:if\s+\[|for\s+\w+\s+in\b)|\|\s*(?:head|tail|grep|egrep|awk|sed|wc|cut|tr|xargs)\b)",
         )
         .unwrap(),
+        ps_cmdlet: Regex::new(
+            r"(?i)(?:^|[;&|]\s*)(?:Get-Content|Get-ChildItem|Select-String|Get-Date|ForEach-Object|ConvertFrom-Json|Invoke-WebRequest|Invoke-RestMethod|Test-Path|Set-Content)\b",
+        )
+        .unwrap(),
+        slow_grep: Regex::new(
+            r#"^\s*grep\s+-[rR][nwiEH]*\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$"#,
+        )
+        .unwrap(),
+        py_win_backslash: Regex::new(r#"(?i)\b(?:python3?|py)\s+-c\s+.*['"][A-Za-z]:\\"#).unwrap(),
         curl_cmd: Regex::new(r"(^|[;|&(\s])curl(\s+(?:-[A-Za-z-]|https?://))").unwrap(),
         dev_null: Regex::new(r"([12]?>+\s*)/dev/null\b").unwrap(),
         bare_amp_url: Regex::new(r#"(^|[\s=])(https?://[^\s'"`;&|]+&[^\s'"`;&|]+)"#).unwrap(),
         port_in_use: Regex::new(r"(?i)(?:EADDRINUSE|address already in use|10048).*?(?::(\d{2,5})\b|\bport\s+(\d{2,5})\b)").unwrap(),
     })
+}
+
+/// Detect bare recursive GNU `grep -rn <pat> [path]` (which hangs 60-180s on large Windows trees)
+/// and rewrite cleanly to sub-50ms `ap search <pat> <path>`.
+pub fn try_accelerate_slow_grep(raw: &str) -> Option<String> {
+    if raw.contains('|') || raw.contains(';') || raw.contains("&&") || raw.contains('>') {
+        return None;
+    }
+    let cap = heal_re().slow_grep.captures(raw)?;
+    let pat = cap
+        .get(1)
+        .or_else(|| cap.get(2))
+        .or_else(|| cap.get(3))
+        .map(|m| m.as_str())?;
+    let target = cap
+        .get(4)
+        .or_else(|| cap.get(5))
+        .or_else(|| cap.get(6))
+        .map(|m| m.as_str())
+        .unwrap_or(".");
+    let ap_bin = std::env::current_exe()
+        .ok()
+        .filter(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("ap"))
+                .unwrap_or(false)
+        })
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "ap".to_string());
+    let pat_esc = pat.replace('"', "\\\"");
+    Some(format!("\"{ap_bin}\" search \"{pat_esc}\" \"{target}\""))
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -132,12 +176,38 @@ pub fn heal_windows_command(
 ) -> (ShellKind, String, Vec<&'static str>) {
     let re = heal_re();
     let mut heals: Vec<&'static str> = Vec::new();
-    if has_git_bash && re.posix_only.is_match(raw) {
+    if let Some(fast_search) = try_accelerate_slow_grep(raw) {
+        heals.push("slow-grep->ap-search");
+        return (
+            if has_pwsh7 {
+                ShellKind::Pwsh7
+            } else {
+                ShellKind::PowerShell5
+            },
+            format!("& {fast_search}"),
+            heals,
+        );
+    }
+    let has_ps_cmdlet = re.ps_cmdlet.is_match(raw);
+    if has_git_bash && !has_ps_cmdlet && re.posix_only.is_match(raw) {
         heals.push("posix->git-bash");
         return (ShellKind::GitBash, raw.to_string(), heals);
     }
 
     let mut out = raw.to_string();
+    if has_ps_cmdlet {
+        heals.push("ps-cmdlet->pwsh");
+    }
+    if re.py_win_backslash.is_match(&out) {
+        static WIN_DRIVE_BS: OnceLock<Regex> = OnceLock::new();
+        let drv = WIN_DRIVE_BS.get_or_init(|| Regex::new(r#"([A-Za-z]:)(\\[^\s'"]+)"#).unwrap());
+        out = drv
+            .replace_all(&out, |caps: &regex::Captures| {
+                format!("{}{}", &caps[1], caps[2].replace('\\', "/"))
+            })
+            .to_string();
+        heals.push("py-win-backslash->slash");
+    }
     if re.curl_cmd.is_match(&out) {
         out = re
             .curl_cmd
@@ -370,6 +440,11 @@ fn build_shell_command(raw_cmd: &str) -> (Command, Vec<&'static str>) {
     }
     #[cfg(not(windows))]
     {
+        if let Some(fast_search) = try_accelerate_slow_grep(raw_cmd) {
+            let mut c = Command::new("sh");
+            c.args(["-c", &fast_search]);
+            return (c, vec!["slow-grep->ap-search"]);
+        }
         let mut c = Command::new("sh");
         c.args(["-c", raw_cmd]);
         (c, Vec::new())
@@ -652,5 +727,24 @@ mod tests {
         let (k2, _, tags2) = heal_windows_command("cat << 'EOF'\nhello\nEOF", true, true);
         assert_eq!(k2, ShellKind::GitBash);
         assert!(tags2.contains(&"posix->git-bash"));
+
+        // Bare recursive GNU `grep -rn` auto-accelerates to `ap search`
+        let (_, h3, tags3) = heal_windows_command("grep -rn 'secretToken' src", true, true);
+        assert!(h3.contains("search \"secretToken\" \"src\""));
+        assert!(tags3.contains(&"slow-grep->ap-search"));
+
+        // PowerShell cmdlet mixed with Unix pipe stays on PowerShell (never fails as command-not-found in Git Bash)
+        let (k4, _, tags4) = heal_windows_command("Get-Content app.log | head -n 5", true, true);
+        assert_eq!(k4, ShellKind::Pwsh7);
+        assert!(tags4.contains(&"ps-cmdlet->pwsh"));
+
+        // Unescaped Windows drive backslash inside `python -c` auto-normalizes to `/`
+        let (_, h5, tags5) = heal_windows_command(
+            r#"python -c "print(open('C:\Users\demo\a.txt').read())""#,
+            true,
+            true,
+        );
+        assert!(h5.contains("C:/Users/demo/a.txt"));
+        assert!(tags5.contains(&"py-win-backslash->slash"));
     }
 }

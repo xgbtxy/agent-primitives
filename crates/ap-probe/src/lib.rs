@@ -1,5 +1,6 @@
 pub mod cdp;
 pub mod fuzz;
+pub mod http_probe;
 pub mod mutate;
 pub mod ports;
 pub mod runtime;
@@ -155,7 +156,7 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Attach to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list, --target, --eval, --audit, --screenshot, --stdin) without killing the host app
+    /// Attach to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list, --target, --eval, --audit, --screenshot, --watch-ms, --stdin) without killing the host app
     Cdp {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -173,6 +174,9 @@ enum SubCmd {
         screenshot: Option<PathBuf>,
         #[arg(long)]
         stdin: bool,
+        /// Non-blocking bounded event watch window in ms (captures async console logs & network responses without hanging)
+        #[arg(long, default_value_t = 0)]
+        watch_ms: u64,
         #[arg(long)]
         json: bool,
     },
@@ -183,6 +187,28 @@ enum SubCmd {
         /// Probe localhost ports for `/json/version` to auto-badge `[CDP READY]` debugging ports (default: true)
         #[arg(long, default_value_t = true)]
         probe_cdp: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Zero-dependency HTTP/API diagnostic probe (single URL or `--batch-stdin` multi-request batch with headers, timeout & loopback proxy bypass)
+    Http {
+        /// Optional single target URL (omit when using `--batch-stdin`)
+        url: Option<String>,
+        #[arg(short = 'X', long, default_value = "GET")]
+        method: String,
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        #[arg(short = 'd', long)]
+        body: Option<String>,
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+        #[arg(short = 'k', long)]
+        insecure: bool,
+        #[arg(short = 'L', long)]
+        follow: bool,
+        /// Read `METHOD URL [BODY]` lines from stdin to probe up to 25 endpoints in one call
+        #[arg(long)]
+        batch_stdin: bool,
         #[arg(long)]
         json: bool,
     },
@@ -363,6 +389,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             audit,
             screenshot,
             stdin,
+            watch_ms,
             json,
         } => {
             let mut steps = String::new();
@@ -378,6 +405,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 audit,
                 screenshot.as_deref(),
                 &steps,
+                watch_ms,
                 json,
             )
         }
@@ -386,5 +414,26 @@ pub fn run_cli(args: &[String]) -> i32 {
             probe_cdp,
             json,
         } => ports::run_ports_radar(port, probe_cdp, json),
+        SubCmd::Http {
+            url,
+            method,
+            headers,
+            body,
+            timeout,
+            insecure,
+            follow,
+            batch_stdin,
+            json,
+        } => http_probe::run_http_cli(
+            url.as_deref(),
+            &method,
+            &headers,
+            body.as_deref(),
+            timeout,
+            insecure,
+            follow,
+            batch_stdin,
+            json,
+        ),
     }
 }

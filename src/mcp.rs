@@ -11,11 +11,11 @@ fn mcp_tools_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "target": { "type": "string", "description": "Local file/folder path or http(s):// URL" },
-                    "lines": { "type": "string", "description": "Optional line window, e.g. '1-120'" },
+                    "lines": { "type": "string", "description": "Optional line window or comma-separated multi-ranges, e.g. '1-30,120-160'" },
                     "query": { "type": "string", "description": "Optional keyword/regex filter for rows, minified slices, archive entries, or binary strings" },
                     "sheet": { "type": "string", "description": "Optional worksheet filter for .xlsx" },
                     "entry": { "type": "string", "description": "Optional archive entry path inside .asar/.zip/.vsix/.jar/.apk/.whl" },
-                    "offset": { "type": "integer", "description": "Optional byte offset for slicing giant/minified single-line bundles" },
+                    "offset": { "type": "string", "description": "Optional byte offset or comma-separated multi-offsets (e.g. '18000,95000') for slicing minified bundles in 1 call" },
                     "chars": { "type": "integer", "description": "Optional slice window length with offset (default: 2400)" },
                     "pretty": { "type": "boolean", "description": "Pretty-format minified JS/JSON snippets" },
                     "json_path": { "type": "string", "description": "Zero-jq JSON/JSONL path query (e.g. 'items[*].name' or '..token')" },
@@ -46,18 +46,22 @@ fn mcp_tools_schema() -> Value {
         },
         {
             "name": "ap_search",
-            "description": "Fast .gitignore-aware regex search across codebases (with AST spans), giant/minified JS bundles (auto byte-window + pretty-print), Electron .asar & .zip/.vsix archives, Office/PDF docs, and binary ASCII/UTF-16LE strings.",
+            "description": "Fast single-pass .gitignore-aware regex search (supports multi-pattern batching via `patterns`) across codebases (with AST spans/blocks), minified JS bundles, SourceMaps (`.map`), Electron `.asar`/`.vsix`/`.zip`, Office/PDF docs, and binary ASCII/UTF-16LE strings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Regex or literal search pattern" },
+                    "pattern": { "type": "string", "description": "Primary regex or literal search pattern" },
+                    "patterns": {
+                        "type": "array",
+                        "description": "Optional batch of extra regex patterns evaluated in the same single filesystem walk",
+                        "items": { "type": "string" }
+                    },
                     "path": { "type": "string", "description": "Directory or file to search (default: '.')" },
                     "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'asar,vsix,map'" },
                     "pretty": { "type": "boolean", "description": "Pretty-format matches inside minified single-line bundles" },
                     "multiline": { "type": "boolean", "description": "Enable cross-line multiline regex matching" },
                     "block": { "type": "boolean", "description": "Emit full enclosing Tree-sitter AST function/class block around each hit" }
-                },
-                "required": ["pattern"]
+                }
             }
         },
         {
@@ -226,7 +230,7 @@ fn mcp_tools_schema() -> Value {
     },
     {
         "name": "ap_cdp",
-        "description": "Attach directly to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list targets, --target filter, --eval async JS, --audit layout, --screenshot PNG, or interactive steps) without killing the host app.",
+        "description": "Attach directly to an ALREADY-RUNNING Chrome/Edge/Electron/WebView CDP debugging port (--list targets, --target filter, --eval async JS, --watch-ms non-blocking console/network capture, --audit layout, --screenshot PNG) without killing the host app.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -235,8 +239,34 @@ fn mcp_tools_schema() -> Value {
                 "list": { "type": "boolean", "description": "List all live debuggable targets" },
                 "target": { "type": "string", "description": "Substring matching target title, url, or id" },
                 "eval": { "type": "string", "description": "JavaScript expression to evaluate (awaits Promises)" },
+                "watch_ms": { "type": "integer", "description": "Optional non-blocking bounded event watch window in ms (captures async console logs & network responses)" },
                 "audit": { "type": "boolean", "description": "Run live DOM layout/overflow/overlap check" },
                 "screenshot": { "type": "string", "description": "Optional PNG screenshot output path" }
+            }
+        }
+    },
+    {
+        "name": "ap_http",
+        "description": "Zero-dependency HTTP/API diagnostic probe: execute single or batch (`batch_requests`) HTTP requests with custom headers, body, timeout, and automatic loopback proxy bypass.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "Target HTTP(S) URL for single request" },
+                "method": { "type": "string", "description": "HTTP method (default: 'GET')" },
+                "headers": {
+                    "type": "array",
+                    "description": "Optional headers like ['Authorization: Bearer ...']",
+                    "items": { "type": "string" }
+                },
+                "body": { "type": "string", "description": "Optional raw request body" },
+                "batch_requests": {
+                    "type": "array",
+                    "description": "Optional list of 'METHOD URL [BODY]' lines to run in one batch call",
+                    "items": { "type": "string" }
+                },
+                "timeout": { "type": "integer", "description": "Per-request timeout in seconds (default: 15)" },
+                "insecure": { "type": "boolean", "description": "Skip TLS verification (-k)" },
+                "follow": { "type": "boolean", "description": "Follow HTTP redirects (-L)" }
             }
         }
     },
@@ -385,9 +415,14 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 cli.push("--entry".to_string());
                 cli.push(ent.to_string());
             }
-            if let Some(off) = args.get("offset").and_then(Value::as_u64) {
-                cli.push("--offset".to_string());
-                cli.push(off.to_string());
+            if let Some(off_val) = args.get("offset") {
+                if let Some(s) = off_val.as_str().filter(|x| !x.trim().is_empty()) {
+                    cli.push("--offset".to_string());
+                    cli.push(s.to_string());
+                } else if let Some(n) = off_val.as_u64() {
+                    cli.push("--offset".to_string());
+                    cli.push(n.to_string());
+                }
             }
             if let Some(ch) = args.get("chars").and_then(Value::as_u64) {
                 cli.push("--chars".to_string());
@@ -459,19 +494,34 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             run_self_captured(&cli, None)
         }
         "ap_search" => {
-            let pat = args
+            let mut all_pats: Vec<String> = Vec::new();
+            if let Some(p) = args
                 .get("pattern")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if pat.is_empty() {
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                all_pats.push(p.to_string());
+            }
+            if let Some(arr) = args.get("patterns").and_then(Value::as_array) {
+                for item in arr {
+                    if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        all_pats.push(s.to_string());
+                    }
+                }
+            }
+            if all_pats.is_empty() {
                 return (
                     false,
-                    "Pass non-empty `pattern` to `ap_search`.".to_string(),
+                    "Pass non-empty `pattern` or `patterns` to `ap_search`.".to_string(),
                 );
             }
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let mut cli = vec!["search".to_string(), pat.to_string(), path.to_string()];
+            let mut cli = vec!["search".to_string(), all_pats[0].clone(), path.to_string()];
+            for extra in all_pats.iter().skip(1) {
+                cli.push("--pat".to_string());
+                cli.push(extra.clone());
+            }
             if let Some(ext) = args
                 .get("ext")
                 .and_then(Value::as_str)
@@ -882,7 +932,71 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 cli.push("--screenshot".into());
                 cli.push(sp.into());
             }
+            if let Some(wm) = args.get("watch_ms").and_then(Value::as_u64) {
+                if wm > 0 {
+                    cli.push("--watch-ms".into());
+                    cli.push(wm.to_string());
+                }
+            }
             run_self_captured(&cli, None)
+        }
+        "ap_http" => {
+            let mut cli = vec!["probe".into(), "http".into()];
+            if let Some(u) = args
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push(u.trim().to_string());
+            }
+            if let Some(m) = args
+                .get("method")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("-X".into());
+                cli.push(m.trim().to_string());
+            }
+            if let Some(hdrs) = args.get("headers").and_then(Value::as_array) {
+                for h in hdrs.iter().filter_map(Value::as_str) {
+                    cli.push("-H".into());
+                    cli.push(h.to_string());
+                }
+            }
+            if let Some(b) = args
+                .get("body")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("-d".into());
+                cli.push(b.to_string());
+            }
+            if let Some(t) = args.get("timeout").and_then(Value::as_u64) {
+                cli.push("--timeout".into());
+                cli.push(t.to_string());
+            }
+            if args
+                .get("insecure")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli.push("--insecure".into());
+            }
+            if args.get("follow").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--follow".into());
+            }
+            let batch_lines: Vec<&str> = args
+                .get("batch_requests")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !batch_lines.is_empty() {
+                cli.push("--batch-stdin".into());
+                let payload = batch_lines.join("\n");
+                run_self_captured(&cli, Some(&payload))
+            } else {
+                run_self_captured(&cli, None)
+            }
         }
         "ap_ports" => {
             let mut cli = vec!["probe".into(), "ports".into()];

@@ -18,7 +18,7 @@ use zip::ZipArchive;
 struct ReadCli {
     /// File path or http(s):// URL to read
     target: String,
-    /// Optional line range (e.g. `1-120` or `200:350`)
+    /// Optional line range or comma-separated batch ranges (e.g. `1-120` or `10-40,120-160,300-340`)
     #[arg(long)]
     lines: Option<String>,
     /// Filter or search rows/paragraphs matching keyword or regex
@@ -30,9 +30,9 @@ struct ReadCli {
     /// Virtual archive entry path to read inside .asar/.zip/.vsix/.jar/.apk/.whl without extracting
     #[arg(long)]
     entry: Option<String>,
-    /// Byte offset for slicing giant/minified single-line bundles (e.g. --offset 184920 --chars 2000 --pretty)
+    /// Byte offset or comma-separated batch offsets for minified bundles (e.g. --offset 18000,95000 --chars 1200 --pretty)
     #[arg(long)]
-    offset: Option<usize>,
+    offset: Option<String>,
     /// Character/byte window size when slicing with --offset (default: 2400)
     #[arg(long, default_value_t = 2400)]
     chars: usize,
@@ -982,30 +982,91 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 1;
             }
         }
-    } else if let Some(off) = cli.offset {
-        let s = floor_boundary(&converted, off);
-        let e = ceil_boundary(&converted, s.saturating_add(cli.chars.max(120)));
-        let raw_slice = &converted[s..e];
-        let body = if cli.pretty {
-            crate::binary::pretty_format_js_snippet(raw_slice)
-        } else {
-            raw_slice.to_string()
-        };
-        format!(
-            "# READ `{label}` [offset {s}..{e} of {}B | {format_tag}{}]\n{body}",
-            converted.len(),
-            if cli.pretty { " | pretty" } else { "" }
-        )
-    } else if let Some(ref lspec) = cli.lines {
-        if let Some((s, e)) = parse_line_window(lspec, total_lines) {
-            let slice = (s..=e)
-                .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("# READ `{label}` [L{s}-L{e} of {total_lines} | {format_tag}]\n{slice}")
-        } else {
-            eprintln!("[ap read] invalid --lines `{lspec}` (expected START-END, e.g. 1-120)");
+    } else if let Some(ref off_spec) = cli.offset {
+        let mut offsets: Vec<usize> = Vec::new();
+        for tok in off_spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match tok.parse::<usize>() {
+                Ok(n) => offsets.push(n),
+                Err(_) => {
+                    eprintln!("[ap read] invalid --offset `{tok}` (expected byte offset(s), e.g. 18000 or 18000,95000)");
+                    return 2;
+                }
+            }
+        }
+        if offsets.is_empty() {
+            eprintln!("[ap read] empty --offset value");
             return 2;
+        }
+        if offsets.len() == 1 {
+            let s = floor_boundary(&converted, offsets[0]);
+            let e = ceil_boundary(&converted, s.saturating_add(cli.chars.max(120)));
+            let raw_slice = &converted[s..e];
+            let body = if cli.pretty {
+                crate::binary::pretty_format_js_snippet(raw_slice)
+            } else {
+                raw_slice.to_string()
+            };
+            format!(
+                "# READ `{label}` [offset {s}..{e} of {}B | {format_tag}{}]\n{body}",
+                converted.len(),
+                if cli.pretty { " | pretty" } else { "" }
+            )
+        } else {
+            let mut blocks = Vec::new();
+            for off in offsets.into_iter().take(12) {
+                let s = floor_boundary(&converted, off);
+                let e = ceil_boundary(&converted, s.saturating_add(cli.chars.max(120)));
+                let raw_slice = &converted[s..e];
+                let body = if cli.pretty {
+                    crate::binary::pretty_format_js_snippet(raw_slice)
+                } else {
+                    raw_slice.to_string()
+                };
+                blocks.push(format!("## offset {s}..{e}\n{body}"));
+            }
+            format!(
+                "# READ `{label}` [batch {} offset window(s) of {}B | {format_tag}{}]\n{}",
+                blocks.len(),
+                converted.len(),
+                if cli.pretty { " | pretty" } else { "" },
+                blocks.join("\n\n")
+            )
+        }
+    } else if let Some(ref lspec) = cli.lines {
+        let parts: Vec<&str> = lspec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() <= 1 {
+            if let Some((s, e)) = parse_line_window(lspec, total_lines) {
+                let slice = (s..=e)
+                    .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("# READ `{label}` [L{s}-L{e} of {total_lines} | {format_tag}]\n{slice}")
+            } else {
+                eprintln!("[ap read] invalid --lines `{lspec}` (expected START-END, e.g. 1-120 or 10-40,120-160)");
+                return 2;
+            }
+        } else {
+            let mut blocks = Vec::new();
+            for p in parts.into_iter().take(12) {
+                let Some((s, e)) = parse_line_window(p, total_lines) else {
+                    eprintln!("[ap read] invalid --lines range `{p}` in `{lspec}`");
+                    return 2;
+                };
+                let slice = (s..=e)
+                    .map(|ln| format!("{ln:5}: {}", all_lines[ln - 1]))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                blocks.push(format!("## L{s}-L{e}\n{slice}"));
+            }
+            format!(
+                "# READ `{label}` [batch {} line window(s) of {total_lines} | {format_tag}]\n{}",
+                blocks.len(),
+                blocks.join("\n\n")
+            )
         }
     } else if let Some(ref q) = cli
         .query

@@ -13,9 +13,13 @@ Zero Playwright/Node installs, zero fragile Python WebSocket scripts, zero orpha
 # 1. Discover local listening TCP ports + PIDs + auto-badged `[CDP READY]` debugging ports
 ap probe ports
 
-# 2. Attach to an ALREADY-RUNNING Chrome/Edge/Electron CDP port (never kills the host app!)
+# 2. Attach to an ALREADY-RUNNING Chrome/Edge/Electron CDP port (never kills host app; `--watch-ms` captures async console & network events cleanly without hanging!)
 ap probe cdp --port 9222 --list
-ap probe cdp --port 9222 --target "Dashboard" --eval "document.title" --audit
+ap probe cdp --port 9222 --target "Dashboard" --eval "document.title" --watch-ms 1500 --audit
+
+# 3. Zero-dependency single or batch HTTP diagnostic probe (auto-bypasses loopback proxy)
+ap probe http http://127.0.0.1:8080/api/health
+printf "GET http://127.0.0.1:8080/api/health\nPOST http://127.0.0.1:8080/api/echo {\"ok\":true}\n" | ap probe http --batch-stdin --json
 
 # 2. Desktop (1280x800) + Mobile (390x844) layout, overflow, button-overlap, JS & 4xx/5xx network audit
 ap probe ui --cwd . --start "node src/server.mjs"
