@@ -5622,3 +5622,54 @@ fn test_v221_deepseek_cache_warmer_and_static_turn0_guidelines() {
     assert_eq!(v2["pi_runtime"]["hints"].as_array().unwrap().len(), 0);
     assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_v222_hashline_read_anchor_expand_edit_and_noncode_outline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v222");
+    let ap_home = root.join("ap_home_v222");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function hashlineTag",
+        "export function annotateReadWithHashlines",
+        "export function extractNonCodeOutline",
+        "hashline-anchor-unique",
+        "hashline-anchor-expanded",
+        "const SIEVE_HARD_CHARS = 20000;",
+        "const SIEVE_STRUCTURED_LINES = 180;",
+        "File/path not found inside codemode",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.22 feature '{needle}'");
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}

@@ -864,10 +864,10 @@ const BATCH_TIP_COOLDOWN_TURNS = 25;
 const WRITE_OVERWRITE_TIP_CHARS = 4000;
 const WRITE_TIP_COOLDOWN_TURNS = 15;
 const LARGE_CODE_READ_CHARS = 20000;
-const SIEVE_HARD_CHARS = 24000;
+const SIEVE_HARD_CHARS = 20000;
 const SIEVE_STRUCTURED_CHARS = 14000;
 const SIEVE_GIANT_LINE_CHARS = 4500;
-const SIEVE_STRUCTURED_LINES = 250;
+const SIEVE_STRUCTURED_LINES = 180;
 
 // Two-tier batch observation masking constants (keeps DeepSeek V4.1 Flash in its <240k Peak-IQ zone)
 const MASK_PREFIX = "[ap masked stale toolResult:";
@@ -1090,18 +1090,21 @@ export function classifyCodemodeFailureTip(outText: string): string {{
 	if (/\bvalidation\b|must be|required property/i.test(outText)) {{
 		return `[ap codemode-tip] Tool argument schema mismatch; run await describeTool("mcp__agent_primitives__<name>") to inspect exact required fields and types.`;
 	}}
+	if (/\bENOENT\b|no such file|does not exist|cannot find the path/i.test(outText)) {{
+		return `[ap codemode-tip] File/path not found inside codemode; verify exact paths via tools.mcp__agent_primitives__ap_atlas / ap_search before reading or editing.`;
+	}}
 	return `[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs (dashes become underscores on tools.*) & typed structuredContent fields.`;
 }}
 
 /**
- * Static, 100% KV-cache-locked DeepSeek Flash execution guidelines (~85 tokens total, cached at $0.006/1M)
- * injected via `before_agent_start` -> `systemPromptOptions.promptGuidelines` to crush serial 1-tool streaks
- * and QuickJS `codemode` ReferenceError/TypeError mistakes at Turn 0.
+ * Static, 100% KV-cache-locked DeepSeek Flash execution guidelines (~95 tokens total, cached at $0.006/1M)
+ * injected via `before_agent_start` -> `systemPromptOptions.promptGuidelines` to crush serial 1-tool streaks,
+ * QuickJS `codemode` ReferenceError/TypeError mistakes, and duplicate-line `edit` ambiguity at Turn 0.
  */
 export const AP_DEEPSEEK_GUIDELINES: readonly string[] = [
 	"Batch independent read/search/check calls in parallel tool calls or a single codemode script with Promise.allSettled([...]); keep cross-turn structured state in store(key, value)/load(key).",
 	"In codemode (QuickJS sandbox, no Node fs/path/require/process/fetch): tools.bash(...) returns {{ output, exit_code, truncated }} (read .output), tools.read(...) returns a string, and tools.mcp__agent_primitives__* returns parsed {{ content, structuredContent, isError }}.",
-	"Prefer ap CLI or tools.mcp__agent_primitives__* (ap_read/ap_search/ap_query/ap_atlas/ap_edit/ap_verify) for AST symbol reads, multi-pattern search, Office/PDF/SQLite/PE/ELF/hex inspection, and verification; keep read-only shell probes <=90s.",
+	"Direct read output uses L:HH| hashline anchors (pass L:HH| lines in edit oldText to disambiguate duplicate lines in 1 shot, or use plain oldText); prefer ap CLI / tools.mcp__agent_primitives__* for AST/search/Office/SQL/binary/verify tasks and keep read-only shell probes <=90s.",
 ];
 
 export function injectDeepSeekGuidelines(guidelines: string[]): boolean {{
@@ -1253,6 +1256,186 @@ export function classifyShellFailureTip(
 	return undefined;
 }}
 
+/**
+ * Deterministic 2-hex FNV-1a content hash tag for Hashline (`L:HH|line`) anchored reading & editing
+ * (inspired by Can Boluk's *The Harness Problem* / oh-my-pi; whitespace-trimmed & 100% KV-cache safe).
+ */
+export function hashlineTag(line: string): string {{
+	const s = line.trim();
+	let h = 2166136261;
+	for (let i = 0; i < s.length; i++) {{
+		h ^= s.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}}
+	return ((h ^ (h >>> 8) ^ (h >>> 16) ^ (h >>> 24)) & 0xff).toString(16).padStart(2, "0");
+}}
+
+/**
+ * Annotate direct built-in `read` text output with compact `L:HH|` hashline anchors while
+ * preserving Pi's trailing truncation banner and leaving `codemode` raw `structuredContent` untouched.
+ */
+export function annotateReadWithHashlines(outText: string, startOffset = 1): string | undefined {{
+	if (!outText || outText.length > 60_000) return undefined;
+	const trailerRe = /\n\n(\[(?:Showing lines [^\]]+|\d+ more lines in file[^\]]+|Truncated[^\]]+)\])\s*$/;
+	const tm = outText.match(trailerRe);
+	const body = tm ? outText.slice(0, tm.index) : outText;
+	const trailer = tm ? outText.slice(tm.index) : "";
+	const lines = body.split("\n");
+	if (lines.length < 2) return undefined;
+	// Skip minified / giant single-line bundles
+	if (lines.some((l) => l.length > 600)) return undefined;
+	// Skip if already line-numbered or hashline-tagged
+	const sampleNonBlank = lines.filter((l) => l.trim().length > 0).slice(0, 2);
+	if (sampleNonBlank.length >= 1 && sampleNonBlank.every((l) => /^\s*\d+(?::[0-9a-f]{{2}})?(?::|\||\t)/.test(l))) {{
+		return undefined;
+	}}
+	const base = Number.isFinite(startOffset) && startOffset >= 1 ? Math.floor(startOffset) : 1;
+	const tagged = lines.map((l, idx) => `${{base + idx}}:${{hashlineTag(l)}}|${{l}}`).join("\n");
+	return tagged + trailer;
+}}
+
+/**
+ * Fast (<2ms) structural outline for truncated NON-CODE files (.md, .toml, .ini, .yaml, .json, .log, .jsonl, .csv)
+ * so DeepSeek jumps straight to the target offset instead of blind sequential paging.
+ */
+export function extractNonCodeOutline(filePath: string, content: string): string | undefined {{
+	if (!filePath || !content) return undefined;
+	const lines = content.replace(/\r\n/g, "\n").split("\n");
+	const total = lines.length;
+	if (total < 10) return undefined;
+	const ext = (filePath.match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toLowerCase();
+	const items: string[] = [];
+	if (ext === "md" || ext === "markdown") {{
+		for (let i = 0; i < total && items.length < 28; i++) {{
+			const m = lines[i].match(/^(#{{1,4}}\s+.+)$/);
+			if (m) items.push(`L${{i + 1}}: ${{m[1].trim().slice(0, 90)}}`);
+		}}
+		if (items.length > 0) {{
+			return `[ap read-outline] Markdown TOC (${{total}} lines; jump with read(offset=...)):\n${{items.join("\n")}}`;
+		}}
+	}} else if (ext === "toml" || ext === "ini" || ext === "cfg") {{
+		for (let i = 0; i < total && items.length < 28; i++) {{
+			const m = lines[i].match(/^\s*(\[[^\]]+\])/);
+			if (m) items.push(`L${{i + 1}}: ${{m[1].slice(0, 80)}}`);
+		}}
+		if (items.length > 0) {{
+			return `[ap read-outline] Config sections (${{total}} lines; jump with read(offset=...)):\n${{items.join("\n")}}`;
+		}}
+	}} else if (ext === "yml" || ext === "yaml") {{
+		for (let i = 0; i < total && items.length < 28; i++) {{
+			const m = lines[i].match(/^([A-Za-z0-9_.-]+:\s*(?:\S.*)?)$/);
+			if (m) items.push(`L${{i + 1}}: ${{m[1].slice(0, 80)}}`);
+		}}
+		if (items.length > 0) {{
+			return `[ap read-outline] YAML keys (${{total}} lines; jump with read(offset=...)):\n${{items.join("\n")}}`;
+		}}
+	}} else if (ext === "json" || ext === "jsonc") {{
+		for (let i = 0; i < total && items.length < 28; i++) {{
+			const m = lines[i].match(/^(?:  |\t)("[^"]+"\s*:)/);
+			if (m) items.push(`L${{i + 1}}: ${{m[1].slice(0, 80)}}`);
+		}}
+		if (items.length > 0) {{
+			return `[ap read-outline] JSON keys (${{total}} lines; jump with read(offset=...) or ap_read(json_path=...)):\n${{items.join("\n")}}`;
+		}}
+	}}
+	return `[ap read-tip] Truncated large file (${{total}} lines); jump directly with read(offset=...) or filter via ap_search / ap_read(json_path=...) / ap_query instead of paging serially.`;
+}}
+
+function countSubstringOccurrences(haystack: string, needle: string): number {{
+	if (!needle) return 0;
+	let count = 0;
+	let pos = 0;
+	while (true) {{
+		const idx = haystack.indexOf(needle, pos);
+		if (idx < 0) break;
+		count++;
+		if (count > 2) return count;
+		pos = idx + 1;
+	}}
+	return count;
+}}
+
+function stripHashlinePrefixes(lines: readonly string[]): string[] {{
+	return lines.map((l) => {{
+		const m = l.match(/^\s*\d+:[0-9a-f]{{2}}\|(.*)$/);
+		return m ? m[1] : l;
+	}});
+}}
+
+/**
+ * Tier-0A Hashline anchor resolution: supports BOTH single-line AND multi-line `L:HH|...` anchors,
+ * verifies exact 1-based line number + 2-hex FNV hash against disk (zero stale-edit risk), and
+ * symmetrically auto-expands surrounding context lines when the target slice occurs multiple times!
+ */
+function resolveHashlineAnchorEdit(
+	lfFile: string,
+	fileLines: readonly string[],
+	rawOldLines: readonly string[],
+	lfNew: string,
+): {{ oldText: string; newText: string; strategy: string }} | undefined {{
+	const hlRe = /^\s*(\d+):([0-9a-f]{{2}})\|(.*)$/;
+	const parsed: Array<{{ lineNum: number; hash: string; body: string }} | null> = [];
+	let firstLineNum = -1;
+	let lastLineNum = -1;
+	let anchorCount = 0;
+	for (const l of rawOldLines) {{
+		if (l.trim().length === 0) {{
+			parsed.push(null);
+			continue;
+		}}
+		const m = l.match(hlRe);
+		if (!m) return undefined;
+		const num = Number(m[1]);
+		if (!Number.isInteger(num) || num < 1 || num > fileLines.length) return undefined;
+		if (firstLineNum < 0) {{
+			firstLineNum = num;
+		}} else if (num !== lastLineNum + 1) {{
+			// Allow blank lines between sequential anchored lines only if exact index aligns
+			return undefined;
+		}}
+		const diskLine = fileLines[num - 1];
+		if (hashlineTag(diskLine) !== m[2]) return undefined;
+		const body = m[3] ?? "";
+		if (body.trim().length > 0 && body.trim() !== diskLine.trim()) return undefined;
+		parsed.push({{ lineNum: num, hash: m[2], body }});
+		lastLineNum = num;
+		anchorCount++;
+	}}
+	if (anchorCount === 0 || firstLineNum < 1) return undefined;
+	const startIdx = firstLineNum - 1;
+	const endIdx = lastLineNum; // exclusive
+	const matchedDisk = fileLines.slice(startIdx, endIdx);
+	const rawOldSlice = matchedDisk.join("\n");
+	const strippedOldBodies = parsed.filter((p): p is NonNullable<typeof p> => p !== null).map((p) => p.body);
+	const cleanNew = stripHashlinePrefixes(lfNew.split("\n")).join("\n");
+	const effectiveNew = reindentReplacement(cleanNew, strippedOldBodies, matchedDisk);
+
+	if (countSubstringOccurrences(lfFile, rawOldSlice) === 1) {{
+		return {{
+			oldText: rawOldSlice,
+			newText: effectiveNew,
+			strategy: "hashline-anchor-unique",
+		}};
+	}}
+	// Duplicate line(s) on disk! Symmetrically expand with adjacent disk lines around the verified anchor until 100% unique
+	for (let pad = 1; pad <= 8; pad++) {{
+		const lo = Math.max(0, startIdx - pad);
+		const hi = Math.min(fileLines.length, endIdx + pad);
+		const candOld = fileLines.slice(lo, hi).join("\n");
+		if (countSubstringOccurrences(lfFile, candOld) === 1) {{
+			const prefix = fileLines.slice(lo, startIdx);
+			const suffix = fileLines.slice(endIdx, hi);
+			const candNew = [...prefix, effectiveNew, ...suffix].join("\n");
+			return {{
+				oldText: candOld,
+				newText: candNew,
+				strategy: "hashline-anchor-expanded",
+			}};
+		}}
+	}}
+	return undefined;
+}}
+
 function stripSequentialLineNumbers(lines: readonly string[]): string[] | undefined {{
 	const nonBlank = lines.filter((l) => l.trim().length > 0);
 	if (nonBlank.length < 2) return undefined;
@@ -1324,7 +1507,10 @@ export function healEditBlock(
 
 	const fileLines = lfFile.split("\n");
 	const rawOldLines = lfOld.split("\n");
-	// Tier 0: Auto-strip accidental sequential line-number prefixes (e.g. `12: code` / `12:a3|code` copied from read/edit-closest/nl)
+	// Tier 0A: Exact verified Hashline `L:HH|...` anchor resolution (works on 1-line & duplicate lines via symmetric context expansion!)
+	const hlHit = resolveHashlineAnchorEdit(lfFile, fileLines, rawOldLines, lfNew);
+	if (hlHit) return hlHit;
+	// Tier 0B: Auto-strip accidental sequential line-number prefixes (e.g. `12: code` / `12:a3|code` copied from read/edit-closest/nl)
 	const strippedOld = stripSequentialLineNumbers(rawOldLines);
 	const oldLines = strippedOld ?? rawOldLines;
 	let effectiveNew = lfNew;
@@ -1490,12 +1676,12 @@ export function findAllEditOccurrenceLines(
 	}}
 	if (hits.length < 2) return undefined;
 	const shown = hits.slice(0, maxHits).map((idx) => {{
-		const prev = idx > 0 ? lines[idx - 1].trim().slice(0, 60) : "<BOF>";
-		const cur = lines[idx].trim().slice(0, 70);
-		return `L${{idx + 1}} (after: ${{prev}}): ${{cur}}`;
+		const prev = idx > 0 ? lines[idx - 1].trim().slice(0, 55) : "<BOF>";
+		const cur = lines[idx].trim().slice(0, 65);
+		return `L${{idx + 1}} [${{idx + 1}}:${{hashlineTag(lines[idx])}}|${{cur}}] (after: ${{prev}})`;
 	}});
 	const more = hits.length > maxHits ? ` (+${{hits.length - maxHits}} more)` : "";
-	return `[ap edit-multi] Found ${{hits.length}} occurrences${{more}} — add 1 unique surrounding line to oldText:\n${{shown.join("\n")}}`;
+	return `[ap edit-multi] Found ${{hits.length}} occurrences${{more}} — pass the exact L:HH| anchor or add 1 unique surrounding line to oldText:\n${{shown.join("\n")}}`;
 }}
 
 /**
@@ -1533,10 +1719,10 @@ export function findClosestEditWindow(fileContent: string, oldText: string): str
 	const end = Math.min(lines.length, bestStart + win);
 	const body = lines
 		.slice(bestStart, end)
-		.map((l, idx) => `${{bestStart + idx + 1}}: ${{l}}`)
+		.map((l, idx) => `${{bestStart + idx + 1}}:${{hashlineTag(l)}}|${{l}}`)
 		.join("\n")
 		.slice(0, 850);
-	return `[ap edit-closest] Closest lines on disk (L${{bestStart + 1}}-L${{end}}):\n${{body}}`;
+	return `[ap edit-closest] Closest lines on disk (L${{bestStart + 1}}-L${{end}}; pass L:HH| directly in edit oldText):\n${{body}}`;
 }}
 
 export function listCodemodeStoreKeys(branch: ReadonlyArray<Record<string, unknown>>): string[] {{
@@ -2124,6 +2310,7 @@ function extractEditedPathsFromTool(toolName: string, input: Record<string, unkn
 export default function (pi: ExtensionAPI) {{
 	const recentShellFps: string[] = [];
 	const unchangedReads = new Map<string, number>();
+	const outlinedPaths = new Set<string>();
 	const editedFilesThisRun = new Set<string>();
 	const builtInCodeEditsThisRun = new Set<string>();
 	const largeOverwriteCallIds = new Set<string>();
@@ -2161,6 +2348,7 @@ export default function (pi: ExtensionAPI) {{
 	const resetTransientState = () => {{
 		recentShellFps.length = 0;
 		unchangedReads.clear();
+		outlinedPaths.clear();
 		largeOverwriteCallIds.clear();
 		resetRunState();
 		stagnantHeavyTurns = 0;
@@ -3077,6 +3265,7 @@ export default function (pi: ExtensionAPI) {{
 		if (EDIT_TOOLS.has(baseTool)) {{
 			recentShellFps.length = 0;
 			unchangedReads.clear();
+			outlinedPaths.clear();
 			stagnantHeavyTurns = 0;
 			pendingThinkingNudge = false;
 
@@ -3230,41 +3419,70 @@ export default function (pi: ExtensionAPI) {{
 		let outText = workingContent[lastTextIdx].text as string;
 		let textMutated = false;
 
-		// A. Built-in `read` redundant re-read guard + truncated code file AST outline injection (<15ms)
+		// A. Built-in `read` Hashline (`L:HH|`) tagging + redundant re-read guard + universal truncated-file outline (<15ms)
 		if (event.toolName === "read" && !event.isError) {{
 			const p = String(event.input?.path ?? event.input?.file_path ?? "");
 			const off = String(event.input?.offset ?? "");
 			const lim = String(event.input?.limit ?? "");
+			const startOff = Math.max(1, Math.floor(Number(event.input?.offset) || 1));
+			const readDetails = event.details as {{ truncation?: {{ truncated?: boolean }} }} | undefined;
+			const isTruncated =
+				readDetails?.truncation?.truncated === true ||
+				/use offset=\d+|lines remaining|more lines in file|truncated to \d+/i.test(outText);
+			const hashed = annotateReadWithHashlines(outText, startOff);
+			if (hashed) {{
+				outText = hashed;
+				textMutated = true;
+				mutated = true;
+			}}
 			if (p) {{
 				const key = `${{p}}::${{off}}::${{lim}}`;
 				const hits = (unchangedReads.get(key) ?? 0) + 1;
 				unchangedReads.set(key, hits);
-				const readDetails = event.details as {{ truncation?: {{ truncated?: boolean }} }} | undefined;
-				const isTruncated =
-					readDetails?.truncation?.truncated === true ||
-					/use offset=\d+|lines remaining|truncated to \d+/i.test(outText);
 				if (hits >= REREAD_THRESHOLD) {{
 					outText += `\n[ap reread-guard] Exact unchanged slice (${{p}}) read ${{hits}}x already in this session. Avoid re-reading; use ap_search/ap_locate or proceed directly to edits.`;
 					guardsTriggered += 1;
+					textMutated = true;
 					mutated = true;
-				}} else if (isTruncated && CODE_FILE_EXT.test(p)) {{
+				}} else if (isTruncated) {{
 					const cwd = ctx?.cwd || process.cwd();
 					const absPath = isAbsolute(p) ? p : resolve(cwd, p);
-					if (existsSync(absPath)) {{
-						const ol = spawnSync(AP_BIN, ["read", absPath, "--outline"], {{
-							cwd,
-							encoding: "utf8",
-							timeout: 1500,
-							windowsHide: true,
-						}});
-						if (ol.status === 0 && ol.stdout?.trim()) {{
-							outText += `\n[ap read-outline] File was truncated; full AST symbol map (jump directly via read(offset=...) or ap_read(symbol=...)):\n${{ol.stdout.trim().slice(0, 1800)}}`;
-							mutated = true;
+					const normOutlineKey = absPath.toLowerCase();
+					if (existsSync(absPath) && !outlinedPaths.has(normOutlineKey)) {{
+						if (CODE_FILE_EXT.test(p)) {{
+							const ol = spawnSync(AP_BIN, ["read", absPath, "--outline"], {{
+								cwd,
+								encoding: "utf8",
+								timeout: 1500,
+								windowsHide: true,
+							}});
+							if (ol.status === 0 && ol.stdout?.trim()) {{
+								outText += `\n[ap read-outline] File was truncated; full AST symbol map (jump directly via read(offset=...) or ap_read(symbol=...)):\n${{ol.stdout.trim().slice(0, 1800)}}`;
+								outlinedPaths.add(normOutlineKey);
+								textMutated = true;
+								mutated = true;
+							}}
+						}} else {{
+							try {{
+								const rawDoc = readFileSync(absPath, "utf8");
+								if (rawDoc.length <= 2_000_000) {{
+									const nonCodeOl = extractNonCodeOutline(p, rawDoc);
+									if (nonCodeOl) {{
+										outText += `\n${{nonCodeOl}}`;
+										outlinedPaths.add(normOutlineKey);
+										textMutated = true;
+										mutated = true;
+									}}
+								}}
+							}} catch {{
+								// ignore unreadable/binary files
+							}}
 						}}
 					}}
 				}} else if (!largeReadTipShown && outText.length >= LARGE_CODE_READ_CHARS && CODE_FILE_EXT.test(p)) {{
 					outText += `\n[ap read-tip] Large code file loaded; use ap_read(outline=true) or ap_read(symbol="...") for AST-exact slices (~85% fewer tokens).`;
 					largeReadTipShown = true;
+					textMutated = true;
 					mutated = true;
 				}}
 			}}
@@ -4161,6 +4379,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("formatInstantSyntaxAlert")
                 && s.contains("decideDeepSeekCacheWarming")
                 && s.contains("injectDeepSeekGuidelines")
+                && s.contains("hashlineTag")
+                && s.contains("annotateReadWithHashlines")
+                && s.contains("extractNonCodeOutline")
+                && s.contains("hashline-anchor-expanded")
                 && s.contains("cache_warming_decision")
                 && s.contains("before_agent_start")
                 && s.contains("before_provider_request")
