@@ -968,10 +968,79 @@ export function extractDsmlToolCalls(
 }}
 
 /**
- * Deterministic, timestamp-free replacement stub for stale bulky `toolResult` entries.
- * Preserves any `ap sieve` archive ID for lossless recovery via `ap_sieve(action="peek")`.
+ * Recover leaked `<tool_call>{{"name":"...","arguments":{{...}}}}</tool_call>` blocks
+ * emitted as plain text under high context pressure (strictly gated to `allowedTools`).
  */
-export function formatMaskedToolResult(toolName: string, rawText: string): string {{
+export function extractXmlJsonToolCalls(
+	text: string,
+	allowedTools: ReadonlySet<string>,
+): {{ cleanedText: string; calls: DsmlRecoveredCall[] }} | undefined {{
+	if (!text || !text.includes("<tool_call>")) return undefined;
+	const re = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+	const calls: DsmlRecoveredCall[] = [];
+	let match: RegExpExecArray | null;
+	let seq = 0;
+	while ((match = re.exec(text)) !== null) {{
+		try {{
+			const obj = JSON.parse(match[1]) as {{
+				name?: unknown;
+				arguments?: unknown;
+				parameters?: unknown;
+			}};
+			const name = typeof obj?.name === "string" ? obj.name.trim() : "";
+			if (!name || !allowedTools.has(name)) continue;
+			const rawArgs = obj.arguments ?? obj.parameters ?? {{}};
+			const args =
+				rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+					? (rawArgs as Record<string, unknown>)
+					: {{}};
+			seq += 1;
+			calls.push({{
+				type: "toolCall",
+				id: `ap_xmltc_${{Date.now()}}_${{seq}}`,
+				name,
+				arguments: args,
+			}});
+		}} catch {{
+			// ignore non-JSON blocks
+		}}
+	}}
+	if (calls.length === 0) return undefined;
+	const cleanedText = text.replace(re, "").trim();
+	return {{ cleanedText, calls }};
+}}
+
+const ERROR_LINE_RE =
+	/(?:^|\s)(?:error\[E\d+\]|ERROR:|FATAL:|Traceback|AssertionError|TypeError|SyntaxError|ReferenceError|RangeError|ValueError|RuntimeError|panicked at|FAILED\b|Exception:|Command exited with code [1-9])/i;
+
+/**
+ * Extract up to 3 high-signal error lines so observation masking never erases failure lessons
+ * (Manus Context Engineering rule: keep error signatures in the trace to prevent repeat loops).
+ */
+export function extractErrorSignatureLines(rawText: string): string[] {{
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const ln of rawText.split("\n")) {{
+		const clean = ln.replace(/\s+/g, " ").trim();
+		if (clean.length < 8 || !ERROR_LINE_RE.test(clean)) continue;
+		const clipped = clean.slice(0, 140);
+		if (seen.has(clipped)) continue;
+		seen.add(clipped);
+		out.push(clipped);
+		if (out.length >= 3) break;
+	}}
+	return out;
+}}
+
+/**
+ * Deterministic, timestamp-free replacement stub for stale bulky `toolResult` entries.
+ * Preserves any `ap sieve` archive ID AND top error signatures for lossless failure memory.
+ */
+export function formatMaskedToolResult(
+	toolName: string,
+	rawText: string,
+	isError = false,
+): string {{
 	const lineCount = rawText.split("\n").length;
 	const sieveMatch =
 		rawText.match(/\bsieve\s+(?:id=|peek\s+)([a-zA-Z0-9_-]{{4,40}})\b/i) ||
@@ -979,11 +1048,67 @@ export function formatMaskedToolResult(toolName: string, rawText: string): strin
 	const sieveId = sieveMatch?.[1];
 	const head = rawText.slice(0, 140).replace(/\s+/g, " ").trim();
 	const tail = rawText.slice(-110).replace(/\s+/g, " ").trim();
+	const errLines = extractErrorSignatureLines(rawText);
+	const errBlock =
+		isError || errLines.length > 0
+			? `\nerrors: ${{errLines.length > 0 ? errLines.join(" | ") : "tool returned isError=true"}}`
+			: "";
 	const recovery = sieveId
 		? `(Recover full output via ap_sieve(action="peek", id="${{sieveId}}").)`
 		: "(Re-run or narrow with ap_read(symbol/outline) / ap_search if needed.)";
 	const sieveTag = sieveId ? ` | sieve=${{sieveId}}` : "";
-	return `${{MASK_PREFIX}} ${{toolName}} (${{rawText.length}} chars, ${{lineCount}} lines)${{sieveTag}}]\nhead: ${{head}}\ntail: ${{tail}}\n${{recovery}}`;
+	const errTag = isError ? " | ERROR" : "";
+	return `${{MASK_PREFIX}} ${{toolName}} (${{rawText.length}} chars, ${{lineCount}} lines)${{errTag}}${{sieveTag}}]\nhead: ${{head}}${{errBlock}}\ntail: ${{tail}}\n${{recovery}}`;
+}}
+
+/**
+ * Compact, standalone branch serializer for `/ap handoff <goal>` (zero runtime SDK value imports).
+ */
+export function serializeBranchForHandoff(branch: ReadonlyArray<Record<string, unknown>>): string {{
+	if (!Array.isArray(branch) || branch.length === 0) return "";
+	let startIdx = 0;
+	for (let i = branch.length - 1; i >= 0; i--) {{
+		if (branch[i]?.type === "compaction") {{
+			startIdx = i;
+			break;
+		}}
+	}}
+	const chunks: string[] = [];
+	for (let i = startIdx; i < branch.length; i++) {{
+		const e = branch[i];
+		if (e?.type === "compaction" && typeof e.summary === "string") {{
+			chunks.push(`[Compaction Summary]\n${{e.summary.slice(0, 4000)}}`);
+			continue;
+		}}
+		if (e?.type !== "message" || !e.message || typeof e.message !== "object") continue;
+		const m = e.message as {{
+			role?: string;
+			toolName?: string;
+			isError?: boolean;
+			content?: string | Array<{{ type?: string; text?: string; name?: string }}>;
+		}};
+		if (m.role === "user" || m.role === "assistant") {{
+			let txt = "";
+			if (typeof m.content === "string") {{
+				txt = m.content;
+			}} else if (Array.isArray(m.content)) {{
+				const parts: string[] = [];
+				for (const b of m.content) {{
+					if (b?.type === "text" && typeof b.text === "string") parts.push(b.text);
+					else if (b?.type === "toolCall" && typeof b.name === "string") parts.push(`[call:${{b.name}}]`);
+				}}
+				txt = parts.join("\n");
+			}}
+			if (txt.trim()) chunks.push(`${{m.role.toUpperCase()}}: ${{txt.trim().slice(0, 1200)}}`);
+		}} else if (m.role === "toolResult" && m.isError) {{
+			const raw = Array.isArray(m.content)
+				? m.content.map((b) => (typeof b.text === "string" ? b.text : "")).join("\n")
+				: "";
+			const errs = extractErrorSignatureLines(raw);
+			chunks.push(`TOOL_ERROR(${{m.toolName ?? "tool"}}): ${{(errs.join(" | ") || raw.slice(0, 240)).trim()}}`);
+		}}
+	}}
+	return chunks.join("\n\n").slice(-24000);
 }}
 
 export interface ObservationMaskPlan {{
@@ -1027,7 +1152,7 @@ export function planObservationMasking(
 	}}
 
 	const scanLimit = contextEntries.length - keepRecent;
-	const candidates: Array<{{ targetId: string; toolName: string; rawText: string }}> = [];
+	const candidates: Array<{{ targetId: string; toolName: string; rawText: string; isError: boolean }}> = [];
 	let totalStaleChars = 0;
 
 	for (let i = 0; i < scanLimit; i++) {{
@@ -1038,6 +1163,7 @@ export function planObservationMasking(
 		const msg = proj.messages[0] as {{
 			role?: string;
 			toolName?: string;
+			isError?: boolean;
 			content?: Array<{{ type?: string; text?: string }}>;
 		}};
 		if (msg?.role !== "toolResult" || !Array.isArray(msg.content) || msg.content.length === 0) {{
@@ -1052,6 +1178,7 @@ export function planObservationMasking(
 			targetId: src.id,
 			toolName: typeof msg.toolName === "string" && msg.toolName ? msg.toolName : "tool",
 			rawText,
+			isError: msg.isError === true,
 		}});
 		totalStaleChars += rawText.length;
 	}}
@@ -1073,7 +1200,7 @@ export function planObservationMasking(
 	const edits: ContextEditEntryDraft[] = [];
 	let reclaimedChars = 0;
 	for (const c of candidates) {{
-		const stub = formatMaskedToolResult(c.toolName, c.rawText);
+		const stub = formatMaskedToolResult(c.toolName, c.rawText, c.isError);
 		const saved = c.rawText.length - stub.length;
 		if (saved < 1000) continue;
 		edits.push({{
@@ -1443,21 +1570,26 @@ export default function (pi: ExtensionAPI) {{
 		}};
 	}});
 
-	// Zero-prompt-token interactive `/ap` command inside Pi (`/ap`, `/ap status`, `/ap doctor`, `/ap compact`)
+	// Zero-prompt-token interactive `/ap` command inside Pi (`/ap`, `status`, `doctor`, `compact`, `handoff <goal>`)
 	if (typeof pi.registerCommand === "function") {{
 		pi.registerCommand("ap", {{
-			description: "Show live ap + DeepSeek KV-cache telemetry, run doctor, or focused compact",
+			description: "Live ap + DeepSeek KV-cache telemetry, doctor, focused compact, or clean-session handoff",
 			getArgumentCompletions(prefix: string) {{
 				const items = [
 					{{ value: "status", label: "status — Live KV-cache, masking & guard telemetry" }},
 					{{ value: "doctor", label: "doctor — Run native ap doctor health check" }},
 					{{ value: "compact", label: "compact — Compact while anchoring verified facts & dead-ends" }},
+					{{ value: "handoff ", label: "handoff <goal> — Transfer context cleanly to a fresh 0-rot session" }},
 				];
 				const p = (prefix || "").trim().toLowerCase();
-				return p ? items.filter((it) => it.value.startsWith(p)) : items;
+				return p ? items.filter((it) => it.value.trim().startsWith(p)) : items;
 			}},
 			async handler(args, ctx) {{
-				const sub = (args || "").trim().toLowerCase() || "status";
+				const rawArgs = (args || "").trim();
+				const firstSpace = rawArgs.indexOf(" ");
+				const sub = (firstSpace >= 0 ? rawArgs.slice(0, firstSpace) : rawArgs).toLowerCase() || "status";
+				const rest = firstSpace >= 0 ? rawArgs.slice(firstSpace + 1).trim() : "";
+
 				if (sub === "doctor") {{
 					const res = spawnSync(AP_BIN, ["doctor"], {{
 						cwd: ctx.cwd,
@@ -1481,6 +1613,107 @@ export default function (pi: ExtensionAPI) {{
 					ctx.ui.notify("[ap] Triggered focused compaction preserving verified facts & dead-ends.", "info");
 					return;
 				}}
+				if (sub === "handoff") {{
+					if (!rest) {{
+						ctx.ui.notify("Usage: /ap handoff <goal for the new focused session>", "warning");
+						return;
+					}}
+					if (!ctx.model) {{
+						ctx.ui.notify("[ap handoff] No active model selected.", "error");
+						return;
+					}}
+					const branch = ctx.sessionManager?.getBranch?.() ?? [];
+					const transcript = serializeBranchForHandoff(branch as unknown as Array<Record<string, unknown>>);
+					if (!transcript) {{
+						ctx.ui.notify("[ap handoff] Current branch has no messages to transfer.", "warning");
+						return;
+					}}
+					let envFacts = "";
+					if (ctx.cwd && existsSync(join(ctx.cwd, ".git"))) {{
+						const gs = spawnSync("git", ["status", "--short"], {{
+							cwd: ctx.cwd,
+							encoding: "utf8",
+							timeout: 2000,
+							windowsHide: true,
+						}});
+						if (gs.status === 0 && gs.stdout?.trim()) {{
+							envFacts += `\n\n## Modified Files (git status)\n${{gs.stdout.trim().slice(0, 1500)}}`;
+						}}
+					}}
+					if (ctx.cwd && existsSync(join(ctx.cwd, ".baton"))) {{
+						const bt = spawnSync(AP_BIN, ["baton", "resume"], {{
+							cwd: ctx.cwd,
+							encoding: "utf8",
+							timeout: 2000,
+							windowsHide: true,
+						}});
+						if (bt.status === 0 && bt.stdout?.trim()) {{
+							envFacts += `\n\n## Baton State\n${{bt.stdout.trim().slice(0, 1500)}}`;
+						}}
+					}}
+					ctx.ui.notify("[ap handoff] Generating clean transfer brief (low effort)...", "info");
+					try {{
+						const response = await ctx.modelRegistry.complete(
+							ctx.model,
+							{{
+								systemPrompt:
+									"Generate a concise, self-contained handoff prompt for a brand-new coding-agent session. Include: ## Context (verified facts & key decisions), ## Falsified Dead-Ends (what NOT to retry), ## Relevant Files, and ## Next Task. Output ONLY the prompt itself.",
+								messages: [
+									{{
+										role: "user",
+										content: [
+											{{
+												type: "text",
+												text: `## Conversation Branch\n${{transcript}}${{envFacts}}\n\n## Goal For New Session\n${{rest}}`,
+											}},
+										],
+										timestamp: Date.now(),
+									}},
+								],
+							}},
+							{{
+								reasoning: "low",
+								cacheRetention: "none",
+							}},
+						);
+						const draft = response.content
+							.filter((c): c is {{ type: "text"; text: string }} => c.type === "text")
+							.map((c) => c.text)
+							.join("\n")
+							.trim();
+						if (!draft) {{
+							ctx.ui.notify("[ap handoff] Empty response from model.", "warning");
+							return;
+						}}
+						const edited =
+							typeof ctx.ui.editor === "function"
+								? await ctx.ui.editor("Review /ap handoff prompt", draft)
+								: draft;
+						if (edited === undefined) {{
+							ctx.ui.notify("[ap handoff] Cancelled.", "info");
+							return;
+						}}
+						const parentSession = ctx.sessionManager?.getSessionFile?.();
+						if (typeof ctx.newSession === "function") {{
+							await ctx.newSession({{
+								parentSession,
+								withSession: async (nextCtx) => {{
+									nextCtx.ui.setEditorText(edited);
+									nextCtx.ui.notify("[ap handoff] Fresh session ready — press Enter to start!", "info");
+								}},
+							}});
+						}} else {{
+							ctx.ui.setEditorText?.(edited);
+						}}
+					}} catch (err) {{
+						ctx.ui.notify(
+							`[ap handoff] Failed: ${{err instanceof Error ? err.message : String(err)}}`,
+							"error",
+						);
+					}}
+					return;
+				}}
+
 				const usage = ctx.getContextUsage?.();
 				const totalPrompt = sessionInputTokens + sessionCacheReadTokens;
 				const hitPct =
@@ -1515,8 +1748,12 @@ export default function (pi: ExtensionAPI) {{
 		let recoveredAny = false;
 		const nextContent: Array<Record<string, unknown>> = [];
 		for (const blk of msg.content) {{
-			if (blk?.type === "text" && typeof blk.text === "string" && blk.text.includes("DSML")) {{
-				const rec = extractDsmlToolCalls(blk.text, active);
+			if (blk?.type === "text" && typeof blk.text === "string") {{
+				const rec = blk.text.includes("DSML")
+					? extractDsmlToolCalls(blk.text, active)
+					: blk.text.includes("<tool_call>")
+						? extractXmlJsonToolCalls(blk.text, active)
+						: undefined;
 				if (rec) {{
 					recoveredAny = true;
 					if (rec.cleanedText) {{
@@ -2525,6 +2762,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         .map(|s| {
             s.contains("planObservationMasking")
                 && s.contains("extractDsmlToolCalls")
+                && s.contains("extractXmlJsonToolCalls")
+                && s.contains("extractErrorSignatureLines")
+                && s.contains("serializeBranchForHandoff")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
@@ -2896,7 +3136,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.12+ (context_edit + settle-gate + flash-auto + /ap + KV-cache HUD)" } else { "stale/missing" }
+            if accel_ok { "v2.13+ (error-aware context_edit + settle-gate + flash-auto + /ap handoff)" } else { "stale/missing" }
         );
         if let Some(hints) = pi_runtime["hints"].as_array() {
             for h in hints.iter().filter_map(Value::as_str) {

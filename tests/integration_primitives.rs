@@ -4858,3 +4858,52 @@ fn test_v212_pi_slash_ap_command_tree_hook_ps_curl_and_1m_compaction_doctor() {
     assert_eq!(d2["pi_runtime"]["flash_auto_enabled"], true);
     assert_eq!(d2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_v213_pi_handoff_error_preserving_mask_and_xml_tool_call_recovery() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let fake_home = root.join("fake_home_v213");
+    let ap_home = root.join("ap_v213_home");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(pi_agent.join("extensions")).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function extractXmlJsonToolCalls",
+        "export function extractErrorSignatureLines",
+        "export function serializeBranchForHandoff",
+        "sub === \"handoff\"",
+        "ctx.newSession(",
+        "reasoning: \"low\"",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.13 feature '{needle}'");
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dj: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dj["pi_runtime"]["accelerator_up_to_date"], true);
+}
