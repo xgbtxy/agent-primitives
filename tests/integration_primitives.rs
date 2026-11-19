@@ -4984,3 +4984,82 @@ fn test_v214_data_calibrated_utf8_quote_tip_split_loop_and_retry_doctor() {
         .iter()
         .any(|r| r.as_str().unwrap_or("").contains("retry.maxRetries")));
 }
+
+#[test]
+fn test_v215_pi_monotonic_masking_dual_sieve_heredoc_heal_and_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v215");
+    let ap_home = root.join("ap_home_v215");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    let pi_sessions = pi_agent.join("sessions").join("demo");
+    fs::create_dir_all(&pi_sessions).unwrap();
+
+    // Synthetic Pi session with 4 consecutive single-tool turns, a timeout, a /mnt/ path error, and a cold KV-cache drop
+    let sess = [
+        r#"{"type":"message","message":{"role":"assistant","stopReason":"toolUse","usage":{"input":1000,"cacheRead":24000},"content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"grep -rn foo src"}}]}}"#,
+        r#"{"type":"message","message":{"role":"toolResult","toolName":"bash","toolCallId":"c1","isError":true,"content":[{"type":"text","text":"Command timed out after 120s"}]}}"#,
+        r#"{"type":"message","message":{"role":"assistant","stopReason":"toolUse","usage":{"input":22000,"cacheRead":3000},"content":[{"type":"toolCall","id":"c2","name":"bash","arguments":{"command":"cat /mnt/c/missing.txt"}}]}}"#,
+        r#"{"type":"message","message":{"role":"toolResult","toolName":"bash","toolCallId":"c2","isError":true,"content":[{"type":"text","text":"No such file or directory: /mnt/c/missing.txt"}]}}"#,
+        r#"{"type":"message","message":{"role":"assistant","stopReason":"toolUse","usage":{"input":1000,"cacheRead":25000},"content":[{"type":"toolCall","id":"c3","name":"read","arguments":{"path":"a.rs"}}]}}"#,
+        r#"{"type":"message","message":{"role":"assistant","stopReason":"toolUse","usage":{"input":1000,"cacheRead":26000},"content":[{"type":"toolCall","id":"c4","name":"read","arguments":{"path":"b.rs"}}]}}"#,
+    ]
+    .join("\n");
+    fs::write(pi_sessions.join("s1.jsonl"), sess).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function shouldAutoSieveShellOutput",
+        "export function classifyShellFailureTip",
+        "let sessionTurnCount = 0;",
+        "const FREE_MASK_MIN_TOKENS = 80000;",
+        "consecutiveLightTurns",
+        "[ap batch-tip]",
+        "[ap codemode-parallel]",
+        "[ap timeout-tip]",
+        "[ap path-tip]",
+    ] {
+        assert!(accel_ts.contains(needle), "Missing v2.15 feature '{needle}'");
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+
+    let aud = run_ap(
+        root,
+        &["audit", "--home", fake_home.to_str().unwrap(), "--json"],
+        None,
+        &env_vars,
+    );
+    assert!(aud.status.success());
+    let av: Value = serde_json::from_slice(&aud.stdout).unwrap();
+    let agg = &av["aggregate_friction_counts"];
+    assert_eq!(agg["serial_single_tool_turns"], 4);
+    assert_eq!(agg["shell_timeouts"], 1);
+    assert_eq!(agg["path_translation_errors"], 1);
+    assert_eq!(agg["kv_cache_cold_drops"], 1);
+}

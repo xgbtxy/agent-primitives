@@ -42,6 +42,10 @@ pub struct Counters {
     pub identical_retry_loops: usize,
     pub heavy_thinking_turns: usize,
     pub dsml_tool_leaks: usize,
+    pub serial_single_tool_turns: usize,
+    pub shell_timeouts: usize,
+    pub path_translation_errors: usize,
+    pub kv_cache_cold_drops: usize,
     pub prompt_input_tokens: u64,
     pub prompt_cache_read_tokens: u64,
 }
@@ -63,6 +67,10 @@ impl Counters {
         self.identical_retry_loops += o.identical_retry_loops;
         self.heavy_thinking_turns += o.heavy_thinking_turns;
         self.dsml_tool_leaks += o.dsml_tool_leaks;
+        self.serial_single_tool_turns += o.serial_single_tool_turns;
+        self.shell_timeouts += o.shell_timeouts;
+        self.path_translation_errors += o.path_translation_errors;
+        self.kv_cache_cold_drops += o.kv_cache_cold_drops;
         self.prompt_input_tokens += o.prompt_input_tokens;
         self.prompt_cache_read_tokens += o.prompt_cache_read_tokens;
     }
@@ -137,6 +145,14 @@ fn classify_err(txt: &str, st: &mut Counters) {
     .any(|k| txt.contains(k))
     {
         st.output_truncation_spill += 1;
+    }
+    if low.contains("timed out") || low.contains("etimedout") || low.contains("deadline exceeded") {
+        st.shell_timeouts += 1;
+    }
+    if (low.contains("no such file") || low.contains("cannot find the path") || low.contains("filenotfounderror"))
+        && (low.contains("/mnt/") || low.contains("unicodeescape"))
+    {
+        st.path_translation_errors += 1;
     }
 }
 
@@ -363,6 +379,14 @@ fn scan_pi(f: &Path) -> Counters {
     let Ok(file) = File::open(f) else { return st };
     let mut seen_reads: HashMap<String, usize> = HashMap::new();
     let mut recent: VecDeque<String> = VecDeque::with_capacity(7);
+    let mut prev_prompt_tokens = 0u64;
+    let mut serial_1tool_run = 0usize;
+    let flush_serial = |run: &mut usize, out: &mut Counters| {
+        if *run >= 3 {
+            out.serial_single_tool_turns += *run;
+        }
+        *run = 0;
+    };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if !line.contains("\"message\"") {
             continue;
@@ -382,15 +406,33 @@ fn scan_pi(f: &Path) -> Counters {
         }
         let msg = &o["message"];
         match msg["role"].as_str().unwrap_or("") {
+            "user" => {
+                flush_serial(&mut serial_1tool_run, &mut st);
+            }
             "assistant" => {
+                let stop_reason = msg["stopReason"].as_str().unwrap_or("");
                 if let Some(u) = msg["usage"].as_object() {
-                    st.prompt_input_tokens += u.get("input").and_then(Value::as_u64).unwrap_or(0);
-                    st.prompt_cache_read_tokens +=
-                        u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
+                    let u_in = u.get("input").and_then(Value::as_u64).unwrap_or(0);
+                    let u_cr = u.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
+                    st.prompt_input_tokens += u_in;
+                    st.prompt_cache_read_tokens += u_cr;
+                    let prompt_tok = u_in + u_cr;
+                    if stop_reason != "error" && stop_reason != "aborted" {
+                        if prompt_tok >= 10_000
+                            && prev_prompt_tokens >= 10_000
+                            && (u_cr * 100) / prompt_tok < 45
+                        {
+                            st.kv_cache_cold_drops += 1;
+                        }
+                        if prompt_tok > 0 {
+                            prev_prompt_tokens = prompt_tok;
+                        }
+                    }
                 }
                 if let Some(arr) = msg["content"].as_array() {
                     let mut turn_thinking_chars = 0usize;
                     let mut has_dsml_leak = false;
+                    let mut turn_tool_calls = 0usize;
                     for blk in arr {
                         let bt = blk["type"].as_str().unwrap_or("");
                         if bt == "thinking" {
@@ -408,6 +450,7 @@ fn scan_pi(f: &Path) -> Counters {
                         if bt != "toolCall" && bt != "tool_use" {
                             continue;
                         }
+                        turn_tool_calls += 1;
                         st.tool_calls += 1;
                         let nm = blk["name"].as_str().unwrap_or("");
                         let args = &blk["arguments"];
@@ -432,6 +475,11 @@ fn scan_pi(f: &Path) -> Counters {
                             classify_cmd(cmd_s, &mut st);
                         }
                     }
+                    if turn_tool_calls == 1 {
+                        serial_1tool_run += 1;
+                    } else {
+                        flush_serial(&mut serial_1tool_run, &mut st);
+                    }
                     if turn_thinking_chars >= 8000 {
                         st.heavy_thinking_turns += 1;
                     }
@@ -450,6 +498,7 @@ fn scan_pi(f: &Path) -> Counters {
             _ => {}
         }
     }
+    flush_serial(&mut serial_1tool_run, &mut st);
     st
 }
 
@@ -692,11 +741,15 @@ pub fn audit_home(home: &Path, max_per_harness: usize, compare: bool) -> Value {
             "why": "Hard-stops identical failing retries (`exit 2` in <2ms) and preserves verified facts/dead-ends across compaction."
         }));
     }
-    if totals.heavy_thinking_turns > 0 || totals.dsml_tool_leaks > 0 {
+    if totals.heavy_thinking_turns > 0
+        || totals.dsml_tool_leaks > 0
+        || totals.serial_single_tool_turns >= 20
+        || totals.shell_timeouts >= 3
+    {
         recs.push(json!({
             "primitive": "pi accelerator (`ap init -a pi --with-hooks`)",
-            "evidence": format!("{} heavy-thinking turns (>8k chars), {} DSML text tool leaks", totals.heavy_thinking_turns, totals.dsml_tool_leaks),
-            "why": "Enables zero-token Pi v1.5+ overthinking stagnation nudges, unchanged re-read guards, DSML->toolCall recovery & live TUI context-rot HUD."
+            "evidence": format!("{} heavy-thinking turns (>8k chars), {} DSML text tool leaks, {} serial 1-tool turns, {} shell timeouts, {} cold KV-cache drops", totals.heavy_thinking_turns, totals.dsml_tool_leaks, totals.serial_single_tool_turns, totals.shell_timeouts, totals.kv_cache_cold_drops),
+            "why": "Enables zero-token Pi v1.5+ batch observation masking, cold-cache free cleanup, dual-tier auto-sieve, heredoc backslash auto-heal, serial-batch nudges & dynamic deepseek/flash-auto effort routing."
         }));
     }
 
@@ -778,16 +831,19 @@ pub fn run_cli(args: &[String]) -> i32 {
     );
     let heavy_t = c["heavy_thinking_turns"].as_u64().unwrap_or(0);
     let dsml_l = c["dsml_tool_leaks"].as_u64().unwrap_or(0);
+    let serial_t = c["serial_single_tool_turns"].as_u64().unwrap_or(0);
+    let timeouts = c["shell_timeouts"].as_u64().unwrap_or(0);
+    let cold_drops = c["kv_cache_cold_drops"].as_u64().unwrap_or(0);
     let in_tok = c["prompt_input_tokens"].as_u64().unwrap_or(0);
     let cache_tok = c["prompt_cache_read_tokens"].as_u64().unwrap_or(0);
-    if heavy_t > 0 || dsml_l > 0 || cache_tok > 0 {
+    if heavy_t > 0 || dsml_l > 0 || cache_tok > 0 || serial_t > 0 || timeouts > 0 {
         let cache_pct = if in_tok + cache_tok > 0 {
             ((cache_tok as f64 / (in_tok + cache_tok) as f64) * 1000.0).round() / 10.0
         } else {
             0.0
         };
         println!(
-            "- Heavy-thinking turns (>8k chars): **{heavy_t}** | DSML tool leaks: **{dsml_l}** | Prompt KV-cache hit rate: **{cache_pct:.1}%**"
+            "- Heavy-thinking turns (>8k chars): **{heavy_t}** | DSML leaks: **{dsml_l}** | Serial 1-tool turns (runs>=3): **{serial_t}** | Timeouts: **{timeouts}** | Prompt KV-cache hit rate: **{cache_pct:.1}%** (cold drops: **{cold_drops}**)"
         );
     }
 

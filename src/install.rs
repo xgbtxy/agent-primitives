@@ -824,33 +824,89 @@ const SIEVE_HOME = process.env.SIEVE_HOME || join(homedir(), ".ap", "sieve");
 const DESTRUCTIVE_OR_WRITE =
 	/\b(?:Remove-Item|rm|del|erase|rmdir|rd|Move-Item|Rename-Item|mv|ren|Set-Content|Add-Content|Clear-Content|Out-File|Copy-Item|cpi|copy)\b|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|\.rmdir\(|\bgit(?:\.exe)?\b[\s\S]{{0,80}}?\bclean\b/i;
 const BARE_SLOW_GREP =
-	/^\s*grep\s+-[rR][nwiEH]*\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$/;
+	/^\s*grep\s+-([rRnwiEHlc]+)\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$/;
 const PY_INVOKE = /\b(?:python3?(?:\.exe)?|py(?:\.exe)?|pytest)\b/i;
 const HAS_UTF8_ENV = /PYTHONUTF8|PYTHONIOENCODING/i;
-const PY_WIN_BS = /\b(?:python3?(?:\.exe)?|py(?:\.exe)?)\s+-c\s+[\s\S]*(?<![rR])['"][A-Za-z]:\\(?!\\)/;
+const PY_WIN_BS =
+	/\b(?:python3?(?:\.exe)?|py(?:\.exe)?)\b[\s\S]*(?:-c\b|<<)[\s\S]*(?<![rR])(['"])([A-Za-z]:\\(?!\\)[^'"\r\n]+)\1/;
 const REDIR_NUL = /(\s(?:[12]?>|&>))\s*NUL\b/gi;
 const QUOTE_OR_BS_ERR =
 	/unterminated string|EOL while scanning|unicodeescape|unexpected character after line continuation|syntax error near unexpected token/i;
+const TIMEOUT_ERR_RE = /\b(?:timed out|timeout|deadline exceeded|ETIMEDOUT)\b/i;
+const SEARCH_CMD_RE =
+	/^\s*(?:export\s+\S+\s*;?\s*|\$env:\w+\s*=\s*\S+\s*;?\s*)*(?:grep|egrep|fgrep|rg|find|fd|ls|dir|tree|Get-ChildItem|Select-String)\b/i;
+const ENOENT_ERR_RE =
+	/no such file or directory|cannot find the path|FileNotFoundError|ENOENT/i;
+const PATH_MISMATCH_RE = /\/mnt\/[a-z]\//i;
+const BASH_BS_PATH_RE = /(?:^|[\s=])[A-Za-z]:\\/;
 const CODE_FILE_EXT = /\.(?:rs|ts|tsx|js|jsx|mjs|cjs|py|go|c|cc|cpp|h|hpp)$/i;
 const EDIT_TOOLS = new Set(["write", "edit", "ap_edit", "ap_rename"]);
+const SERIAL_BATCHABLE_TOOLS = new Set(["bash", "powershell", "read", "grep", "find", "ls"]);
 const LOOP_WINDOW = 6;
 const LOOP_ERR_THRESHOLD = 3;
 const LOOP_OK_THRESHOLD = 5;
 const REREAD_THRESHOLD = 3;
 const HEAVY_THINKING_CHARS = 12000;
+const LIGHT_THINKING_CHARS = 1500;
 const STAGNATION_TURNS = 3;
+const SERIAL_BATCH_THRESHOLD = 6;
+const BATCH_TIP_COOLDOWN_TURNS = 25;
 const LARGE_CODE_READ_CHARS = 20000;
+const SIEVE_HARD_CHARS = 24000;
+const SIEVE_STRUCTURED_CHARS = 14000;
+const SIEVE_GIANT_LINE_CHARS = 4500;
+const SIEVE_STRUCTURED_LINES = 250;
 
 // High-water batch observation masking constants (calibrated for 1M-window DeepSeek Flash 98%+ KV-cache & 128k-256k models)
 const MASK_PREFIX = "[ap masked stale toolResult:";
 const MASK_HIGH_WATER_PCT = 72;
 const MASK_HIGH_WATER_TOKENS = 180000;
 const MASK_STALE_CHARS_FALLBACK = 120000;
+const FREE_MASK_MIN_TOKENS = 80000;
+const FREE_MASK_STALE_CHARS = 40000;
 const MASK_KEEP_RECENT_ENTRIES = 12;
 const MASK_MIN_ENTRY_CHARS = 4500;
 const MASK_MIN_BATCH_ENTRIES = 2;
 const MASK_MIN_RECLAIMED_CHARS = 16000;
 const MASK_COOLDOWN_TURNS = 15;
+
+export function shouldAutoSieveShellOutput(text: string): boolean {{
+	if (!text) return false;
+	if (text.length >= SIEVE_HARD_CHARS) return true;
+	const lines = text.split("\n");
+	if (lines.some((l) => l.length > SIEVE_GIANT_LINE_CHARS)) return true;
+	if (text.length >= SIEVE_STRUCTURED_CHARS) {{
+		if (lines.length >= SIEVE_STRUCTURED_LINES) return true;
+		if (text.includes("\x1b[")) return true;
+		if (text.includes("{{") && text.split('":').length >= 21) return true;
+	}}
+	return false;
+}}
+
+export function classifyShellFailureTip(
+	toolName: string,
+	cmd: string,
+	outText: string,
+): string | undefined {{
+	if (QUOTE_OR_BS_ERR.test(outText)) {{
+		return `[ap quote-tip] Avoid nested quotes/backslashes inside inline python -c; use a single-quoted heredoc (python - <<'PY' ... PY) or write a script file via write/ap_edit.`;
+	}}
+	if (TIMEOUT_ERR_RE.test(outText)) {{
+		if (SEARCH_CMD_RE.test(cmd)) {{
+			return `[ap timeout-tip] Slow recursive shell search timed out; use ap search (or ap_search / ap_atlas) with -e <ext> or a narrower directory instead.`;
+		}}
+		return `[ap timeout-tip] Command timed out (commands >2m also risk evicting DeepSeek KV-cache); cap synchronous commands <=90s, narrow scope, or redirect long jobs to a log file.`;
+	}}
+	if (ENOENT_ERR_RE.test(outText)) {{
+		if (PATH_MISMATCH_RE.test(cmd)) {{
+			return `[ap path-tip] Detected /mnt/<drive>/ path; use native drive paths (C:/...) in Windows tools/Python or verify cwd before retrying.`;
+		}}
+		if (toolName === "bash" && BASH_BS_PATH_RE.test(cmd)) {{
+			return `[ap path-tip] Unquoted Windows backslashes in Git Bash are stripped as escapes; use forward slashes (C:/path/to/file) or single quotes.`;
+		}}
+	}}
+	return undefined;
+}}
 
 export function normCmdFingerprint(raw: string): string {{
 	return raw
@@ -868,14 +924,16 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 	let cmd = raw;
 	let changed = false;
 
-	// 1. Bare recursive GNU `grep -rn <pat> [path]` -> `<50ms` parallel `ap search`
+	// 1. Bare recursive GNU `grep -r[nwiEHlc] <pat> [path]` -> `<50ms` parallel `ap search`
 	if (!/[|;&>]/.test(cmd)) {{
 		const gm = cmd.match(BARE_SLOW_GREP);
-		if (gm) {{
-			const pat = (gm[1] || gm[2] || gm[3] || "").replace(/"/g, '\\"');
-			const target = gm[4] || gm[5] || gm[6] || ".";
+		if (gm && /[rR]/.test(gm[1])) {{
+			const flags = gm[1];
+			const pat = (gm[2] || gm[3] || gm[4] || "").replace(/"/g, '\\"');
+			const target = gm[5] || gm[6] || gm[7] || ".";
 			const prefix = toolName === "powershell" ? "& " : "";
-			return `${{prefix}}"${{AP_BIN}}" search "${{pat}}" "${{target}}"`;
+			const extra = flags.includes("l") ? " -l" : flags.includes("c") ? " -c" : "";
+			return `${{prefix}}"${{AP_BIN}}" search${{extra}} "${{pat}}" "${{target}}"`;
 		}}
 	}}
 
@@ -885,13 +943,19 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 		changed = true;
 	}}
 
-	// 3. Auto-fix unescaped Windows drive backslashes inside `python -c` non-raw string literals
+	// 3. Auto-fix unescaped Windows drive backslashes inside `python -c` & `python <<'PY'` non-raw literals
 	if (PY_WIN_BS.test(cmd)) {{
-		cmd = cmd.replace(
-			/(?<![rR])(['"])([A-Za-z]:)(\\(?!\\)[^\s'"]+)/g,
-			(_m, q: string, drv: string, rest: string) => q + drv + rest.replace(/\\/g, "/"),
+		const fixed = cmd.replace(
+			/(?<![rR])(['"])([A-Za-z]:)(\\(?!\\)[^'"\r\n]+)\1/g,
+			(m, q: string, drv: string, rest: string) => {{
+				if (/\\[nrt]$/.test(rest)) return m;
+				return q + drv + rest.replace(/\\/g, "/") + q;
+			}},
 		);
-		changed = true;
+		if (fixed !== cmd) {{
+			cmd = fixed;
+			changed = true;
+		}}
 	}}
 
 	// 4. Auto-lock UTF-8 across BOTH Bash and PowerShell Python invocations (prevents 99% of Windows GBK crashes)
@@ -1280,6 +1344,7 @@ export interface DeepSeekRouteInput {{
 	recentToolErrors?: number;
 	recentToolSuccessesAfterEdit?: number;
 	stagnantHeavyTurns?: number;
+	consecutiveLightTurns?: number;
 }}
 
 function clampDeepSeekEffort(raw?: string): DeepSeekEffort {{
@@ -1309,14 +1374,17 @@ export function routeDeepSeekFlashEffort(input: DeepSeekRouteInput): {{
 		const chosen = classifyDeepSeekEffort(input.userText ?? "", ceiling);
 		return {{ thinkingLevel: chosen, phase: `user-${{chosen}}` }};
 	}}
-	// continuation: sticky by default, escalate on repeated tool errors, cool down on overthinking stalls
-	if ((input.recentToolErrors ?? 0) >= 2) {{
+	// continuation: sticky by default, escalate on repeated tool errors, cool down on stalls or routine loops
+	const errs = input.recentToolErrors ?? 0;
+	if (errs >= 2) {{
 		const next: DeepSeekEffort = prev === "low" ? "high" : "max";
 		return {{ thinkingLevel: next, phase: "error-escalate" }};
 	}}
 	if (
 		prev === "max" &&
-		((input.stagnantHeavyTurns ?? 0) >= 3 || (input.recentToolSuccessesAfterEdit ?? 0) >= 2)
+		((input.stagnantHeavyTurns ?? 0) >= 3 ||
+			(input.recentToolSuccessesAfterEdit ?? 0) >= 2 ||
+			(errs === 0 && (input.consecutiveLightTurns ?? 0) >= 4))
 	) {{
 		return {{ thinkingLevel: "high", phase: "cool-down" }};
 	}}
@@ -1399,8 +1467,14 @@ export default function (pi: ExtensionAPI) {{
 	const builtInCodeEditsThisRun = new Set<string>();
 	let settleGateFiredThisRun = false;
 	let stagnantHeavyTurns = 0;
+	let consecutiveLightTurns = 0;
 	let pendingThinkingNudge = false;
+	let serialSingleToolTurns = 0;
+	let lastBatchTipTurn = -BATCH_TIP_COOLDOWN_TURNS;
+	let pendingBatchNudge = false;
 	let largeReadTipShown = false;
+	let codemodeParallelTipShown = false;
+	let sessionTurnCount = 0;
 	let lastMaskTurn = -MASK_COOLDOWN_TURNS;
 	let expectedCacheReset = false;
 	let sessionInputTokens = 0;
@@ -1421,7 +1495,12 @@ export default function (pi: ExtensionAPI) {{
 		unchangedReads.clear();
 		resetRunState();
 		stagnantHeavyTurns = 0;
+		consecutiveLightTurns = 0;
 		pendingThinkingNudge = false;
+		serialSingleToolTurns = 0;
+		lastBatchTipTurn = -BATCH_TIP_COOLDOWN_TURNS;
+		pendingBatchNudge = false;
+		sessionTurnCount = 0;
 		lastMaskTurn = -MASK_COOLDOWN_TURNS;
 		lastCacheDropPct = null;
 	}};
@@ -1476,6 +1555,7 @@ export default function (pi: ExtensionAPI) {{
 					recentToolErrors,
 					recentToolSuccessesAfterEdit,
 					stagnantHeavyTurns,
+					consecutiveLightTurns,
 				}});
 				const nextState =
 					request.reason === "direct"
@@ -1532,6 +1612,7 @@ export default function (pi: ExtensionAPI) {{
 	pi.on("session_start", (_event, ctx) => {{
 		resetTransientState();
 		largeReadTipShown = false;
+		codemodeParallelTipShown = false;
 		sessionInputTokens = 0;
 		sessionCacheReadTokens = 0;
 		expectedCacheReset = false;
@@ -1548,6 +1629,7 @@ export default function (pi: ExtensionAPI) {{
 	pi.on("session_before_switch", () => {{
 		resetTransientState();
 		largeReadTipShown = false;
+		codemodeParallelTipShown = false;
 		sessionInputTokens = 0;
 		sessionCacheReadTokens = 0;
 		expectedCacheReset = false;
@@ -1787,16 +1869,19 @@ export default function (pi: ExtensionAPI) {{
 	}});
 
 	pi.on("turn_end", (event, ctx) => {{
+		sessionTurnCount += 1;
 		const msg = event.message as {{
 			role?: string;
 			content?: Array<{{ type?: string; thinking?: string; name?: string }}>;
 			usage?: {{ input?: number; cacheRead?: number }};
 		}} | undefined;
+		let turnPrompt = 0;
+		let coldCacheWindow = false;
 		if (msg?.role === "assistant" && Array.isArray(msg.content)) {{
 			// Live DeepSeek 50x KV-cache hit-rate telemetry & unexpected drop alarm
 			const uIn = typeof msg.usage?.input === "number" ? msg.usage.input : 0;
 			const uCache = typeof msg.usage?.cacheRead === "number" ? msg.usage.cacheRead : 0;
-			const turnPrompt = uIn + uCache;
+			turnPrompt = uIn + uCache;
 			if (turnPrompt > 0) {{
 				sessionInputTokens += uIn;
 				sessionCacheReadTokens += uCache;
@@ -1806,17 +1891,48 @@ export default function (pi: ExtensionAPI) {{
 				}} else if (turnHitPct >= 60) {{
 					lastCacheDropPct = null;
 				}}
+				if (turnPrompt >= FREE_MASK_MIN_TOKENS && turnHitPct < 55 && !expectedCacheReset) {{
+					coldCacheWindow = true;
+				}}
 				expectedCacheReset = false;
 			}}
 
 			let thinkChars = 0;
 			let didEdit = false;
+			let toolCallCount = 0;
+			let singleToolName = "";
 			for (const blk of msg.content) {{
 				if (blk?.type === "thinking" && typeof blk.thinking === "string") {{
 					thinkChars += blk.thinking.length;
-				}} else if (blk?.type === "toolCall" && typeof blk.name === "string" && EDIT_TOOLS.has(blk.name)) {{
-					didEdit = true;
+				}} else if (blk?.type === "toolCall" && typeof blk.name === "string") {{
+					toolCallCount += 1;
+					singleToolName = blk.name;
+					if (EDIT_TOOLS.has(blk.name)) {{
+						didEdit = true;
+					}}
 				}}
+			}}
+			const hadToolError = Array.isArray(event.toolResults)
+				? event.toolResults.some((r: {{ isError?: boolean }}) => r?.isError === true)
+				: false;
+			if (hadToolError || didEdit || thinkChars >= HEAVY_THINKING_CHARS) {{
+				consecutiveLightTurns = 0;
+			}} else if (toolCallCount > 0 && thinkChars < LIGHT_THINKING_CHARS) {{
+				consecutiveLightTurns += 1;
+			}} else {{
+				consecutiveLightTurns = 0;
+			}}
+			if (toolCallCount === 1 && SERIAL_BATCHABLE_TOOLS.has(singleToolName) && !didEdit) {{
+				serialSingleToolTurns += 1;
+				if (
+					serialSingleToolTurns >= SERIAL_BATCH_THRESHOLD &&
+					sessionTurnCount - lastBatchTipTurn >= BATCH_TIP_COOLDOWN_TURNS
+				) {{
+					pendingBatchNudge = true;
+					lastBatchTipTurn = sessionTurnCount;
+				}}
+			}} else if (toolCallCount !== 1 || didEdit || singleToolName === "codemode") {{
+				serialSingleToolTurns = 0;
 			}}
 			if (didEdit) {{
 				stagnantHeavyTurns = 0;
@@ -1831,20 +1947,29 @@ export default function (pi: ExtensionAPI) {{
 			}}
 		}}
 
-		// Native Pi v1.5 batch observation masking at high-water mark with cooldown (KV-cache preserving)
-		const turnIdx = typeof event.turnIndex === "number" ? event.turnIndex : 0;
+		// Native Pi v1.5 batch observation masking using monotonic sessionTurnCount
+		// (Pi resets event.turnIndex=0 on each agent_start) + free cold-cache opportunistic window
 		const contextEntries = event.context?.contextEntries;
-		if (
-			Array.isArray(contextEntries) &&
-			turnIdx - lastMaskTurn >= MASK_COOLDOWN_TURNS
-		) {{
+		const cooldownReady = sessionTurnCount - lastMaskTurn >= MASK_COOLDOWN_TURNS;
+		if (Array.isArray(contextEntries) && (cooldownReady || coldCacheWindow)) {{
 			const usage = ctx?.getContextUsage?.();
-			const plan = planObservationMasking(contextEntries, {{
-				usagePercent: usage?.percent ?? null,
-				usageTokens: usage?.tokens ?? null,
-			}});
+			const effTokens = usage?.tokens ?? (turnPrompt > 0 ? turnPrompt : null);
+			const plan = planObservationMasking(
+				contextEntries,
+				coldCacheWindow && !cooldownReady
+					? {{
+							usagePercent: usage?.percent ?? null,
+							usageTokens: effTokens,
+							highWaterTokens: FREE_MASK_MIN_TOKENS,
+							staleCharsFallback: FREE_MASK_STALE_CHARS,
+						}}
+					: {{
+							usagePercent: usage?.percent ?? null,
+							usageTokens: effTokens,
+						}},
+			);
 			if (plan.edits.length > 0) {{
-				lastMaskTurn = turnIdx;
+				lastMaskTurn = sessionTurnCount;
 				maskedCount += plan.maskedCount;
 				expectedCacheReset = true;
 				updateHud(ctx);
@@ -2050,42 +2175,49 @@ export default function (pi: ExtensionAPI) {{
 			mutated = true;
 		}}
 
-		// B2. Pi `codemode` error self-healing tip (eliminates blind MCP name/schema guessing loops)
-		if (
-			event.toolName === "codemode" &&
-			(event.isError || outText.includes("Script failed") || outText.includes("is not a function"))
-		) {{
-			outText += `\n[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs & structuredContent fields.`;
-			mutated = true;
+		// B2. Pi `codemode` error self-healing tip + one-time Promise.allSettled parallelism tip
+		if (event.toolName === "codemode") {{
+			if (event.isError || outText.includes("Script failed") || outText.includes("is not a function")) {{
+				outText += `\n[ap codemode-tip] Use await searchTools("ap_") or await describeTool("mcp__agent_primitives__<name>") to verify exact tool IDs & structuredContent fields.`;
+				mutated = true;
+			}} else if (!codemodeParallelTipShown) {{
+				const code = typeof event.input?.code === "string" ? event.input.code : "";
+				const awaitCount = (code.match(/\bawait\s+/g) ?? []).length;
+				if (awaitCount >= 3 && !/Promise\.all(?:Settled)?\s*\(/.test(code)) {{
+					outText += `\n[ap codemode-parallel] Sequential awaits detected (${{awaitCount}}x); batch independent calls with Promise.allSettled([...]) inside codemode for 3-5x faster multi-step runs.`;
+					codemodeParallelTipShown = true;
+					mutated = true;
+				}}
+			}}
 		}}
 
-		// C. Shell output auto-sieve (>28KB or giant single line) + 3x doom-loop circuit-breaker
+		// C. Dual-tier shell auto-sieve (>=24KB unconditional, >=14KB structured/noisy) + failure tips + loop-breaker
 		if (event.toolName === "bash" || event.toolName === "powershell") {{
 			const cmd = typeof event.input?.command === "string" ? event.input.command : "";
 			const skipSieve =
 				cmd.includes("ap.exe") ||
 				/\bap\s+(?:read|search|query|atlas|probe|guard|sieve|baton|splice|recall)\b/.test(cmd);
-			if (!skipSieve) {{
-				const hasGiantLine = outText.split("\n").some((l: string) => l.length > 4500);
-				if (outText.length >= 28000 || hasGiantLine) {{
-					const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
-						input: outText,
-						encoding: "utf8",
-						timeout: 4000,
-						windowsHide: true,
-						env: {{ ...process.env, SIEVE_HOME }},
-					}});
-					if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < outText.length * 0.8) {{
-						outText = res.stdout;
-						sievedCount += 1;
-						mutated = true;
-					}}
+			if (!skipSieve && shouldAutoSieveShellOutput(outText)) {{
+				const res = spawnSync(AP_BIN, ["sieve", "pipe", "--label", "pi-bash"], {{
+					input: outText,
+					encoding: "utf8",
+					timeout: 4000,
+					windowsHide: true,
+					env: {{ ...process.env, SIEVE_HOME }},
+				}});
+				if (res.status === 0 && res.stdout && res.stdout.length > 40 && res.stdout.length < outText.length * 0.78) {{
+					outText = res.stdout;
+					sievedCount += 1;
+					mutated = true;
 				}}
 			}}
 
-			if (event.isError && QUOTE_OR_BS_ERR.test(outText)) {{
-				outText += `\n[ap quote-tip] Avoid nested quotes/backslashes inside inline python -c; use a single-quoted heredoc (python - <<'PY' ... PY) or write a script file via write/ap_edit.`;
-				mutated = true;
+			if (event.isError) {{
+				const failTip = classifyShellFailureTip(event.toolName, cmd, outText);
+				if (failTip) {{
+					outText += `\n${{failTip}}`;
+					mutated = true;
+				}}
 			}}
 
 			const fp = normCmdFingerprint(cmd);
@@ -2112,6 +2244,15 @@ export default function (pi: ExtensionAPI) {{
 			outText += `\n[ap thinking-guard] 3 consecutive heavy-thinking turns without code changes. Commit to one concrete edit, focused test, or ap_locate/ap_changes call now.`;
 			pendingThinkingNudge = false;
 			stagnantHeavyTurns = 0;
+			guardsTriggered += 1;
+			mutated = true;
+		}}
+
+		// E. Serial single-tool exploration batch nudge (rate-limited: once per 25 turns after 6 consecutive 1-tool turns)
+		if (pendingBatchNudge) {{
+			outText += `\n[ap batch-tip] ${{SERIAL_BATCH_THRESHOLD}} consecutive single-tool turns. Batch independent read/search checks via parallel tool calls or codemode Promise.allSettled to cut 3-5x round-trip latency.`;
+			pendingBatchNudge = false;
+			serialSingleToolTurns = 0;
 			guardsTriggered += 1;
 			mutated = true;
 		}}
@@ -2821,6 +2962,9 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("serializeBranchForHandoff")
                 && s.contains("LOOP_ERR_THRESHOLD")
                 && s.contains("QUOTE_OR_BS_ERR")
+                && s.contains("shouldAutoSieveShellOutput")
+                && s.contains("classifyShellFailureTip")
+                && s.contains("sessionTurnCount")
                 && s.contains("session_before_compact")
                 && s.contains("agent_before_settle")
                 && s.contains("routeDeepSeekFlashEffort")
