@@ -2923,3 +2923,220 @@ fn test_batch_read_search_slow_grep_heal_cdp_watch_and_http_batch() {
         let _ = ext_browser.wait();
     }
 }
+
+#[test]
+fn test_pe_imports_exports_hex_ps_fs_diff_tcp_and_listen() {
+    use std::io::Read as _;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v23_home");
+
+    // 1. Construct a minimal valid PE32+ (x86_64) DLL with Export Directory + Import Directory + ASLR/NX flags
+    // Layout:
+    //   0x000..0x080: DOS header (e_lfanew = 0x80)
+    //   0x080..0x098: PE\0\0 + COFF (machine=0x8664, n_sec=1, opt_sz=0xF0)
+    //   0x098..0x188: Optional Header PE32+ (magic=0x20B, entry=0x1000, DllChars=0x0140 ASLR|NX, Export RVA=0x1000, Import RVA=0x1100)
+    //   0x188..0x1B0: Section 0 `.rdata` (vsize=0x400, vaddr=0x1000, raw_size=0x400, raw_ptr=0x200, chars=0x40000040 R)
+    //   0x200..0x600: `.rdata` raw data (RVA 0x1000 == file offset 0x200)
+    let mut pe = vec![0u8; 0x600];
+    pe[0] = b'M';
+    pe[1] = b'Z';
+    pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes()); // x86_64
+    pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes()); // 1 section
+    pe[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes()); // opt header size
+                                                            // Optional header at 0x98
+    pe[0x98..0x9A].copy_from_slice(&0x020Bu16.to_le_bytes()); // PE32+
+    pe[0x98 + 16..0x98 + 20].copy_from_slice(&0x1000u32.to_le_bytes()); // entry RVA
+    pe[0x98 + 70..0x98 + 72].copy_from_slice(&0x0140u16.to_le_bytes()); // ASLR | NX
+                                                                        // Data Directory at 0x98 + 112 = 0x108
+    pe[0x108..0x10C].copy_from_slice(&0x1000u32.to_le_bytes()); // Export RVA
+    pe[0x10C..0x110].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x110..0x114].copy_from_slice(&0x1100u32.to_le_bytes()); // Import RVA
+    pe[0x114..0x118].copy_from_slice(&0x80u32.to_le_bytes());
+    // Section 0 `.rdata` at 0x188
+    pe[0x188..0x18E].copy_from_slice(b".rdata");
+    pe[0x188 + 8..0x188 + 12].copy_from_slice(&0x400u32.to_le_bytes()); // vsize
+    pe[0x188 + 12..0x188 + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // vaddr
+    pe[0x188 + 16..0x188 + 20].copy_from_slice(&0x400u32.to_le_bytes()); // raw_size
+    pe[0x188 + 20..0x188 + 24].copy_from_slice(&0x200u32.to_le_bytes()); // raw_ptr
+    pe[0x188 + 36..0x188 + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes()); // R
+                                                                               // Export Directory at file 0x200 (RVA 0x1000)
+    pe[0x200 + 24..0x200 + 28].copy_from_slice(&1u32.to_le_bytes()); // NumberOfNames = 1
+    pe[0x200 + 32..0x200 + 36].copy_from_slice(&0x1040u32.to_le_bytes()); // AddressOfNames RVA
+    pe[0x240..0x244].copy_from_slice(&0x1050u32.to_le_bytes()); // Name[0] RVA
+    pe[0x250..0x250 + 16].copy_from_slice(b"VerifyPluginSig\0");
+    // Import Directory at file 0x300 (RVA 0x1100)
+    pe[0x300..0x304].copy_from_slice(&0x1140u32.to_le_bytes()); // OriginalFirstThunk RVA
+    pe[0x300 + 12..0x300 + 16].copy_from_slice(&0x1160u32.to_le_bytes()); // DLL Name RVA
+    pe[0x340..0x348].copy_from_slice(&0x1180u64.to_le_bytes()); // Thunk[0] -> Hint/Name RVA
+    pe[0x360..0x360 + 13].copy_from_slice(b"KERNEL32.dll\0");
+    pe[0x382..0x382 + 15].copy_from_slice(b"CreateProcessW\0");
+
+    let dll_p = root.join("plugin.dll");
+    fs::write(&dll_p, &pe).unwrap();
+
+    let pe_rd = run_ap(
+        root,
+        &["read", "plugin.dll"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(pe_rd.status.success());
+    let pe_s = String::from_utf8_lossy(&pe_rd.stdout);
+    assert!(
+        pe_s.contains("ASLR")
+            && pe_s.contains("NX/DEP")
+            && pe_s.contains("VerifyPluginSig")
+            && pe_s.contains("KERNEL32.dll")
+            && pe_s.contains("CreateProcessW")
+            && pe_s.contains("Notable APIs")
+            && pe_s.contains("SHA-256"),
+        "Expected deep PE analysis, got: {pe_s}"
+    );
+
+    let hx_rd = run_ap(
+        root,
+        &[
+            "read",
+            "plugin.dll",
+            "--hex",
+            "--offset",
+            "0,0x80",
+            "--chars",
+            "32",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(hx_rd.status.success());
+    let hx_s = String::from_utf8_lossy(&hx_rd.stdout);
+    assert!(
+        hx_s.contains("4d 5a") && hx_s.contains("50 45 00 00") && hx_s.contains("Offset 0x80"),
+        "Expected canonical hex dump for MZ & PE headers, got: {hx_s}"
+    );
+
+    // 2. Cross-platform Process Tree & Cmdline Inspector (`ap probe ps`)
+    let self_pid = std::process::id().to_string();
+    let ps_out = run_ap(
+        root,
+        &["probe", "ps", "--pid", &self_pid, "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ps_out.status.success());
+    let ps_j: Value = serde_json::from_slice(&ps_out.stdout).unwrap();
+    assert_eq!(ps_j["ok"], true);
+    assert!(
+        ps_j["total_matched"].as_u64().unwrap_or(0) >= 1,
+        "Expected ap probe ps to find current test PID {self_pid}: {ps_j}"
+    );
+
+    // 3. Atomic FS Snapshot Diff & Recent-Files Radar (`ap probe fs`)
+    let fs_dir = root.join("fs_watch");
+    fs::create_dir_all(&fs_dir).unwrap();
+    fs::write(fs_dir.join("keep.txt"), "v1").unwrap();
+    fs::write(fs_dir.join("old.txt"), "remove-me").unwrap();
+    assert!(run_ap(
+        root,
+        &["probe", "fs", fs_dir.to_str().unwrap(), "--snapshot", "s1"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    )
+    .status
+    .success());
+
+    fs::write(fs_dir.join("keep.txt"), "v2-updated-content").unwrap();
+    fs::remove_file(fs_dir.join("old.txt")).unwrap();
+    fs::write(fs_dir.join("brand_new.log"), "created").unwrap();
+
+    let fd = run_ap(
+        root,
+        &[
+            "probe",
+            "fs",
+            fs_dir.to_str().unwrap(),
+            "--diff",
+            "s1",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(fd.status.success());
+    let fd_j: Value = serde_json::from_slice(&fd.stdout).unwrap();
+    assert!(fd_j["added"].to_string().contains("brand_new.log"));
+    assert!(fd_j["modified"].to_string().contains("keep.txt"));
+    assert!(fd_j["deleted"].to_string().contains("old.txt"));
+
+    // 4. Deadline-Bounded Raw TCP Banner/Send Probe (`ap probe tcp`)
+    let tcp_srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let tport = tcp_srv.local_addr().unwrap().port();
+    let tcp_thr = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = tcp_srv.accept() {
+            let mut b = [0u8; 64];
+            let n = s.read(&mut b).unwrap_or(0);
+            if String::from_utf8_lossy(&b[..n]).contains("PING") {
+                let _ = s.write_all(b"+PONG_V23\r\n");
+            }
+        }
+    });
+    let tp = run_ap(
+        root,
+        &[
+            "probe",
+            "tcp",
+            &format!("127.0.0.1:{tport}"),
+            "--send",
+            "PING\\r\\n",
+            "--wait-ms",
+            "600",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    let _ = tcp_thr.join();
+    assert!(tp.status.success());
+    let tp_j: Value = serde_json::from_slice(&tp.stdout).unwrap();
+    assert_eq!(tp_j["connected"], true);
+    assert!(tp_j["text"].as_str().unwrap_or("").contains("PONG_V23"));
+
+    // 5. Bounded Ephemeral HTTP Webhook/Callback Capture Server (`ap probe listen --run`)
+    let ap_path = env!("CARGO_BIN_EXE_ap").replace('\\', "/");
+    let trigger_cmd = if cfg!(windows) {
+        format!("& \"{ap_path}\" probe http \"http://127.0.0.1:{{{{PORT}}}}/hook?tok=V23_OK\"")
+    } else {
+        format!("\"{ap_path}\" probe http \"http://127.0.0.1:{{{{PORT}}}}/hook?tok=V23_OK\"")
+    };
+    let ls = run_ap(
+        root,
+        &[
+            "probe",
+            "listen",
+            "--wait-ms",
+            "5000",
+            "--max-reqs",
+            "1",
+            "--run",
+            &trigger_cmd,
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(
+        ls.status.success(),
+        "ap probe listen failed: {}{}",
+        String::from_utf8_lossy(&ls.stdout),
+        String::from_utf8_lossy(&ls.stderr)
+    );
+    let ls_j: Value = serde_json::from_slice(&ls.stdout).unwrap();
+    assert_eq!(ls_j["captured_count"], 1);
+    assert!(ls_j["requests"][0]["path"]
+        .as_str()
+        .unwrap_or("")
+        .contains("/hook?tok=V23_OK"));
+}

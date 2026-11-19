@@ -51,6 +51,9 @@ struct ReadCli {
     /// Render URL in real Headless Edge/Chrome (extracts JS-hydrated text, tables & interactive controls)
     #[arg(long)]
     render: bool,
+    /// Canonical hex + ASCII dump (`xxd`/`hexdump -C`) with SHA-256 & entropy (supports decimal or `0x` `--offset`)
+    #[arg(long)]
+    hex: bool,
     /// Maximum characters before smart outline + pagination kicks in
     #[arg(long, default_value_t = 8000)]
     max_chars: usize,
@@ -761,7 +764,9 @@ pub fn run_cli(args: &[String]) -> i32 {
             .unwrap_or("")
             .to_ascii_lowercase();
         let lbl = p.to_string_lossy().replace('\\', "/");
-        if matches!(ext_s.as_str(), "sqlite" | "db" | "sqlite3") || crate::query::is_sqlite_magic(p)
+        if !cli.hex
+            && (matches!(ext_s.as_str(), "sqlite" | "db" | "sqlite3")
+                || crate::query::is_sqlite_magic(p))
         {
             match extract_sqlite_md(p) {
                 Ok(md) => (md.into_bytes(), "sqlite-md".to_string(), lbl),
@@ -778,6 +783,69 @@ pub fn run_cli(args: &[String]) -> i32 {
             (b, ext_s, lbl)
         }
     };
+
+    if cli.hex {
+        let mut offs: Vec<usize> = Vec::new();
+        if let Some(ref spec) = cli.offset {
+            for part in spec.split(',') {
+                let t = part.trim();
+                let parsed = if let Some(hx) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X"))
+                {
+                    usize::from_str_radix(hx, 16).ok()
+                } else {
+                    t.parse::<usize>().ok()
+                };
+                if let Some(v) = parsed {
+                    offs.push(v);
+                }
+            }
+        }
+        if offs.is_empty() {
+            offs.push(0);
+        }
+        let win = if cli.chars == 2400 {
+            512
+        } else {
+            cli.chars.clamp(16, 4096)
+        };
+        let sha = crate::binary::sha256_hex(&raw_bytes);
+        let ent =
+            crate::binary::shannon_entropy(&raw_bytes[..raw_bytes.len().min(4 * 1024 * 1024)]);
+        let mut blocks = Vec::new();
+        for off in offs.iter().take(12) {
+            let dump = crate::binary::format_hex_dump(&raw_bytes, *off, win);
+            blocks.push(format!("## Offset 0x{off:x} ({off} B, len={win})\n{dump}"));
+        }
+        let rendered = format!(
+            "# HEX `{label}` ({} B | sha256=`{sha}` | entropy=`{ent:.2}`)\n{}",
+            raw_bytes.len(),
+            blocks.join("\n\n")
+        );
+        record_event(
+            "read",
+            raw_bytes.len() as u64,
+            rendered.len() as u64,
+            0,
+            1,
+            "hex",
+        );
+        if cli.json {
+            println!(
+                "{}",
+                json!({
+                    "target": label,
+                    "format": "hex",
+                    "size_bytes": raw_bytes.len(),
+                    "sha256": sha,
+                    "entropy": (ent * 100.0).round() / 100.0,
+                    "content": rendered,
+                })
+            );
+        } else {
+            println!("{rendered}");
+        }
+        return 0;
+    }
 
     let raw_len = raw_bytes.len() as u64;
     let mut win_heals = 0u32;

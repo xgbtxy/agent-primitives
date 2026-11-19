@@ -14,6 +14,7 @@ pub struct PortEntry {
     pub bind: String,
     pub pid: u32,
     pub process: String,
+    pub cmdline: Option<String>,
     pub cdp_browser: Option<String>,
 }
 
@@ -132,6 +133,24 @@ fn list_raw_listening_ports() -> Vec<(u16, String, u32, String)> {
     out
 }
 
+/// Return a map of `PID -> sorted unique listening TCP ports` for process enrichment.
+pub fn list_pid_ports_map() -> BTreeMap<u32, Vec<u16>> {
+    let mut map: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
+    for (port, _bind, pid, _proc) in list_raw_listening_ports() {
+        if pid == 0 {
+            continue;
+        }
+        let ent = map.entry(pid).or_default();
+        if !ent.contains(&port) {
+            ent.push(port);
+        }
+    }
+    for v in map.values_mut() {
+        v.sort_unstable();
+    }
+    map
+}
+
 pub fn run_ports_radar(port_filter: Option<u16>, probe_cdp: bool, as_json: bool) -> i32 {
     let t0 = Instant::now();
     let raw = list_raw_listening_ports();
@@ -147,11 +166,19 @@ pub fn run_ports_radar(port_filter: Option<u16>, probe_cdp: bool, as_json: bool)
             bind,
             pid,
             process,
+            cmdline: None,
             cdp_browser: None,
         });
     }
 
     let mut entries: Vec<PortEntry> = dedup.into_values().collect();
+    if port_filter.is_some() {
+        for e in &mut entries {
+            if e.pid > 0 {
+                e.cmdline = crate::ps::lookup_pid_cmdline(e.pid);
+            }
+        }
+    }
     if probe_cdp {
         let mut probed = 0usize;
         for e in &mut entries {
@@ -191,9 +218,14 @@ pub fn run_ports_radar(port_filter: Option<u16>, probe_cdp: bool, as_json: bool)
                 .as_deref()
                 .map(|b| format!("  [CDP READY: {b}]"))
                 .unwrap_or_default();
+            let cmd_tag = e
+                .cmdline
+                .as_deref()
+                .map(|c| format!("  cmd=`{}`", c.chars().take(160).collect::<String>()))
+                .unwrap_or_default();
             println!(
-                "  - :{:<5} ({:<15}) PID={:<6} {}{}",
-                e.port, e.bind, e.pid, e.process, cdp_tag
+                "  - :{:<5} ({:<15}) PID={:<6} {}{}{}",
+                e.port, e.bind, e.pid, e.process, cdp_tag, cmd_tag
             );
         }
     }

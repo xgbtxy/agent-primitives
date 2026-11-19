@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-primitives"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "ap-atlas",
  "ap-baton",
@@ -29,6 +29,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "zip",
 ]
@@ -94,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "ap-atlas"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "clap",
  "encoding_rs",
@@ -114,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "ap-baton"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "clap",
  "serde",
@@ -123,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "ap-guard"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "base64",
  "clap",
@@ -135,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "ap-probe"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "base64",
  "clap",
@@ -154,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "ap-recall"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "clap",
  "rusqlite",
@@ -165,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "ap-sieve"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "clap",
  "csv",
@@ -178,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "ap-splice"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "base64",
  "clap",

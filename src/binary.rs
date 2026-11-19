@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
@@ -83,6 +84,13 @@ pub struct AsarEntry {
     pub unpacked: bool,
 }
 
+fn read_u64_le(b: &[u8], off: usize) -> Option<u64> {
+    let s = b.get(off..off + 8)?;
+    Some(u64::from_le_bytes([
+        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+    ]))
+}
+
 fn read_u32_le(b: &[u8], off: usize) -> Option<u32> {
     let s = b.get(off..off + 4)?;
     Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -91,6 +99,82 @@ fn read_u32_le(b: &[u8], off: usize) -> Option<u32> {
 fn read_u16_le(b: &[u8], off: usize) -> Option<u16> {
     let s = b.get(off..off + 2)?;
     Some(u16::from_le_bytes([s[0], s[1]]))
+}
+
+fn read_cstr(b: &[u8], off: usize, max_len: usize) -> Option<String> {
+    if off >= b.len() {
+        return None;
+    }
+    let slice = &b[off..b.len().min(off + max_len)];
+    let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&slice[..end]).to_string())
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let dig = h.finalize();
+    let mut out = String::with_capacity(64);
+    for b in dig {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+pub fn shannon_entropy(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut freq = [0u64; 256];
+    for &b in bytes {
+        freq[b as usize] += 1;
+    }
+    let n = bytes.len() as f64;
+    let mut ent = 0.0f64;
+    for &c in &freq {
+        if c > 0 {
+            let p = (c as f64) / n;
+            ent -= p * p.log2();
+        }
+    }
+    ent
+}
+
+/// Canonical `xxd`/`hexdump -C` hex + ASCII viewer (zero external tools).
+pub fn format_hex_dump(bytes: &[u8], offset: usize, len: usize) -> String {
+    if offset >= bytes.len() {
+        return format!("(offset 0x{offset:x} exceeds file size {} B)", bytes.len());
+    }
+    let end = offset.saturating_add(len.clamp(16, 4096)).min(bytes.len());
+    let mut lines = Vec::new();
+    let mut cur = offset;
+    while cur < end {
+        let row_end = (cur + 16).min(end);
+        let row = &bytes[cur..row_end];
+        let mut hex_part = String::with_capacity(50);
+        let mut asc_part = String::with_capacity(16);
+        for i in 0..16 {
+            if i == 8 {
+                hex_part.push(' ');
+            }
+            if let Some(&b) = row.get(i) {
+                hex_part.push_str(&format!("{b:02x} "));
+                asc_part.push(if (0x20..=0x7E).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                });
+            } else {
+                hex_part.push_str("   ");
+            }
+        }
+        lines.push(format!("{cur:08x}: {hex_part} |{asc_part}|"));
+        cur += 16;
+    }
+    lines.join("\n")
 }
 
 fn walk_asar_tree(node: &Value, prefix: &str, out: &mut Vec<AsarEntry>) {
@@ -227,68 +311,433 @@ pub fn is_binary_magic(bytes: &[u8]) -> bool {
         || bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE])
 }
 
-/// Inspect PE / ELF / Mach-O / WASM headers + ASCII & Windows UTF-16LE wide strings.
+struct PeSection {
+    name: String,
+    vsize: u32,
+    vaddr: u32,
+    raw_size: u32,
+    raw_ptr: u32,
+    chars: u32,
+}
+
+fn rva_to_file_offset(rva: u32, secs: &[PeSection]) -> Option<usize> {
+    if rva == 0 {
+        return None;
+    }
+    for s in secs {
+        let span = s.vsize.max(s.raw_size);
+        if rva >= s.vaddr && rva < s.vaddr.saturating_add(span) {
+            let delta = rva - s.vaddr;
+            if delta < s.raw_size {
+                return Some((s.raw_ptr as usize).saturating_add(delta as usize));
+            }
+        }
+    }
+    None
+}
+
+fn is_notable_import(fn_name: &str) -> bool {
+    const NOTABLE: [&str; 22] = [
+        "CreateProcess",
+        "ShellExecute",
+        "WinExec",
+        "LoadLibrary",
+        "GetProcAddress",
+        "VirtualAlloc",
+        "VirtualProtect",
+        "WriteProcessMemory",
+        "CreateRemoteThread",
+        "CryptUnprotectData",
+        "CreateNamedPipe",
+        "ConnectNamedPipe",
+        "WSAConnect",
+        "InternetOpen",
+        "WinHttpOpen",
+        "URLDownloadToFile",
+        "RegSetValue",
+        "RegCreateKey",
+        "SetWindowsHook",
+        "CreateService",
+        "OpenProcess",
+        "system",
+    ];
+    NOTABLE.iter().any(|k| fn_name.contains(k))
+}
+
+fn parse_pe_details(bytes: &[u8], pe_off: usize, out: &mut Vec<String>) {
+    let machine = read_u16_le(bytes, pe_off + 4).unwrap_or(0);
+    let n_sec = read_u16_le(bytes, pe_off + 6).unwrap_or(0) as usize;
+    let opt_sz = read_u16_le(bytes, pe_off + 20).unwrap_or(0) as usize;
+    let arch = match machine {
+        0x8664 => "x86_64",
+        0x014c => "x86",
+        0xaa64 => "ARM64",
+        _ => "other",
+    };
+
+    let opt_off = pe_off + 24;
+    let opt_magic = if opt_sz >= 2 {
+        read_u16_le(bytes, opt_off).unwrap_or(0)
+    } else {
+        0
+    };
+    let is_pe64 = opt_magic == 0x020B;
+    let entry_rva = if opt_sz >= 20 {
+        read_u32_le(bytes, opt_off + 16).unwrap_or(0)
+    } else {
+        0
+    };
+    let mut mitigations = Vec::new();
+    if opt_sz >= 72 {
+        let dll_chars = read_u16_le(bytes, opt_off + 70).unwrap_or(0);
+        if (dll_chars & 0x0040) != 0 {
+            mitigations.push("ASLR");
+        }
+        if (dll_chars & 0x0100) != 0 {
+            mitigations.push("NX/DEP");
+        }
+        if (dll_chars & 0x4000) != 0 {
+            mitigations.push("CFG");
+        }
+        if (dll_chars & 0x0020) != 0 {
+            mitigations.push("HighEntropyVA");
+        }
+    }
+
+    let mut secs = Vec::new();
+    let sec_base = opt_off + opt_sz;
+    for s in 0..n_sec.min(32) {
+        let off = sec_base + s * 40;
+        if off + 40 > bytes.len() {
+            break;
+        }
+        let nm = String::from_utf8_lossy(&bytes[off..off + 8])
+            .trim_end_matches('\0')
+            .to_string();
+        secs.push(PeSection {
+            name: if nm.is_empty() { format!("sec{s}") } else { nm },
+            vsize: read_u32_le(bytes, off + 8).unwrap_or(0),
+            vaddr: read_u32_le(bytes, off + 12).unwrap_or(0),
+            raw_size: read_u32_le(bytes, off + 16).unwrap_or(0),
+            raw_ptr: read_u32_le(bytes, off + 20).unwrap_or(0),
+            chars: read_u32_le(bytes, off + 36).unwrap_or(0),
+        });
+    }
+
+    let sec_names: Vec<&str> = secs.iter().map(|s| s.name.as_str()).collect();
+    out.push(format!(
+        "## Binary Header: Windows PE ({arch}, {} B, entry=0x{entry_rva:x}, sections: [{}])",
+        bytes.len(),
+        sec_names.join(", ")
+    ));
+    let ent = shannon_entropy(&bytes[..bytes.len().min(4 * 1024 * 1024)]);
+    let ent_tag = if ent > 7.2 {
+        " [HIGH-ENTROPY/PACKED]"
+    } else {
+        ""
+    };
+    out.push(format!(
+        "- SHA-256: `{}` | Entropy: `{ent:.2}`{ent_tag} | Mitigations: `[{}]`",
+        sha256_hex(bytes),
+        if mitigations.is_empty() {
+            "none".to_string()
+        } else {
+            mitigations.join(", ")
+        }
+    ));
+
+    if !secs.is_empty() {
+        let mut sec_rows = Vec::new();
+        for s in &secs {
+            let mut perm = String::new();
+            if (s.chars & 0x4000_0000) != 0 {
+                perm.push('R');
+            }
+            if (s.chars & 0x8000_0000) != 0 {
+                perm.push('W');
+            }
+            if (s.chars & 0x2000_0000) != 0 {
+                perm.push('X');
+            }
+            let s_ent = bytes
+                .get(
+                    s.raw_ptr as usize
+                        ..(s.raw_ptr as usize)
+                            .saturating_add((s.raw_size as usize).min(1024 * 1024)),
+                )
+                .map(shannon_entropy)
+                .unwrap_or(0.0);
+            sec_rows.push(format!(
+                "`{}` (rva=0x{:x} raw={}B {} ent={:.2})",
+                s.name, s.vaddr, s.raw_size, perm, s_ent
+            ));
+        }
+        out.push(format!(
+            "### PE Sections ({}): {}",
+            secs.len(),
+            sec_rows.join(" · ")
+        ));
+    }
+
+    let dd_off = opt_off + if is_pe64 { 112 } else { 96 };
+    // 1. Export Directory (index 0)
+    if opt_sz >= if is_pe64 { 120 } else { 104 } {
+        let exp_rva = read_u32_le(bytes, dd_off).unwrap_or(0);
+        if let Some(exp_off) = rva_to_file_offset(exp_rva, &secs) {
+            let n_names = read_u32_le(bytes, exp_off + 24).unwrap_or(0) as usize;
+            let names_rva = read_u32_le(bytes, exp_off + 32).unwrap_or(0);
+            if let Some(names_off) = rva_to_file_offset(names_rva, &secs) {
+                let mut exports = Vec::new();
+                for idx in 0..n_names.min(60) {
+                    if let Some(nrva) = read_u32_le(bytes, names_off + idx * 4) {
+                        if let Some(noff) = rva_to_file_offset(nrva, &secs) {
+                            if let Some(nm) = read_cstr(bytes, noff, 128) {
+                                exports.push(nm);
+                            }
+                        }
+                    }
+                }
+                if !exports.is_empty() {
+                    out.push(format!(
+                        "### PE Exports ({} shown / {} total): {}",
+                        exports.len(),
+                        n_names,
+                        exports.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2. Import Directory (index 1)
+    if opt_sz >= if is_pe64 { 128 } else { 112 } {
+        let imp_rva = read_u32_le(bytes, dd_off + 8).unwrap_or(0);
+        if let Some(imp_off) = rva_to_file_offset(imp_rva, &secs) {
+            let mut dll_lines = Vec::new();
+            let mut notable = Vec::new();
+            for d_idx in 0..40usize {
+                let desc = imp_off + d_idx * 20;
+                if desc + 20 > bytes.len() {
+                    break;
+                }
+                let oft = read_u32_le(bytes, desc).unwrap_or(0);
+                let name_rva = read_u32_le(bytes, desc + 12).unwrap_or(0);
+                let ft = read_u32_le(bytes, desc + 16).unwrap_or(0);
+                if oft == 0 && name_rva == 0 && ft == 0 {
+                    break;
+                }
+                let dll_name = rva_to_file_offset(name_rva, &secs)
+                    .and_then(|o| read_cstr(bytes, o, 128))
+                    .unwrap_or_else(|| format!("dll@{name_rva:#x}"));
+                let thunk_rva = if oft != 0 { oft } else { ft };
+                let mut funcs = Vec::new();
+                if let Some(mut t_off) = rva_to_file_offset(thunk_rva, &secs) {
+                    let step = if is_pe64 { 8 } else { 4 };
+                    for _ in 0..40 {
+                        let val: u64 = if is_pe64 {
+                            read_u64_le(bytes, t_off).unwrap_or(0)
+                        } else {
+                            read_u32_le(bytes, t_off).unwrap_or(0) as u64
+                        };
+                        if val == 0 {
+                            break;
+                        }
+                        t_off += step;
+                        let is_ord = if is_pe64 {
+                            (val & (1u64 << 63)) != 0
+                        } else {
+                            (val & (1u64 << 31)) != 0
+                        };
+                        if is_ord {
+                            funcs.push(format!("#{}", val & 0xFFFF));
+                        } else if let Some(hn_off) =
+                            rva_to_file_offset((val & 0x7FFF_FFFF) as u32, &secs)
+                        {
+                            if let Some(fn_name) = read_cstr(bytes, hn_off + 2, 128) {
+                                if is_notable_import(&fn_name) && notable.len() < 24 {
+                                    notable.push(format!("{dll_name}!{fn_name}"));
+                                }
+                                if funcs.len() < 16 {
+                                    funcs.push(fn_name);
+                                }
+                            }
+                        }
+                    }
+                }
+                dll_lines.push(format!(
+                    "- `{dll_name}`: {}",
+                    if funcs.is_empty() {
+                        "(ordinals/stripped)".to_string()
+                    } else {
+                        funcs.join(", ")
+                    }
+                ));
+            }
+            if !dll_lines.is_empty() {
+                out.push(format!("### PE Imports ({} DLLs)", dll_lines.len()));
+                if !notable.is_empty() {
+                    out.push(format!("- **Notable APIs**: `{}`", notable.join("`, `")));
+                }
+                out.extend(dll_lines);
+            }
+        }
+    }
+}
+
+fn parse_elf_details(bytes: &[u8], out: &mut Vec<String>) {
+    let is_64 = bytes[4] == 2;
+    let bits = if is_64 { "64-bit" } else { "32-bit" };
+    let mach = read_u16_le(bytes, 18).unwrap_or(0);
+    let arch = match mach {
+        0x3E => "x86_64",
+        0xB7 => "AArch64",
+        0x03 => "x86",
+        0x28 => "ARM",
+        0xF3 => "RISC-V",
+        _ => "other",
+    };
+    out.push(format!(
+        "## Binary Header: Linux ELF {bits} ({arch}, {} B)",
+        bytes.len()
+    ));
+    let ent = shannon_entropy(&bytes[..bytes.len().min(4 * 1024 * 1024)]);
+    out.push(format!(
+        "- SHA-256: `{}` | Entropy: `{ent:.2}`",
+        sha256_hex(bytes)
+    ));
+    if !is_64 || bytes.len() < 64 {
+        return;
+    }
+    let shoff = read_u64_le(bytes, 40).unwrap_or(0) as usize;
+    let shentsize = read_u16_le(bytes, 58).unwrap_or(0) as usize;
+    let shnum = read_u16_le(bytes, 60).unwrap_or(0) as usize;
+    let shstrndx = read_u16_le(bytes, 62).unwrap_or(0) as usize;
+    if shoff == 0 || shentsize < 64 || shnum == 0 {
+        return;
+    }
+    let strtab_hdr = shoff.saturating_add(shstrndx.saturating_mul(shentsize));
+    let shstr_off = read_u64_le(bytes, strtab_hdr + 24).unwrap_or(0) as usize;
+    let mut sec_names = Vec::new();
+    let mut dynstr_slice: Option<(usize, usize)> = None;
+    let mut dynsym_slice: Option<(usize, usize, usize)> = None;
+    let mut dynamic_slice: Option<(usize, usize)> = None;
+
+    for i in 0..shnum.min(64) {
+        let h = shoff.saturating_add(i.saturating_mul(shentsize));
+        if h + 64 > bytes.len() {
+            break;
+        }
+        let nm_off = read_u32_le(bytes, h).unwrap_or(0) as usize;
+        let sh_type = read_u32_le(bytes, h + 4).unwrap_or(0);
+        let s_off = read_u64_le(bytes, h + 24).unwrap_or(0) as usize;
+        let s_sz = read_u64_le(bytes, h + 32).unwrap_or(0) as usize;
+        let entsz = read_u64_le(bytes, h + 56).unwrap_or(0) as usize;
+        let sname = read_cstr(bytes, shstr_off.saturating_add(nm_off), 64).unwrap_or_default();
+        if !sname.is_empty() {
+            sec_names.push(sname.clone());
+        }
+        if sname == ".dynstr" {
+            dynstr_slice = Some((s_off, s_sz));
+        } else if sh_type == 11 || sname == ".dynsym" {
+            dynsym_slice = Some((s_off, s_sz, entsz.max(24)));
+        } else if sh_type == 6 || sname == ".dynamic" {
+            dynamic_slice = Some((s_off, s_sz));
+        }
+    }
+    if !sec_names.is_empty() {
+        out.push(format!("### ELF Sections: `[{}]`", sec_names.join(", ")));
+    }
+    if let Some((dstr_off, _)) = dynstr_slice {
+        if let Some((dyn_off, dyn_sz)) = dynamic_slice {
+            let mut needed = Vec::new();
+            let count = (dyn_sz / 16).min(128);
+            for k in 0..count {
+                let p = dyn_off + k * 16;
+                let tag = read_u64_le(bytes, p).unwrap_or(0);
+                let val = read_u64_le(bytes, p + 8).unwrap_or(0) as usize;
+                if tag == 0 {
+                    break;
+                }
+                if tag == 1 {
+                    if let Some(lib) = read_cstr(bytes, dstr_off.saturating_add(val), 128) {
+                        needed.push(lib);
+                    }
+                }
+            }
+            if !needed.is_empty() {
+                out.push(format!(
+                    "### ELF DT_NEEDED Libraries: `{}`",
+                    needed.join("`, `")
+                ));
+            }
+        }
+        if let Some((sym_off, sym_sz, entsz)) = dynsym_slice {
+            let mut syms = Vec::new();
+            let count = (sym_sz / entsz).min(512);
+            for k in 0..count {
+                let p = sym_off + k * entsz;
+                if p + 24 > bytes.len() {
+                    break;
+                }
+                let st_name = read_u32_le(bytes, p).unwrap_or(0) as usize;
+                let st_shndx = read_u16_le(bytes, p + 6).unwrap_or(0);
+                if st_name > 0 && st_shndx != 0 {
+                    if let Some(nm) = read_cstr(bytes, dstr_off.saturating_add(st_name), 128) {
+                        syms.push(nm);
+                        if syms.len() >= 60 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !syms.is_empty() {
+                out.push(format!(
+                    "### ELF Exported Symbols ({} shown): {}",
+                    syms.len(),
+                    syms.join(", ")
+                ));
+            }
+        }
+    }
+}
+
+/// Inspect PE / ELF / Mach-O / WASM headers, imports/exports, SHA-256, entropy + ASCII & Windows UTF-16LE wide strings.
 pub fn inspect_binary_md(bytes: &[u8], query: Option<&str>, max_strings: usize) -> String {
     let mut out = Vec::new();
     if bytes.starts_with(b"MZ") && bytes.len() > 0x44 {
         let pe_off = read_u32_le(bytes, 0x3C).unwrap_or(0) as usize;
         if bytes.get(pe_off..pe_off + 4) == Some(b"PE\0\0") {
-            let machine = read_u16_le(bytes, pe_off + 4).unwrap_or(0);
-            let n_sec = read_u16_le(bytes, pe_off + 6).unwrap_or(0) as usize;
-            let opt_sz = read_u16_le(bytes, pe_off + 20).unwrap_or(0) as usize;
-            let arch = match machine {
-                0x8664 => "x86_64",
-                0x014c => "x86",
-                0xaa64 => "ARM64",
-                _ => "other",
-            };
-            let mut secs = Vec::new();
-            let sec_base = pe_off + 24 + opt_sz;
-            for s in 0..n_sec.min(16) {
-                let off = sec_base + s * 40;
-                if let Some(nm) = bytes.get(off..off + 8) {
-                    let sname = String::from_utf8_lossy(nm)
-                        .trim_end_matches('\0')
-                        .to_string();
-                    if !sname.is_empty() {
-                        secs.push(sname);
-                    }
-                }
-            }
-            out.push(format!(
-                "## Binary Header: Windows PE ({arch}, {} B, sections: [{}])",
-                bytes.len(),
-                secs.join(", ")
-            ));
+            parse_pe_details(bytes, pe_off, &mut out);
         } else {
-            out.push(format!("## Binary Header: DOS/MZ ({} B)", bytes.len()));
+            out.push(format!(
+                "## Binary Header: DOS/MZ ({} B) | SHA-256: `{}`",
+                bytes.len(),
+                sha256_hex(bytes)
+            ));
         }
     } else if bytes.starts_with(b"\x7FELF") && bytes.len() >= 20 {
-        let bits = if bytes[4] == 2 { "64-bit" } else { "32-bit" };
-        let mach = read_u16_le(bytes, 18).unwrap_or(0);
-        let arch = match mach {
-            0x3E => "x86_64",
-            0xB7 => "AArch64",
-            0x03 => "x86",
-            0x28 => "ARM",
-            0xF3 => "RISC-V",
-            _ => "other",
-        };
-        out.push(format!(
-            "## Binary Header: Linux ELF {bits} ({arch}, {} B)",
-            bytes.len()
-        ));
+        parse_elf_details(bytes, &mut out);
     } else if bytes.starts_with(b"\x00asm") {
-        out.push(format!("## Binary Header: WebAssembly ({} B)", bytes.len()));
+        out.push(format!(
+            "## Binary Header: WebAssembly ({} B) | SHA-256: `{}`",
+            bytes.len(),
+            sha256_hex(bytes)
+        ));
     } else if bytes.starts_with(&[0xCF, 0xFA, 0xED, 0xFE])
         || bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE])
     {
         out.push(format!(
-            "## Binary Header: macOS Mach-O ({} B)",
-            bytes.len()
+            "## Binary Header: macOS Mach-O ({} B) | SHA-256: `{}`",
+            bytes.len(),
+            sha256_hex(bytes)
         ));
     } else {
-        out.push(format!("## Binary File ({} B)", bytes.len()));
+        out.push(format!(
+            "## Binary File ({} B) | SHA-256: `{}` | Entropy: `{:.2}`",
+            bytes.len(),
+            sha256_hex(bytes),
+            shannon_entropy(&bytes[..bytes.len().min(4 * 1024 * 1024)])
+        ));
     }
 
     let q_re = query.and_then(|q| {

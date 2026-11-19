@@ -21,7 +21,8 @@ fn mcp_tools_schema() -> Value {
                     "json_path": { "type": "string", "description": "Zero-jq JSON/JSONL path query (e.g. 'items[*].name' or '..token')" },
                     "map_pos": { "type": "string", "description": "SourceMap v3 generated 'line:col' to resolve back to original source via VLQ" },
                     "decode": { "type": "boolean", "description": "Auto-decode embedded JWT tokens, Base64 blobs, and URL-encoded strings" },
-                    "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome" }
+                    "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome" },
+                    "hex": { "type": "boolean", "description": "Emit canonical hex+ASCII dump with SHA-256 & entropy (supports hex/decimal offset)" }
                 },
                 "required": ["target"]
             }
@@ -281,6 +282,59 @@ fn mcp_tools_schema() -> Value {
         }
     },
     {
+        "name": "ap_ps",
+        "description": "Cross-platform running process tree, exact command-line arguments & listening TCP ports inspector (replaces wmic/tasklist/ps).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filter": { "type": "string", "description": "Optional case-insensitive substring matching process name, exe path, or command line" },
+                "pid": { "type": "integer", "description": "Optional PID (matches process & its direct children)" },
+                "limit": { "type": "integer", "description": "Max processes to return (default: 40)" }
+            }
+        }
+    },
+    {
+        "name": "ap_fs_diff",
+        "description": "Atomic before/after directory snapshot diff (`run`, `snapshot`, `diff`) and recent-files radar (`recent` seconds).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dir": { "type": "string", "description": "Directory to inspect (default: '.')" },
+                "recent": { "type": "integer", "description": "Filter files modified in the last N seconds" },
+                "snapshot": { "type": "string", "description": "Save named snapshot for later diff" },
+                "diff": { "type": "string", "description": "Diff current directory against saved snapshot name" },
+                "run": { "type": "string", "description": "Execute shell command and atomically report added/modified/deleted files" }
+            }
+        }
+    },
+    {
+        "name": "ap_tcp",
+        "description": "Deadline-bounded raw TCP banner & text/hex send-recv probe (zero hanging Python sockets).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "addr": { "type": "string", "description": "Target host:port (e.g. '127.0.0.1:6379')" },
+                "send": { "type": "string", "description": "Optional text payload (supports \\r\\n)" },
+                "send_hex": { "type": "string", "description": "Optional hex bytes payload (e.g. '050100')" },
+                "wait_ms": { "type": "integer", "description": "Max read wait window in ms (default: 800)" }
+            },
+            "required": ["addr"]
+        }
+    },
+    {
+        "name": "ap_listen",
+        "description": "Bounded ephemeral HTTP webhook/callback capture server (auto-exits after max_reqs or wait_ms; substitutes {{PORT}} in `run`).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port": { "type": "integer", "description": "Local TCP port to bind (0 = free ephemeral port)" },
+                "wait_ms": { "type": "integer", "description": "Max listen duration in ms (default: 5000)" },
+                "max_reqs": { "type": "integer", "description": "Stop cleanly after N requests (default: 1)" },
+                "run": { "type": "string", "description": "Optional command to execute while listening (replaces {{PORT}})" }
+            }
+        }
+    },
+    {
         "name": "ap_diff_audit",
         "description": "Semantic git diff self-audit: catches test-weakening cheating (deleted assertions), newly added debug leftovers (debugger/breakpoint/dbg!), and silent mass deletions.",
         "inputSchema": {
@@ -452,6 +506,9 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             if args.get("render").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--render".to_string());
+            }
+            if args.get("hex").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--hex".to_string());
             }
             run_self_captured(&cli, None)
         }
@@ -1003,6 +1060,116 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if let Some(p) = args.get("port").and_then(Value::as_u64) {
                 cli.push("--port".into());
                 cli.push(p.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_ps" => {
+            let mut cli = vec!["probe".into(), "ps".into()];
+            if let Some(f) = args
+                .get("filter")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--filter".into());
+                cli.push(f.to_string());
+            }
+            if let Some(pid) = args.get("pid").and_then(Value::as_u64) {
+                cli.push("--pid".into());
+                cli.push(pid.to_string());
+            }
+            if let Some(lim) = args.get("limit").and_then(Value::as_u64) {
+                cli.push("--limit".into());
+                cli.push(lim.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_fs_diff" => {
+            let dir = args.get("dir").and_then(Value::as_str).unwrap_or(".");
+            let mut cli = vec!["probe".into(), "fs".into(), dir.into()];
+            if let Some(r) = args.get("recent").and_then(Value::as_u64) {
+                if r > 0 {
+                    cli.push("--recent".into());
+                    cli.push(r.to_string());
+                }
+            }
+            if let Some(sn) = args
+                .get("snapshot")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--snapshot".into());
+                cli.push(sn.to_string());
+            }
+            if let Some(df) = args
+                .get("diff")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--diff".into());
+                cli.push(df.to_string());
+            }
+            if let Some(rc) = args
+                .get("run")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--run".into());
+                cli.push(rc.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_tcp" => {
+            let addr = args
+                .get("addr")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if addr.is_empty() {
+                return (
+                    false,
+                    "Pass non-empty `addr` (host:port) to `ap_tcp`.".to_string(),
+                );
+            }
+            let mut cli = vec!["probe".into(), "tcp".into(), addr.to_string()];
+            if let Some(s) = args.get("send").and_then(Value::as_str) {
+                cli.push("--send".into());
+                cli.push(s.to_string());
+            }
+            if let Some(hx) = args
+                .get("send_hex")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--send-hex".into());
+                cli.push(hx.to_string());
+            }
+            if let Some(wm) = args.get("wait_ms").and_then(Value::as_u64) {
+                cli.push("--wait-ms".into());
+                cli.push(wm.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_listen" => {
+            let mut cli = vec!["probe".into(), "listen".into()];
+            if let Some(p) = args.get("port").and_then(Value::as_u64) {
+                cli.push("--port".into());
+                cli.push(p.to_string());
+            }
+            if let Some(wm) = args.get("wait_ms").and_then(Value::as_u64) {
+                cli.push("--wait-ms".into());
+                cli.push(wm.to_string());
+            }
+            if let Some(mr) = args.get("max_reqs").and_then(Value::as_u64) {
+                cli.push("--max-reqs".into());
+                cli.push(mr.to_string());
+            }
+            if let Some(rc) = args
+                .get("run")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                cli.push("--run".into());
+                cli.push(rc.to_string());
             }
             run_self_captured(&cli, None)
         }

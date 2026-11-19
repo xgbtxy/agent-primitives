@@ -1,8 +1,11 @@
 pub mod cdp;
+pub mod fs_diff;
 pub mod fuzz;
 pub mod http_probe;
 pub mod mutate;
+pub mod net_probe;
 pub mod ports;
+pub mod ps;
 pub mod runtime;
 pub mod slice;
 pub mod smoke;
@@ -209,6 +212,83 @@ enum SubCmd {
         /// Read `METHOD URL [BODY]` lines from stdin to probe up to 25 endpoints in one call
         #[arg(long)]
         batch_stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cross-platform running process tree, full command-line & listening TCP port inspector (replaces wmic/tasklist/ps)
+    Ps {
+        #[arg(short = 'f', long)]
+        filter: Option<String>,
+        #[arg(short = 'p', long)]
+        pid: Option<u32>,
+        /// Join listening TCP ports onto each matched process (default: true)
+        #[arg(long, default_value_t = true)]
+        ports: bool,
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Atomic before/after directory snapshot diff (`--run`, `--snapshot`, `--diff`) & newest-files radar (`--recent`)
+    Fs {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// Show files modified within the last N seconds (0 = show newest N files overall)
+        #[arg(long, default_value_t = 0)]
+        recent: u64,
+        /// Save a named directory snapshot for later `--diff`
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Diff current directory against a previously saved `--snapshot <NAME>`
+        #[arg(long)]
+        diff: Option<String>,
+        /// Run command and atomically diff added/modified/deleted files in `<dir>` before & after
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deadline-bounded raw TCP banner & text/hex send-recv probe (replaces `nc`/`telnet` & hanging Python sockets)
+    Tcp {
+        /// Target `host:port` (e.g. `127.0.0.1:6379`)
+        addr: String,
+        /// Optional text payload to send (supports `\r`, `\n`, `\t`, `\0`)
+        #[arg(long)]
+        send: Option<String>,
+        /// Optional hex-encoded binary payload to send (e.g. `050100`)
+        #[arg(long)]
+        send_hex: Option<String>,
+        /// Max read wait window in ms (default: 800, max: 10000)
+        #[arg(long, default_value_t = 800)]
+        wait_ms: u64,
+        /// TCP connect timeout in ms (default: 3000)
+        #[arg(long, default_value_t = 3000)]
+        timeout_ms: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bounded ephemeral HTTP webhook/callback capture server (auto-exits after `--max-reqs` or `--wait-ms`, zero orphan server leaks)
+    Listen {
+        /// Port to bind on 127.0.0.1 (0 = ephemeral free port)
+        #[arg(short = 'p', long, default_value_t = 0)]
+        port: u16,
+        /// Max wait window in ms before clean exit (default: 5000, max: 30000)
+        #[arg(long, default_value_t = 5000)]
+        wait_ms: u64,
+        /// Stop cleanly after capturing N HTTP requests (default: 1)
+        #[arg(long, default_value_t = 1)]
+        max_reqs: usize,
+        #[arg(long, default_value_t = 200)]
+        reply_status: u16,
+        #[arg(long, default_value = "application/json")]
+        reply_type: String,
+        #[arg(long, default_value = "{\"ok\":true}")]
+        reply_body: String,
+        /// Optional command to trigger while listening (replaces `{{PORT}}` with the bound port)
+        #[arg(long)]
+        run: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -433,6 +513,64 @@ pub fn run_cli(args: &[String]) -> i32 {
             insecure,
             follow,
             batch_stdin,
+            json,
+        ),
+        SubCmd::Ps {
+            filter,
+            pid,
+            ports,
+            limit,
+            json,
+        } => ps::run_ps_cli(filter.as_deref(), pid, ports, limit, json),
+        SubCmd::Fs {
+            dir,
+            recent,
+            snapshot,
+            diff,
+            run,
+            limit,
+            json,
+        } => fs_diff::run_fs_cli(
+            &dir,
+            recent,
+            snapshot.as_deref(),
+            diff.as_deref(),
+            run.as_deref(),
+            limit,
+            json,
+        ),
+        SubCmd::Tcp {
+            addr,
+            send,
+            send_hex,
+            wait_ms,
+            timeout_ms,
+            json,
+        } => net_probe::run_tcp_cli(
+            &addr,
+            send.as_deref(),
+            send_hex.as_deref(),
+            wait_ms,
+            timeout_ms,
+            json,
+        ),
+        SubCmd::Listen {
+            port,
+            wait_ms,
+            max_reqs,
+            reply_status,
+            reply_type,
+            reply_body,
+            run,
+            json,
+        } => net_probe::run_listen_cli(
+            port,
+            wait_ms,
+            max_reqs,
+            reply_status,
+            &reply_type,
+            &reply_body,
+            run.as_deref(),
             json,
         ),
     }

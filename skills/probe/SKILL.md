@@ -17,9 +17,12 @@ ap probe ports
 ap probe cdp --port 9222 --list
 ap probe cdp --port 9222 --target "Dashboard" --eval "document.title" --watch-ms 1500 --audit
 
-# 3. Zero-dependency single or batch HTTP diagnostic probe (auto-bypasses loopback proxy)
-ap probe http http://127.0.0.1:8080/api/health
-printf "GET http://127.0.0.1:8080/api/health\nPOST http://127.0.0.1:8080/api/echo {\"ok\":true}\n" | ap probe http --batch-stdin --json
+# 3. Zero-dependency single/batch HTTP, raw TCP, ephemeral webhook listener, process tree & FS diff
+ap probe http --batch-stdin --json <<< $'GET http://127.0.0.1:8080/health\n{"method":"POST","url":"http://127.0.0.1:8080/echo","body":{"ok":true}}'
+ap probe ps --filter node --ports
+ap probe fs . --run "npm run build"
+ap probe tcp 127.0.0.1:6379 --send "PING\r\n" --wait-ms 500
+ap probe listen --wait-ms 4000 --run "curl.exe -s http://127.0.0.1:{{PORT}}/cb?ok=1" --json
 
 # 2. Desktop (1280x800) + Mobile (390x844) layout, overflow, button-overlap, JS & 4xx/5xx network audit
 ap probe ui --cwd . --start "node src/server.mjs"
