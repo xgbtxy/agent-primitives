@@ -2,6 +2,7 @@ pub mod audit;
 pub mod bench;
 pub mod binary;
 pub mod exec;
+pub mod inspect;
 pub mod install;
 pub mod mcp;
 pub mod query;

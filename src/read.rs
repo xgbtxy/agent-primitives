@@ -39,6 +39,15 @@ struct ReadCli {
     /// Pretty-format minified JS/JSON snippets when slicing with --offset or --query
     #[arg(long)]
     pretty: bool,
+    /// Zero-jq JSON/JSONL path query (e.g. `items[*].name`, `config.auth.url`, or `..token`)
+    #[arg(long = "json-path", alias = "jq")]
+    json_path: Option<String>,
+    /// Resolve generated `line:col` inside a `.js.map` SourceMap v3 back to original file:line:col via VLQ
+    #[arg(long = "map-pos")]
+    map_pos: Option<String>,
+    /// Auto-decode embedded JWT tokens, Base64 blobs, and URL-encoded strings
+    #[arg(long)]
+    decode: bool,
     /// Render URL in real Headless Edge/Chrome (extracts JS-hydrated text, tables & interactive controls)
     #[arg(long)]
     render: bool,
@@ -789,6 +798,42 @@ pub fn run_cli(args: &[String]) -> i32 {
                 return 1;
             }
         },
+        "map" => match serde_json::from_slice::<serde_json::Value>(&raw_bytes) {
+            Ok(v) if crate::inspect::is_sourcemap_v3(&v) => {
+                if let Some(ref mp) = cli.map_pos {
+                    let parts: Vec<&str> = mp.split(':').collect();
+                    let ln = parts
+                        .first()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let col = parts
+                        .get(1)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    format_tag = "sourcemap-vlq";
+                    match crate::inspect::resolve_sourcemap_pos(&v, ln, col) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[ap read] {e}");
+                            return 1;
+                        }
+                    }
+                } else if let Some(ref ent) = cli.entry {
+                    format_tag = "sourcemap-entry";
+                    match crate::inspect::read_sourcemap_entry(&v, ent) {
+                        Ok((_, body)) => body,
+                        Err(e) => {
+                            eprintln!("[ap read] {e}");
+                            return 1;
+                        }
+                    }
+                } else {
+                    format_tag = "sourcemap-v3";
+                    crate::inspect::list_sourcemap_md(&v, cli.query.as_deref())
+                }
+            }
+            _ => decode_any_bytes(&raw_bytes).0,
+        },
         "asar" => {
             if let Some(ref ent) = cli.entry {
                 match crate::binary::read_asar_member(&raw_bytes, ent) {
@@ -893,6 +938,8 @@ pub fn run_cli(args: &[String]) -> i32 {
                     && cli.lines.is_none()
                     && cli.query.is_none()
                     && cli.offset.is_none()
+                    && cli.json_path.is_none()
+                    && !cli.decode
                 {
                     let sieve_store = std::env::var("SIEVE_HOME")
                         .ok()
@@ -927,7 +974,15 @@ pub fn run_cli(args: &[String]) -> i32 {
         idx
     };
 
-    let rendered = if let Some(off) = cli.offset {
+    let mut rendered = if let Some(ref jp) = cli.json_path {
+        match crate::inspect::query_json_or_jsonl(&converted, jp) {
+            Ok(out) => format!("# READ `{label}` [json-path='{jp}' | {format_tag}]\n{out}"),
+            Err(e) => {
+                eprintln!("[ap read] {e}");
+                return 1;
+            }
+        }
+    } else if let Some(off) = cli.offset {
         let s = floor_boundary(&converted, off);
         let e = ceil_boundary(&converted, s.saturating_add(cli.chars.max(120)));
         let raw_slice = &converted[s..e];
@@ -955,7 +1010,7 @@ pub fn run_cli(args: &[String]) -> i32 {
     } else if let Some(ref q) = cli
         .query
         .clone()
-        .filter(|_| !matches!(format_tag, "xlsx" | "asar" | "binary"))
+        .filter(|_| !matches!(format_tag, "xlsx" | "asar" | "binary" | "sourcemap-v3"))
     {
         if is_minified {
             let q_re = Regex::new(&format!("(?i){q}"))
@@ -1049,6 +1104,12 @@ pub fn run_cli(args: &[String]) -> i32 {
     } else {
         format!("# READ `{label}` [{total_lines} lines | {format_tag}]\n{converted}")
     };
+
+    if cli.decode {
+        let dec_block = crate::inspect::decode_embedded_payloads(&rendered);
+        rendered.push_str("\n\n");
+        rendered.push_str(&dec_block);
+    }
 
     let out_len = rendered.len() as u64;
     record_event("read", raw_len, out_len, win_heals, 0, format_tag);

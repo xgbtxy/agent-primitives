@@ -18,6 +18,9 @@ fn mcp_tools_schema() -> Value {
                     "offset": { "type": "integer", "description": "Optional byte offset for slicing giant/minified single-line bundles" },
                     "chars": { "type": "integer", "description": "Optional slice window length with offset (default: 2400)" },
                     "pretty": { "type": "boolean", "description": "Pretty-format minified JS/JSON snippets" },
+                    "json_path": { "type": "string", "description": "Zero-jq JSON/JSONL path query (e.g. 'items[*].name' or '..token')" },
+                    "map_pos": { "type": "string", "description": "SourceMap v3 generated 'line:col' to resolve back to original source via VLQ" },
+                    "decode": { "type": "boolean", "description": "Auto-decode embedded JWT tokens, Base64 blobs, and URL-encoded strings" },
                     "render": { "type": "boolean", "description": "Render JS-driven URLs in real Headless Edge/Chrome" }
                 },
                 "required": ["target"]
@@ -49,8 +52,10 @@ fn mcp_tools_schema() -> Value {
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex or literal search pattern" },
                     "path": { "type": "string", "description": "Directory or file to search (default: '.')" },
-                    "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'asar,vsix'" },
-                    "pretty": { "type": "boolean", "description": "Pretty-format matches inside minified single-line bundles" }
+                    "ext": { "type": "string", "description": "Optional comma-separated extensions, e.g. 'ts,js' or 'asar,vsix,map'" },
+                    "pretty": { "type": "boolean", "description": "Pretty-format matches inside minified single-line bundles" },
+                    "multiline": { "type": "boolean", "description": "Enable cross-line multiline regex matching" },
+                    "block": { "type": "boolean", "description": "Emit full enclosing Tree-sitter AST function/class block around each hit" }
                 },
                 "required": ["pattern"]
             }
@@ -236,6 +241,26 @@ fn mcp_tools_schema() -> Value {
         }
     },
     {
+        "name": "ap_ports",
+        "description": "Cross-platform listening TCP port, process PID & live CDP DevTools radar: lists local listening ports and auto-badges `[CDP READY]` Chrome/Electron debugging ports.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port": { "type": "integer", "description": "Optional specific TCP port to inspect" }
+            }
+        }
+    },
+    {
+        "name": "ap_diff_audit",
+        "description": "Semantic git diff self-audit: catches test-weakening cheating (deleted assertions), newly added debug leftovers (debugger/breakpoint/dbg!), and silent mass deletions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cwd": { "type": "string", "description": "Workspace directory (default: '.')" }
+            }
+        }
+    },
+    {
         "name": "ap_verify",
             "description": "Run final quality gate before finishing: checks 0 broken HTML #id <-> JS selector or fetch() <-> route contracts, 0 anti-slop violations (:any, @ts-ignore, empty catch {}), and runs project tests.",
             "inputSchema": {
@@ -371,6 +396,25 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             if args.get("pretty").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--pretty".to_string());
             }
+            if let Some(jp) = args
+                .get("json_path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--json-path".to_string());
+                cli.push(jp.to_string());
+            }
+            if let Some(mp) = args
+                .get("map_pos")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                cli.push("--map-pos".to_string());
+                cli.push(mp.to_string());
+            }
+            if args.get("decode").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--decode".to_string());
+            }
             if args.get("render").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--render".to_string());
             }
@@ -438,6 +482,16 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             }
             if args.get("pretty").and_then(Value::as_bool).unwrap_or(false) {
                 cli.push("--pretty".to_string());
+            }
+            if args
+                .get("multiline")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli.push("--multiline".to_string());
+            }
+            if args.get("block").and_then(Value::as_bool).unwrap_or(false) {
+                cli.push("--block".to_string());
             }
             run_self_captured(&cli, None)
         }
@@ -829,6 +883,18 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 cli.push(sp.into());
             }
             run_self_captured(&cli, None)
+        }
+        "ap_ports" => {
+            let mut cli = vec!["probe".into(), "ports".into()];
+            if let Some(p) = args.get("port").and_then(Value::as_u64) {
+                cli.push("--port".into());
+                cli.push(p.to_string());
+            }
+            run_self_captured(&cli, None)
+        }
+        "ap_diff_audit" => {
+            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            run_self_captured(&["guard".into(), "diff".into(), cwd.into()], None)
         }
         "ap_verify" => {
             let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");

@@ -1,5 +1,6 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
+pub mod diff_audit;
 pub mod rules;
 pub mod sec;
 use regex::Regex;
@@ -71,6 +72,13 @@ enum SubCmd {
     },
     /// Sub-5ms AI-code OWASP security & trust-boundary audit (SQLi, Path Traversal, Cmd Injection, DOM XSS)
     Sec {
+        #[arg(default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Semantic git diff self-audit: catches test-weakening (deleted assertions), added debug leftovers & mass deletions
+    Diff {
         #[arg(default_value = ".")]
         cwd: PathBuf,
         #[arg(long)]
@@ -619,6 +627,21 @@ fn run_deep_creation_and_test_gates(scan_root: &Path) -> (Vec<String>, Vec<Strin
                 "[SECURITY {}] {}:L{} — `{}` -> {}",
                 sf.cwe, sf.file, sf.line, sf.snippet, sf.fix
             ));
+        }
+    }
+
+    // 0b. Semantic git diff self-audit (catches deleted assertions, debug leftovers & silent truncation)
+    let da = diff_audit::audit_git_diff(scan_root);
+    if da.is_git_repo {
+        if da.findings.is_empty() {
+            receipts.push(format!(
+                "[diff] 0 test-weakening / debug-leftover / mass-deletion regressions ({} file(s), +{}/-{})",
+                da.files_changed, da.lines_added, da.lines_deleted
+            ));
+        } else {
+            for df in da.findings {
+                deep_issues.push(format!("[DIFF {}] {}", df.kind, df.detail));
+            }
         }
     }
 
@@ -1259,6 +1282,46 @@ pub fn run_cli(args: &[String]) -> i32 {
                 }
             }
             if findings.is_empty() {
+                0
+            } else {
+                EXIT_BLOCK
+            }
+        }
+        SubCmd::Diff { cwd, json } => {
+            let rep = diff_audit::audit_git_diff(&cwd);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": rep.findings.is_empty(),
+                        "is_git_repo": rep.is_git_repo,
+                        "files_changed": rep.files_changed,
+                        "lines_added": rep.lines_added,
+                        "lines_deleted": rep.lines_deleted,
+                        "findings": rep.findings,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else if !rep.is_git_repo {
+                println!("[guard diff] Not a git repository (skipped).");
+            } else if rep.findings.is_empty() {
+                println!(
+                    "[guard diff] PASS — {} file(s) changed (+{}/-{}), 0 test-weakening, debug-leftover, or mass-deletion issues.",
+                    rep.files_changed, rep.lines_added, rep.lines_deleted
+                );
+            } else {
+                eprintln!(
+                    "[GUARD DIFF BLOCKED | exit 2] {} regression(s) in git diff ({} file(s), +{}/-{}):",
+                    rep.findings.len(),
+                    rep.files_changed,
+                    rep.lines_added,
+                    rep.lines_deleted
+                );
+                for f in &rep.findings {
+                    eprintln!("  - [{}] {}", f.kind, f.detail);
+                }
+            }
+            if rep.findings.is_empty() {
                 0
             } else {
                 EXIT_BLOCK

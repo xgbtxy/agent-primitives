@@ -256,7 +256,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
     }
     if sel.contains("probe") || sel.contains("guard") {
         bullets.push(format!(
-            "3. **1-Call Deep Verify & Live CDP (`guard` / `probe`)**: Run `{ap_cmd} guard verify --cwd . --deep` (OWASP sec + vacuous/anti-slop + contracts + tests + API fuzz + Desktop/Mobile UI + active-file AST mutation in 1 pass). Live running Chrome/Electron CDP port -> `{ap_cmd} probe cdp --port <P> [--list|--target T --eval JS]`. Interactive E2E -> `{ap_cmd} probe smoke --cwd . --stdin`."
+            "3. **1-Call Deep Verify & Live CDP (`guard` / `probe`)**: Run `{ap_cmd} guard verify --cwd . --deep` (OWASP sec + git diff anti-test-cheating + vacuous/anti-slop + contracts + tests + API fuzz + Desktop/Mobile UI + active-file AST mutation in 1 pass). Discover local servers/CDP ports -> `{ap_cmd} probe ports`. Attach to live Chrome/Electron CDP -> `{ap_cmd} probe cdp --port <P> [--list|--target T --eval JS]`."
         ));
     }
     if ["probe", "sieve", "recall", "guard", "baton"]
@@ -264,7 +264,7 @@ pub fn render_fenced_agents_block(ap_cmd: &str, selected: &[&str]) -> String {
         .any(|x| sel.contains(x))
     {
         bullets.push(format!(
-            "4. **Read, Search, SQL, Exec & Undo**: `{ap_cmd} read <target> [--entry E|--offset N --pretty|--query Q|--render]` (Office/PDF/SQLite/`.asar`/`.vsix`/`.zip`/PE-ELF UTF-16LE strings/minified JS/SPA); `{ap_cmd} search <pat> <path> [--pretty]` (AST + minified bundles + `.asar`/`.vsix` + binaries); `{ap_cmd} query -f a=x.xlsx --schema`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
+            "4. **Read, Search, SQL, Exec & Undo**: `{ap_cmd} read <target> [--json-path P|--decode|--map-pos L:C|--entry E|--offset N --pretty|--render]` (Office/PDF/SQLite/`.map`/`.asar`/`.vsix`/PE UTF-16LE/minified JS/SPA); `{ap_cmd} search <pat> <path> [--multiline --block --pretty]` (AST blocks + `.map`/`.asar`/minified/binaries); `{ap_cmd} query`; `{ap_cmd} exec -c \"<cmd>\"`; `{ap_cmd} undo`."
         ));
     }
     format!(

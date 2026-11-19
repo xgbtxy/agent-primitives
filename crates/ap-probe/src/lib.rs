@@ -1,6 +1,7 @@
 pub mod cdp;
 pub mod fuzz;
 pub mod mutate;
+pub mod ports;
 pub mod runtime;
 pub mod slice;
 pub mod smoke;
@@ -172,6 +173,16 @@ enum SubCmd {
         screenshot: Option<PathBuf>,
         #[arg(long)]
         stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cross-platform listening TCP port, process PID & live CDP DevTools radar (replaces netstat/lsof/ss + port guessing)
+    Ports {
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
+        /// Probe localhost ports for `/json/version` to auto-badge `[CDP READY]` debugging ports (default: true)
+        #[arg(long, default_value_t = true)]
+        probe_cdp: bool,
         #[arg(long)]
         json: bool,
     },
@@ -370,5 +381,10 @@ pub fn run_cli(args: &[String]) -> i32 {
                 json,
             )
         }
+        SubCmd::Ports {
+            port,
+            probe_cdp,
+            json,
+        } => ports::run_ports_radar(port, probe_cdp, json),
     }
 }

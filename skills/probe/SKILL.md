@@ -10,7 +10,10 @@ Zero Playwright/Node installs, zero fragile Python WebSocket scripts, zero orpha
 ## Usage
 
 ```bash
-# 1. Attach to an ALREADY-RUNNING Chrome/Edge/Electron CDP port (never kills the host app!)
+# 1. Discover local listening TCP ports + PIDs + auto-badged `[CDP READY]` debugging ports
+ap probe ports
+
+# 2. Attach to an ALREADY-RUNNING Chrome/Edge/Electron CDP port (never kills the host app!)
 ap probe cdp --port 9222 --list
 ap probe cdp --port 9222 --target "Dashboard" --eval "document.title" --audit
 

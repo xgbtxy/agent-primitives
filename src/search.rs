@@ -58,9 +58,24 @@ struct SearchCli {
     /// Pretty-format minified JS/JSON match slices
     #[arg(long)]
     pretty: bool,
+    /// Enable cross-line multiline regex search (`(?s)` / `\n` across lines)
+    #[arg(short = 'm', long)]
+    multiline: bool,
+    /// Emit full enclosing Tree-sitter AST function/class block around each code match
+    #[arg(long)]
+    block: bool,
     /// Emit structured JSON output
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SearchOpts {
+    around: usize,
+    pretty: bool,
+    multiline: bool,
+    block: bool,
+    max_hits: usize,
 }
 
 fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
@@ -79,16 +94,13 @@ fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_text_matches(
     text: &str,
     rel: &str,
     ext: &str,
     is_office: bool,
     re: &Regex,
-    around: usize,
-    pretty: bool,
-    max_hits: usize,
+    opts: SearchOpts,
     matches: &mut Vec<SearchMatch>,
 ) {
     if !re.is_match(text) {
@@ -102,6 +114,46 @@ fn push_text_matches(
     } else {
         Vec::new()
     };
+    let all_lines: Vec<&str> = text.lines().collect();
+
+    if opts.multiline {
+        for m in re.find_iter(text) {
+            let ln_no = text[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+            let enc = ast_spans
+                .iter()
+                .filter(|sp| sp.start_line <= ln_no && ln_no <= sp.end_line)
+                .min_by_key(|sp| sp.end_line.saturating_sub(sp.start_line));
+            let scope = enc
+                .map(|sp| {
+                    format!(
+                        "{} {} L{}-L{}",
+                        sp.kind, sp.qual, sp.start_line, sp.end_line
+                    )
+                })
+                .unwrap_or_default();
+            let snip = if opts.block {
+                if let Some(sp) = enc {
+                    let s = sp.start_line.saturating_sub(1);
+                    let e = sp.end_line.min(all_lines.len()).min(s + 30);
+                    all_lines[s..e].join("\n")
+                } else {
+                    m.as_str().chars().take(300).collect()
+                }
+            } else {
+                m.as_str().trim().chars().take(240).collect()
+            };
+            matches.push(SearchMatch {
+                file: rel.to_string(),
+                line: ln_no,
+                scope,
+                snippet: snip,
+            });
+            if matches.len() >= opts.max_hits {
+                return;
+            }
+        }
+        return;
+    }
 
     let mut line_byte_start = 0usize;
     for (idx, ln) in text.split('\n').enumerate() {
@@ -111,10 +163,10 @@ fn push_text_matches(
             if ln_clean.len() > 300 {
                 // Minified / giant single-line bundle: emit every match as a byte-window slice!
                 for m in re.find_iter(ln_clean) {
-                    let s = floor_char_boundary(ln_clean, m.start().saturating_sub(around));
-                    let e = ceil_char_boundary(ln_clean, m.end().saturating_add(around));
+                    let s = floor_char_boundary(ln_clean, m.start().saturating_sub(opts.around));
+                    let e = ceil_char_boundary(ln_clean, m.end().saturating_add(opts.around));
                     let raw_snip = &ln_clean[s..e];
-                    let snip = if pretty {
+                    let snip = if opts.pretty {
                         crate::binary::pretty_format_js_snippet(raw_snip)
                     } else {
                         raw_snip.to_string()
@@ -126,15 +178,16 @@ fn push_text_matches(
                         scope: format!("minified @off={abs_off}"),
                         snippet: snip,
                     });
-                    if matches.len() >= max_hits {
+                    if matches.len() >= opts.max_hits {
                         return;
                     }
                 }
             } else {
-                let scope = ast_spans
+                let enc = ast_spans
                     .iter()
                     .filter(|sp| sp.start_line <= ln_no && ln_no <= sp.end_line)
-                    .min_by_key(|sp| sp.end_line.saturating_sub(sp.start_line))
+                    .min_by_key(|sp| sp.end_line.saturating_sub(sp.start_line));
+                let scope = enc
                     .map(|sp| {
                         format!(
                             "{} {} L{}-L{}",
@@ -148,14 +201,24 @@ fn push_text_matches(
                             String::new()
                         }
                     });
-                let snip: String = ln_clean.trim().chars().take(180).collect();
+                let snip: String = if opts.block {
+                    if let Some(sp) = enc {
+                        let s = sp.start_line.saturating_sub(1);
+                        let e = sp.end_line.min(all_lines.len()).min(s + 30);
+                        all_lines[s..e].join("\n")
+                    } else {
+                        ln_clean.trim().chars().take(180).collect()
+                    }
+                } else {
+                    ln_clean.trim().chars().take(180).collect()
+                };
                 matches.push(SearchMatch {
                     file: rel.to_string(),
                     line: ln_no,
                     scope,
                     snippet: snip,
                 });
-                if matches.len() >= max_hits {
+                if matches.len() >= opts.max_hits {
                     return;
                 }
             }
@@ -164,11 +227,13 @@ fn push_text_matches(
     }
 }
 
-fn build_search_regex(pat: &str, force_case: bool) -> Result<Regex, String> {
+fn build_search_regex(pat: &str, force_case: bool, multiline: bool) -> Result<Regex, String> {
     let has_upper = pat.chars().any(|c| c.is_uppercase());
     let case_insens = !force_case && !has_upper;
     RegexBuilder::new(pat)
         .case_insensitive(case_insens)
+        .multi_line(multiline)
+        .dot_matches_new_line(multiline)
         .build()
         .or_else(|_| {
             RegexBuilder::new(&regex::escape(pat))
@@ -187,12 +252,19 @@ pub fn run_cli(args: &[String]) -> i32 {
             return code;
         }
     };
-    let re = match build_search_regex(&cli.pattern, cli.case_sensitive) {
+    let re = match build_search_regex(&cli.pattern, cli.case_sensitive, cli.multiline) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[ap search] {e}");
             return 2;
         }
+    };
+    let s_opts = SearchOpts {
+        around: cli.around,
+        pretty: cli.pretty,
+        multiline: cli.multiline,
+        block: cli.block,
+        max_hits: cli.max_hits,
     };
 
     let root = Path::new(&cli.path);
@@ -293,6 +365,49 @@ pub fn run_cli(args: &[String]) -> i32 {
                 .replace('\\', "/")
         };
 
+        // SourceMap v3 embedded original sources search (`.js.map` / `.map`)
+        if ext == "map" {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if crate::inspect::is_sourcemap_v3(&v) {
+                    if let (Some(srcs), Some(contents)) = (
+                        v.get("sources").and_then(|x| x.as_array()),
+                        v.get("sourcesContent").and_then(|x| x.as_array()),
+                    ) {
+                        for (idx, s_val) in srcs.iter().enumerate() {
+                            let Some(sname) = s_val.as_str() else {
+                                continue;
+                            };
+                            let Some(body) = contents.get(idx).and_then(|x| x.as_str()) else {
+                                continue;
+                            };
+                            let eext = Path::new(sname)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("js")
+                                .to_ascii_lowercase();
+                            let virt_rel = format!("{rel}::{sname}");
+                            push_text_matches(
+                                body,
+                                &virt_rel,
+                                &eext,
+                                false,
+                                &re,
+                                s_opts,
+                                &mut matches,
+                            );
+                            if matches.len() >= cli.max_hits {
+                                break;
+                            }
+                        }
+                    }
+                    if matches.len() >= cli.max_hits {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
         // Virtual Electron .asar archive search (zero extraction!)
         if ext == "asar" {
             if let Ok((base, entries)) = crate::binary::parse_asar_index(&bytes) {
@@ -330,17 +445,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                     if en <= bytes.len() {
                         let txt = decode_any_bytes(&bytes[st..en]).0;
                         let virt_rel = format!("{rel}::{}", ent.path);
-                        push_text_matches(
-                            &txt,
-                            &virt_rel,
-                            &eext,
-                            false,
-                            &re,
-                            cli.around,
-                            cli.pretty,
-                            cli.max_hits,
-                            &mut matches,
-                        );
+                        push_text_matches(&txt, &virt_rel, &eext, false, &re, s_opts, &mut matches);
                         if matches.len() >= cli.max_hits {
                             break;
                         }
@@ -396,9 +501,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                                 &eext,
                                 false,
                                 &re,
-                                cli.around,
-                                cli.pretty,
-                                cli.max_hits,
+                                s_opts,
                                 &mut matches,
                             );
                             if matches.len() >= cli.max_hits {
@@ -452,17 +555,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             decode_any_bytes(&bytes).0
         };
 
-        push_text_matches(
-            &text,
-            &rel,
-            &ext,
-            is_office,
-            &re,
-            cli.around,
-            cli.pretty,
-            cli.max_hits,
-            &mut matches,
-        );
+        push_text_matches(&text, &rel, &ext, is_office, &re, s_opts, &mut matches);
         if matches.len() >= cli.max_hits {
             break;
         }

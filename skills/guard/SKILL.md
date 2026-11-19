@@ -10,11 +10,12 @@ One command replaces manual multi-turn test/browser/security scripts with determ
 ## Usage
 
 ```bash
-# 1. Recommended before delivery: 6-in-1 Deep Gate (OWASP Sec + Contracts + Anti-Slop + Non-Vacuous Tests + API Chaos Fuzz + Desktop/Mobile UI + AST Mutation)
+# 1. Recommended before delivery: 7-in-1 Deep Gate (OWASP Sec + Git Diff Anti-Test-Cheating + Contracts + Anti-Slop + Non-Vacuous Tests + API Fuzz + Desktop/Mobile UI + AST Mutation)
 ap guard verify --cwd . --deep
 
-# 2. Standalone <5ms OWASP Security Audit (SQLi, Path Traversal, Cmd Injection, DOM XSS, TLS/Debug)
+# 2. Standalone <5ms OWASP Security Audit & Semantic Git Diff Self-Audit
 ap guard sec .
+ap guard diff .
 
 # 3. Custom deterministic rules, pre-exec blast shield & 3x loop breaker
 ap guard rule add --id no-legacy --glob "src/*.ts" --forbid "old_dump" --msg "Use new exporter"

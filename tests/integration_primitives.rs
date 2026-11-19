@@ -2464,3 +2464,223 @@ fn test_minified_asar_binary_cdp_attach_and_callchain_trace() {
         let _ = ext_browser.wait();
     }
 }
+
+#[test]
+fn test_sourcemap_vlq_jsonpath_decode_multiline_diff_audit_and_ports() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ap_home = root.join("ap_v21_home");
+
+    // 1. SourceMap v3: list, --entry extract, VLQ --map-pos decode, and `ap search` across sourcesContent
+    let orig_ts = "export function calcInvoice(n: number) {\n  return n * 108;\n}\n";
+    let sm_json = serde_json::json!({
+        "version": 3,
+        "file": "app.min.js",
+        "sources": ["src/billing.ts"],
+        "sourcesContent": [orig_ts],
+        "names": ["calcInvoice"],
+        "mappings": "AAAA,UACEA"
+    });
+    fs::write(
+        root.join("app.min.js.map"),
+        serde_json::to_string(&sm_json).unwrap(),
+    )
+    .unwrap();
+
+    let sm_list = run_ap(
+        root,
+        &["read", "app.min.js.map"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(sm_list.status.success());
+    assert!(String::from_utf8_lossy(&sm_list.stdout).contains("src/billing.ts"));
+
+    let sm_ent = run_ap(
+        root,
+        &["read", "app.min.js.map", "--entry", "src/billing.ts"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(sm_ent.status.success());
+    assert!(String::from_utf8_lossy(&sm_ent.stdout).contains("return n * 108;"));
+
+    let sm_vlq = run_ap(
+        root,
+        &["read", "app.min.js.map", "--map-pos", "1:10"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(sm_vlq.status.success());
+    let vlq_s = String::from_utf8_lossy(&sm_vlq.stdout);
+    assert!(
+        vlq_s.contains("src/billing.ts:L2:C2") && vlq_s.contains("calcInvoice"),
+        "Unexpected VLQ output: {vlq_s}"
+    );
+
+    let sm_srch = run_ap(
+        root,
+        &["search", "calcInvoice", "app.min.js.map"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(sm_srch.status.success());
+    assert!(String::from_utf8_lossy(&sm_srch.stdout).contains("app.min.js.map::src/billing.ts"));
+
+    // 2. Zero-jq `--json-path` on JSON & JSONL + `--decode` on JWT/Base64/URL payloads
+    fs::write(
+        root.join("config.json"),
+        r#"{"services":[{"name":"api","port":8080,"nested":{"secretRef":"vault-k1"}},{"name":"worker","port":9090,"nested":{"secretRef":"vault-k2"}}]}"#,
+    )
+    .unwrap();
+    let jp1 = run_ap(
+        root,
+        &["read", "config.json", "--json-path", "services[*].port"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(jp1.status.success());
+    let jp1_s = String::from_utf8_lossy(&jp1.stdout);
+    assert!(jp1_s.contains("8080") && jp1_s.contains("9090"));
+
+    let jp2 = run_ap(
+        root,
+        &["read", "config.json", "--json-path", "..secretRef"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(jp2.status.success());
+    let jp2_s = String::from_utf8_lossy(&jp2.stdout);
+    assert!(jp2_s.contains("vault-k1") && jp2_s.contains("vault-k2"));
+
+    // JWT: {"alg":"HS256"}.{"sub":"u-99","role":"auditor"}.sig
+    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1LTk5Iiwicm9sZSI6ImF1ZGl0b3IifQ.sig12345";
+    let b64 = "aGVsbG8td29ybGQtcGF5bG9hZC0yMDI2"; // "hello-world-payload-2026"
+    fs::write(
+        root.join("trace.log"),
+        format!("auth={jwt}\ndata={b64}\npath=%2Fapi%2Fv2%2Fexport\n"),
+    )
+    .unwrap();
+    let dec = run_ap(
+        root,
+        &["read", "trace.log", "--decode"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(dec.status.success());
+    let dec_s = String::from_utf8_lossy(&dec.stdout);
+    assert!(
+        dec_s.contains("[JWT]") && dec_s.contains("auditor"),
+        "Got: {dec_s}"
+    );
+    assert!(
+        dec_s.contains("hello-world-payload-2026") && dec_s.contains("/api/v2/export"),
+        "Got: {dec_s}"
+    );
+
+    // 3. Multiline + AST-Block Search (`ap search --multiline --block`)
+    fs::write(
+        root.join("sync.ts"),
+        "export async function syncOrder(id: string) {\n  const cfg = {\n    retries: 3\n  };\n  return id + cfg.retries;\n}\n",
+    )
+    .unwrap();
+    let ml = run_ap(
+        root,
+        &[
+            "search",
+            "syncOrder.*?retries:\\s*3",
+            "sync.ts",
+            "--multiline",
+            "--block",
+            "--json",
+        ],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(ml.status.success());
+    let ml_j: Value = serde_json::from_slice(&ml.stdout).unwrap();
+    let ml_hits = ml_j["matches"].as_array().unwrap();
+    assert_eq!(ml_hits.len(), 1);
+    assert!(ml_hits[0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("return id + cfg.retries;"));
+
+    // 4. Semantic Git Diff Self-Audit (`ap guard diff`): catches test-weakening & debug leftover
+    let gdir = root.join("git_audit_repo");
+    fs::create_dir_all(gdir.join("src")).unwrap();
+    fs::create_dir_all(gdir.join("test")).unwrap();
+    let git_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(&gdir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if git_ok {
+        let _ = Command::new("git")
+            .args(["config", "user.email", "ci@example.com"])
+            .current_dir(&gdir)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "CI"])
+            .current_dir(&gdir)
+            .status();
+        fs::write(
+            gdir.join("src/calc.js"),
+            "export function add(a, b) {\n  return a + b;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            gdir.join("test/calc.test.js"),
+            "assert.equal(add(1, 2), 3);\nassert.equal(add(0, 0), 0);\n",
+        )
+        .unwrap();
+        let _ = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&gdir)
+            .status();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&gdir)
+            .status();
+
+        // Introduce test-weakening (delete 1 assert) AND debug leftover (`debugger;`)
+        fs::write(
+            gdir.join("src/calc.js"),
+            "export function add(a, b) {\n  debugger;\n  return a + b;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            gdir.join("test/calc.test.js"),
+            "assert.equal(add(1, 2), 3);\n",
+        )
+        .unwrap();
+
+        let gd_bad = run_ap(
+            &gdir,
+            &["guard", "diff", "."],
+            None,
+            &[("AP_HOME", &ap_home)],
+        );
+        assert_eq!(gd_bad.status.code(), Some(2));
+        let gd_err = String::from_utf8_lossy(&gd_bad.stderr);
+        assert!(
+            gd_err.contains("TEST-WEAKENING") && gd_err.contains("DEBUG-LEFTOVER"),
+            "Expected both TEST-WEAKENING & DEBUG-LEFTOVER: {gd_err}"
+        );
+    }
+
+    // 5. Cross-Platform Listening Port Radar (`ap probe ports`)
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let lport = listener.local_addr().unwrap().port();
+    let pr = run_ap(
+        root,
+        &["probe", "ports", "--port", &lport.to_string(), "--json"],
+        None,
+        &[("AP_HOME", &ap_home)],
+    );
+    assert!(pr.status.success());
+    let pj: Value = serde_json::from_slice(&pr.stdout).unwrap();
+    assert_eq!(pj["ok"], true);
+    drop(listener);
+}

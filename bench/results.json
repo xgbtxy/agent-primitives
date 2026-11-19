@@ -4,12 +4,12 @@
     "atlas_map_tokens_est": 483,
     "orientation_reduction_pct": 98.9,
     "raw_corpus_tokens_est": 42338,
-    "scan_latency_ms": 21.2,
+    "scan_latency_ms": 20.4,
     "scanned_files": 64,
     "scanned_target": "sdk_corpus (64 Rust modules via Tree-sitter)"
   },
-  "engine": "agent-primitives v2.0.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
-  "generated_at": "2026-11-19T00:48:18Z",
+  "engine": "agent-primitives v2.1.0 (Rust, Tree-sitter, bundled SQLite FTS5)",
+  "generated_at": "2026-11-19T02:24:44Z",
   "idle_frontmatter_tokens_per_folder": {
     "atlas": 47,
     "baton": 60,
@@ -24,12 +24,12 @@
     "dead_code_pruned_pct": 62.5,
     "pruned_dead_files": 15,
     "reachable_files": 9,
-    "slice_latency_ms": 9.57,
+    "slice_latency_ms": 10.97,
     "total_code_files": 24
   },
   "recall_benchmark_200_rules": {
     "avg_injected_tokens_top2": 47.0,
-    "median_query_latency_ms": 3.23,
+    "median_query_latency_ms": 4.8,
     "monolithic_agents_md_tokens": 6880,
     "token_reduction_pct": 99.3,
     "top1_recall_accuracy": "20/20 (100%)",
@@ -37,9 +37,9 @@
   },
   "sieve_benchmarks": [
     {
-      "latency_ms": 35.45,
-      "out_bytes": 2071,
-      "out_tokens_est": 518,
+      "latency_ms": 34.15,
+      "out_bytes": 2073,
+      "out_tokens_est": 519,
       "raw_bytes": 172075,
       "raw_tokens_est": 43019,
       "reduction_pct": 98.8,
@@ -47,7 +47,7 @@
       "workload": "sieve: 2,500-line CI/pytest log (Coding Agent)"
     },
     {
-      "latency_ms": 24.59,
+      "latency_ms": 16.03,
       "out_bytes": 417,
       "out_tokens_est": 105,
       "raw_bytes": 107906,
@@ -57,8 +57,8 @@
       "workload": "sieve: 400-record JSON API dump (Personal/Coding Agent)"
     },
     {
-      "fts5_search_latency_ms": 11.52,
-      "latency_ms": 16.92,
+      "fts5_search_latency_ms": 5.17,
+      "latency_ms": 11.81,
       "out_bytes": 582,
       "out_tokens_est": 146,
       "raw_bytes": 19100,
@@ -68,7 +68,7 @@
       "workload": "sieve: 300-record JSONL stream + bundled FTS5 search"
     },
     {
-      "latency_ms": 18.32,
+      "latency_ms": 14.41,
       "out_bytes": 792,
       "out_tokens_est": 198,
       "raw_bytes": 48174,
@@ -78,7 +78,7 @@
       "workload": "sieve: Noisy HTML page w/ JS+CSS + <table> (Personal Agent)"
     },
     {
-      "latency_ms": 13.23,
+      "latency_ms": 11.73,
       "out_bytes": 118,
       "out_tokens_est": 30,
       "raw_bytes": 70,
@@ -89,13 +89,13 @@
     }
   ],
   "splice_surgeon_benchmark": {
-    "atomic_apply_latency_ms": 2.86,
+    "atomic_apply_latency_ms": 2.78,
     "crlf_preserved": true,
     "full_module_tokens_est": 1048,
-    "repo_ast_check_latency_ms": 5.54,
+    "repo_ast_check_latency_ms": 7.46,
     "symbol_read_reduction_pct": 95.4,
     "symbol_view_tokens_est": 48,
-    "view_latency_ms": 0.85,
+    "view_latency_ms": 0.96,
     "zero_escaping_atomic_apply_ok": true
   }
 }
