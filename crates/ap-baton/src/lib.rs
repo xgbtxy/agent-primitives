@@ -1,4 +1,5 @@
 pub mod coord;
+pub mod frontier;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -147,6 +148,79 @@ enum SubCmd {
         files: Vec<PathBuf>,
         #[arg(short = 'k', long, default_value_t = 8)]
         top_k: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Multi-session orthogonal exploration frontier tracker (seed/mark/next/status/sync-stopped)
+    Frontier {
+        #[command(subcommand)]
+        action: FrontierCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FrontierCmd {
+    /// Seed frontier entries from `ap atlas surface --json` or a manual axis+target
+    Seed {
+        #[arg(long)]
+        store: Option<String>,
+        #[arg(long)]
+        from_json: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        axis: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value_t = 85)]
+        score: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a frontier entry by id or target substring as unvisited|probed|stopped|confirmed|deferred
+    Mark {
+        query: String,
+        #[arg(long)]
+        status: String,
+        #[arg(long, default_value = "")]
+        reason: String,
+        #[arg(long = "ref", default_value = "")]
+        evidence_ref: String,
+        #[arg(long)]
+        store: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pick Top-K unvisited items prioritizing unexplored axes first
+    Next {
+        #[arg(long)]
+        store: Option<String>,
+        #[arg(short = 'k', long, default_value_t = 5)]
+        top_k: usize,
+        #[arg(long = "exclude-axis")]
+        exclude_axes: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compact axis-by-axis frontier coverage status (<250 tokens)
+    Status {
+        #[arg(long)]
+        store: Option<String>,
+        #[arg(short = 'k', long, default_value_t = 5)]
+        top_k: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark unvisited items matching existing stopped/ledger text files as stopped
+    SyncStopped {
+        #[arg(long)]
+        store: Option<String>,
+        #[arg(long = "text-file")]
+        text_files: Vec<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -521,5 +595,61 @@ pub fn run_cli(args: &[String]) -> i32 {
             top_k,
             json,
         } => coord::run_dedup(&query, &files, top_k, json),
+        SubCmd::Frontier { action } => match action {
+            FrontierCmd::Seed {
+                store,
+                from_json,
+                stdin,
+                axis,
+                target,
+                module,
+                note,
+                score,
+                json,
+            } => frontier::run_frontier_seed(
+                &cwd,
+                &frontier::FrontierSeedOpts {
+                    store: store.as_deref(),
+                    from_json: from_json.as_deref(),
+                    from_stdin: stdin,
+                    axis: axis.as_deref(),
+                    target: target.as_deref(),
+                    module: module.as_deref(),
+                    note: note.as_deref(),
+                    score,
+                    as_json: json,
+                },
+            ),
+            FrontierCmd::Mark {
+                query,
+                status,
+                reason,
+                evidence_ref,
+                store,
+                json,
+            } => frontier::run_frontier_mark(
+                &cwd,
+                store.as_deref(),
+                &query,
+                &status,
+                &reason,
+                &evidence_ref,
+                json,
+            ),
+            FrontierCmd::Next {
+                store,
+                top_k,
+                exclude_axes,
+                json,
+            } => frontier::run_frontier_next(&cwd, store.as_deref(), top_k, &exclude_axes, json),
+            FrontierCmd::Status { store, top_k, json } => {
+                frontier::run_frontier_status(&cwd, store.as_deref(), top_k, json)
+            }
+            FrontierCmd::SyncStopped {
+                store,
+                text_files,
+                json,
+            } => frontier::run_frontier_sync_stopped(&cwd, store.as_deref(), &text_files, json),
+        },
     }
 }

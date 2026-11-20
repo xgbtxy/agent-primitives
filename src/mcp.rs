@@ -565,6 +565,44 @@ fn mcp_tools_schema() -> Value {
                 }
             }
         }),
+        json!({
+            "name": "ap_surface",
+            "description": "Multi-axis entrypoint & sink surface mapper (<150ms in-process): scans source code, manifests, minified bundles, and virtual archives (.asar/.vsix/.zip/.jar) across 9 orthogonal axes (exec_spawn, net_listen_rpc, ipc_pipe_proto, fs_path_io, deserialize_parse, loader_plugin_ext, auth_token_cred, webview_browser, service_priv_acl).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Directory, file, or archive (.asar/.vsix/.zip/.jar) to scan (default: '.')" },
+                    "max_files": { "type": "integer", "description": "Max files to scan (default: 1500)" },
+                    "max_per_axis": { "type": "integer", "description": "Max ranked diverse items per axis (default: 12)" },
+                    "include_vendor": { "type": "boolean", "description": "Also scan gitignored/vendor directories (default: false)" }
+                }
+            }
+        }),
+        json!({
+            "name": "ap_frontier",
+            "description": "Multi-session orthogonal exploration frontier tracker: `seed` (from surface scan or manual target), `next` (diversity-maximizing unvisited targets prioritizing unexplored axes), `mark` (probed/stopped/confirmed/deferred), `status`, or `sync_stopped`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "'seed', 'next', 'mark', 'status', or 'sync_stopped'" },
+                    "cwd": { "type": "string", "description": "Workspace directory (default: '.')" },
+                    "store": { "type": "string", "description": "Optional custom frontier JSON store path (defaults to .baton/frontier.json)" },
+                    "scan_path": { "type": "string", "description": "For action='seed': directory/archive to scan via ap_surface and ingest into frontier" },
+                    "axis": { "type": "string", "description": "For manual action='seed': axis category name" },
+                    "target": { "type": "string", "description": "For manual action='seed': target path/endpoint" },
+                    "module": { "type": "string", "description": "For manual action='seed': module/component label" },
+                    "note": { "type": "string", "description": "For manual action='seed': short note/snippet" },
+                    "query": { "type": "string", "description": "For action='mark': item id prefix or target substring" },
+                    "status": { "type": "string", "description": "For action='mark': 'unvisited', 'probed', 'stopped', 'confirmed', or 'deferred'" },
+                    "reason": { "type": "string", "description": "For action='mark': concise reason" },
+                    "ref": { "type": "string", "description": "For action='mark': evidence file/ref" },
+                    "top_k": { "type": "integer", "description": "For action='next'/'status': max items (default: 5)" },
+                    "exclude_axes": { "type": "array", "items": { "type": "string" }, "description": "For action='next': axes to deprioritize" },
+                    "text_files": { "type": "array", "items": { "type": "string" }, "description": "For action='sync_stopped': prior notes/ledger paths to cross-reference" }
+                },
+                "required": ["action"]
+            }
+        }),
     ];
     if let Value::Array(ref mut arr) = tools {
         arr.append(&mut extra);
@@ -693,6 +731,20 @@ fn tool_annotations_for(name: &str) -> (&'static str, bool, bool, bool, bool) {
             false,
         ),
         "ap_changes" => ("Git-Diff AST Change Impact Brief", true, false, true, false),
+        "ap_surface" => (
+            "Multi-Axis Entrypoint & Sink Surface Map",
+            true,
+            false,
+            true,
+            false,
+        ),
+        "ap_frontier" => (
+            "Orthogonal Exploration Frontier Tracker",
+            false,
+            false,
+            false,
+            false,
+        ),
         _ => ("Agent Primitive Tool", false, false, false, false),
     }
 }
@@ -2345,6 +2397,231 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
             crate::stats::record_event("changes", 0, js.len() as u64, 0, 1, "mcp-changes");
             (true, js)
         }
+        "ap_surface" => {
+            let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let root_p = std::path::Path::new(root);
+            if !root_p.exists() {
+                return (false, format!("[atlas] path not found: {root}"));
+            }
+            let max_files = args
+                .get("max_files")
+                .and_then(Value::as_u64)
+                .unwrap_or(1500)
+                .clamp(20, 10000) as usize;
+            let max_per_axis = args
+                .get("max_per_axis")
+                .and_then(Value::as_u64)
+                .unwrap_or(12)
+                .clamp(1, 50) as usize;
+            let include_vendor = args
+                .get("include_vendor")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let map = ap_atlas::surface::build_surface_map(
+                root_p,
+                max_files,
+                max_per_axis,
+                include_vendor,
+            );
+            let js = serde_json::to_string_pretty(&map).unwrap_or_default();
+            crate::stats::record_event("surface", 0, js.len() as u64, 0, 1, "mcp-surface");
+            (true, js)
+        }
+        "ap_frontier" => {
+            let cwd_str = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            let cwd = std::path::PathBuf::from(cwd_str);
+            let store = args.get("store").and_then(Value::as_str);
+            let store_path = ap_baton::frontier::resolve_store_path(&cwd, store);
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("status");
+            match action {
+                "seed" => {
+                    let mut state = ap_baton::frontier::load_frontier(&store_path);
+                    let res = if let Some(sp) = args
+                        .get("scan_path")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        let p = std::path::Path::new(sp);
+                        if !p.exists() {
+                            return (false, format!("[frontier] scan_path not found: {sp}"));
+                        }
+                        let map = ap_atlas::surface::build_surface_map(p, 1500, 12, false);
+                        let raw = serde_json::to_string(&map).unwrap_or_default();
+                        ap_baton::frontier::seed_from_json_str(&mut state, &raw)
+                    } else if let Some(tgt) = args
+                        .get("target")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        let ax = args
+                            .get("axis")
+                            .and_then(Value::as_str)
+                            .unwrap_or("general");
+                        let m = args.get("module").and_then(Value::as_str).unwrap_or("");
+                        let n = args.get("note").and_then(Value::as_str).unwrap_or("");
+                        let row = json!([{"axis": ax, "target": tgt, "module": m, "note": n}]);
+                        ap_baton::frontier::seed_from_json_str(&mut state, &row.to_string())
+                    } else {
+                        return (
+                            false,
+                            "Pass `scan_path` or `target` for `ap_frontier` action='seed'."
+                                .to_string(),
+                        );
+                    };
+                    match res {
+                        Ok((added, skipped)) => {
+                            if let Err(e) = ap_baton::frontier::save_frontier(&store_path, &mut state)
+                            {
+                                return (false, format!("[frontier] save failed: {e}"));
+                            }
+                            let out = json!({
+                                "ok": true,
+                                "added": added,
+                                "skipped_existing": skipped,
+                                "total": state.items.len(),
+                                "summary": ap_baton::frontier::status_summary_json(&state, 5),
+                            });
+                            (true, serde_json::to_string_pretty(&out).unwrap_or_default())
+                        }
+                        Err(e) => (false, e),
+                    }
+                }
+                "mark" => {
+                    let q = args.get("query").and_then(Value::as_str).unwrap_or("");
+                    let st_s = args.get("status").and_then(Value::as_str).unwrap_or("probed");
+                    let rsn = args.get("reason").and_then(Value::as_str).unwrap_or("");
+                    let rf = args.get("ref").and_then(Value::as_str).unwrap_or("");
+                    let Some(status) = ap_baton::frontier::FrontierStatus::parse(st_s) else {
+                        return (
+                            false,
+                            format!("Invalid status '{st_s}' (unvisited|probed|stopped|confirmed|deferred)"),
+                        );
+                    };
+                    let mut state = ap_baton::frontier::load_frontier(&store_path);
+                    let q_low = q.trim().to_ascii_lowercase();
+                    let now = ap_baton::now_iso_utc();
+                    let mut ids = Vec::new();
+                    for it in &mut state.items {
+                        let id_low = it.id.to_ascii_lowercase();
+                        let tgt_low = it.target.to_ascii_lowercase();
+                        if id_low == q_low
+                            || id_low.starts_with(&q_low)
+                            || (q_low.len() >= 4 && tgt_low.contains(&q_low))
+                        {
+                            it.status = status.clone();
+                            if !rsn.trim().is_empty() {
+                                it.reason = rsn.trim().chars().take(180).collect();
+                            }
+                            if !rf.trim().is_empty() {
+                                it.evidence_ref = rf.trim().chars().take(120).collect();
+                            }
+                            it.updated_at = now.clone();
+                            ids.push(it.id.clone());
+                        }
+                    }
+                    if ids.is_empty() {
+                        return (false, format!("[frontier] no item matched '{q}'"));
+                    }
+                    if let Err(e) = ap_baton::frontier::save_frontier(&store_path, &mut state) {
+                        return (false, format!("[frontier] save failed: {e}"));
+                    }
+                    (
+                        true,
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "status": status.as_str(),
+                            "matched": ids.len(),
+                            "ids": ids,
+                        }))
+                        .unwrap_or_default(),
+                    )
+                }
+                "next" => {
+                    let state = ap_baton::frontier::load_frontier(&store_path);
+                    let top_k = args
+                        .get("top_k")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(5)
+                        .clamp(1, 20) as usize;
+                    let exclude: Vec<String> = args
+                        .get("exclude_axes")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let items = ap_baton::frontier::pick_next_diverse(&state, top_k, &exclude);
+                    let summary = ap_baton::frontier::status_summary_json(&state, top_k);
+                    (
+                        true,
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "total": state.items.len(),
+                            "unvisited": summary["unvisited"],
+                            "unexplored_axes": summary["unexplored_axes"],
+                            "explored_axes": summary["explored_axes"],
+                            "items": items,
+                        }))
+                        .unwrap_or_default(),
+                    )
+                }
+                "sync_stopped" => {
+                    let mut state = ap_baton::frontier::load_frontier(&store_path);
+                    let files: Vec<String> = args
+                        .get("text_files")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut marked = 0usize;
+                    for f in files {
+                        if let Ok(txt) = std::fs::read_to_string(&f) {
+                            let label = std::path::Path::new(&f)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("notes");
+                            marked += ap_baton::frontier::sync_stopped_from_text(
+                                &mut state, label, &txt,
+                            );
+                        }
+                    }
+                    if marked > 0 {
+                        let _ = ap_baton::frontier::save_frontier(&store_path, &mut state);
+                    }
+                    (
+                        true,
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "newly_stopped": marked,
+                            "total": state.items.len(),
+                        }))
+                        .unwrap_or_default(),
+                    )
+                }
+                "status" => {
+                    let state = ap_baton::frontier::load_frontier(&store_path);
+                    let top_k = args
+                        .get("top_k")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(5)
+                        .clamp(1, 20) as usize;
+                    let summary = ap_baton::frontier::status_summary_json(&state, top_k);
+                    (true, serde_json::to_string_pretty(&summary).unwrap_or_default())
+                }
+                other => (
+                    false,
+                    format!("Unknown ap_frontier action '{other}' (use seed|mark|next|status|sync_stopped)"),
+                ),
+            }
+        }
         other => (false, format!("Unknown tool: {other}")),
     }
 }
@@ -2660,7 +2937,8 @@ fn handle_rpc_request(req: &Value) -> Option<Value> {
                                 populated = true;
                             }
                             Value::Array(_) => {
-                                result["structuredContent"] = json!({ "ok": true, "items": parsed });
+                                result["structuredContent"] =
+                                    json!({ "ok": true, "items": parsed });
                                 populated = true;
                             }
                             _ => {}

@@ -803,12 +803,7 @@ fn summarize_log(raw: &str) -> String {
                     s + head_n + 1,
                     e + 1 - tail_n
                 ));
-                for (k, line) in lines
-                    .iter()
-                    .enumerate()
-                    .take(e + 1)
-                    .skip(e + 1 - tail_n)
-                {
+                for (k, line) in lines.iter().enumerate().take(e + 1).skip(e + 1 - tail_n) {
                     parts.push(format!("L{}: {}", k + 1, trunc_chars(line, 160)));
                 }
                 parts.join("\n    ")

@@ -7,6 +7,7 @@ pub mod exec;
 pub mod inspect;
 pub mod install;
 pub mod mcp;
+pub mod pi_patch;
 pub mod query;
 pub mod read;
 pub mod search;
@@ -123,6 +124,7 @@ fn dispatch_primitive(name: &str, tail_args: &[String]) -> Option<i32> {
         "exec" => return Some(exec::run_cli(&sub_argv)),
         "undo" => return Some(undo::run_cli(&sub_argv)),
         "stats" | "gain" => return Some(stats::run_cli(&sub_argv)),
+        "pi" => return Some(pi_patch::run_cli(&sub_argv)),
         "sieve" => Some(ap_sieve::run_cli(&sub_argv)),
         "baton" => Some(ap_baton::run_cli(&sub_argv)),
         "recall" => Some(ap_recall::run_cli(&sub_argv)),

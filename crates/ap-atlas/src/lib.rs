@@ -4,6 +4,7 @@ pub mod changes;
 pub mod impact;
 pub mod locate;
 pub mod product;
+pub mod surface;
 pub mod trace;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -203,6 +204,19 @@ enum SubCmd {
         root: String,
         #[arg(long, default_value = "HEAD")]
         base: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Multi-axis entrypoint & sink surface map across source code, manifests & virtual archives (.asar/.vsix/.zip/.jar)
+    Surface {
+        #[arg(default_value = ".")]
+        root: String,
+        #[arg(long, default_value_t = 1500)]
+        max_files: usize,
+        #[arg(long, default_value_t = 12)]
+        max_per_axis: usize,
+        #[arg(long)]
+        include_vendor: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1488,6 +1502,26 @@ pub fn run_cli(args: &[String]) -> i32 {
                 println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
             } else {
                 println!("{}", changes::render_changes_md(&rep));
+            }
+            return 0;
+        }
+        Some(SubCmd::Surface {
+            root,
+            max_files,
+            max_per_axis,
+            include_vendor,
+            json,
+        }) => {
+            let root_p = PathBuf::from(&root);
+            if !root_p.exists() {
+                eprintln!("[atlas] path not found: {root}");
+                return 1;
+            }
+            let map = surface::build_surface_map(&root_p, max_files, max_per_axis, include_vendor);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&map).unwrap_or_default());
+            } else {
+                print!("{}", surface::render_surface_md(&map));
             }
             return 0;
         }

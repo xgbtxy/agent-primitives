@@ -149,7 +149,9 @@ fn classify_err(txt: &str, st: &mut Counters) {
     if low.contains("timed out") || low.contains("etimedout") || low.contains("deadline exceeded") {
         st.shell_timeouts += 1;
     }
-    if (low.contains("no such file") || low.contains("cannot find the path") || low.contains("filenotfounderror"))
+    if (low.contains("no such file")
+        || low.contains("cannot find the path")
+        || low.contains("filenotfounderror"))
         && (low.contains("/mnt/") || low.contains("unicodeescape"))
     {
         st.path_translation_errors += 1;

@@ -4591,7 +4591,10 @@ fn test_v210_pi_native_context_edit_masking_and_doctor_pi_audit() {
     assert_eq!(dbj["pi_runtime"]["detected"], true);
     assert_eq!(dbj["pi_runtime"]["accelerator_present"], true);
     assert_eq!(dbj["pi_runtime"]["accelerator_up_to_date"], false);
-    assert_eq!(dbj["pi_runtime"]["default_model"], "deepseek/deepseek-flash");
+    assert_eq!(
+        dbj["pi_runtime"]["default_model"],
+        "deepseek/deepseek-flash"
+    );
     assert_eq!(dbj["pi_runtime"]["codemode_enabled"], true);
     assert_eq!(dbj["pi_runtime"]["deepseek_mid_convo_system"], true);
     assert!(
@@ -4623,8 +4626,8 @@ fn test_v210_pi_native_context_edit_masking_and_doctor_pi_audit() {
     assert!(!pi_agent.join("AGENTS.md").exists());
 
     // Verify upgraded `zz-ap-accelerator.ts` has Pi v1.5 native context_edit batch masking & DeepSeek guards
-    let accel_ts = fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts"))
-        .unwrap();
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
     for needle in [
         "ContextEditEntryDraft",
         "ProjectedSessionEntry",
@@ -4655,7 +4658,9 @@ fn test_v210_pi_native_context_edit_masking_and_doctor_pi_audit() {
     let desc = mcp_cfg["mcpServers"]["agent-primitives"]["description"]
         .as_str()
         .unwrap();
-    assert!(desc.contains("AST ap_read") && desc.contains("ap_rename") && desc.contains("ap_changes"));
+    assert!(
+        desc.contains("AST ap_read") && desc.contains("ap_rename") && desc.contains("ap_changes")
+    );
 
     // 4. Re-run `ap doctor --json`: Pi runtime now 100% green with zero hints!
     let doc_after = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -4809,7 +4814,10 @@ fn test_v212_pi_slash_ap_command_tree_hook_ps_curl_and_1m_compaction_doctor() {
         "curl.exe",
         "[ap telemetry]",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.12 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.12 feature '{needle}'"
+        );
     }
 
     let doc1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -4857,7 +4865,13 @@ fn test_v212_pi_slash_ap_command_tree_hook_ps_curl_and_1m_compaction_doctor() {
     );
     assert_eq!(d2["pi_runtime"]["show_cache_miss_notices"], true);
     assert_eq!(d2["pi_runtime"]["flash_auto_enabled"], true);
-    assert_eq!(d2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        d2["pi_runtime"]["recommendations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -4900,7 +4914,10 @@ fn test_v213_pi_handoff_error_preserving_mask_and_xml_tool_call_recovery() {
         "ctx.newSession(",
         "reasoning: \"low\"",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.13 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.13 feature '{needle}'"
+        );
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -4970,14 +4987,20 @@ fn test_v214_data_calibrated_utf8_quote_tip_split_loop_and_retry_doctor() {
         "[ap quote-tip]",
         "customType: \"ap-empty-recover\"",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.14 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.14 feature '{needle}'"
+        );
     }
 
     // Doctor surfaces `retry.maxRetries` recommendation when < 5 for DeepSeek
     let doc1 = run_ap(root, &["doctor", "--json"], None, &env_vars);
     assert!(doc1.status.success());
     let d1: Value = serde_json::from_slice(&doc1.stdout).unwrap();
-    assert_eq!(d1["pi_runtime"]["effective_compaction_trigger_tokens"], 350000);
+    assert_eq!(
+        d1["pi_runtime"]["effective_compaction_trigger_tokens"],
+        350000
+    );
     assert_eq!(d1["pi_runtime"]["retry_max_retries"], 3);
     assert!(d1["pi_runtime"]["recommendations"]
         .as_array()
@@ -5042,7 +5065,10 @@ fn test_v215_pi_monotonic_masking_dual_sieve_heredoc_heal_and_audit() {
         "[ap timeout-tip]",
         "[ap path-tip]",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.15 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.15 feature '{needle}'"
+        );
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -5202,7 +5228,10 @@ fn test_v216_mcp_output_schema_pi_edit_guard_review_and_http_idle_doctor() {
         "healedEdits=",
         "storeKeys=",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.16 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.16 feature '{needle}'"
+        );
     }
 
     // Default unset httpIdleTimeoutMs (300s) triggers DeepSeek KV-cache cliff recommendation
@@ -5258,9 +5287,18 @@ fn test_v216_mcp_output_schema_pi_edit_guard_review_and_http_idle_doctor() {
     let doc2 = run_ap(root, &["doctor", "--json"], None, &env_vars);
     assert!(doc2.status.success());
     let d2: Value = serde_json::from_slice(&doc2.stdout).unwrap();
-    assert_eq!(d2["pi_runtime"]["effective_compaction_trigger_tokens"], 350000);
+    assert_eq!(
+        d2["pi_runtime"]["effective_compaction_trigger_tokens"],
+        350000
+    );
     assert_eq!(d2["pi_runtime"]["http_idle_timeout_ms"], 120000);
-    assert_eq!(d2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        d2["pi_runtime"]["recommendations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -5305,7 +5343,10 @@ fn test_v217_tier2_peak_iq_masking_lineno_edit_heal_cmd_tip_and_write_tip() {
         "[ap write-tip]",
         "export function listCodemodeStoreKeys",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.17 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.17 feature '{needle}'"
+        );
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -5355,7 +5396,10 @@ fn test_v218_fast_low_compaction_truncated_read_outline_codemode_classifier_and_
         "ctx.modelRegistry.streamSimple(",
         "QuickJS sandbox has NO Node APIs",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.18 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.18 feature '{needle}'"
+        );
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -5406,7 +5450,10 @@ fn test_v219_tool_prefix_sort_codemode_heal_edit_guard_multi_and_enoent_tip() {
         "[ap enoent-tip]",
         "[ap py-tip]",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.19 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.19 feature '{needle}'"
+        );
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -5458,7 +5505,10 @@ fn test_v220_codemode_multiblock_sieve_typeerror_instant_syntax_and_timeout_cap(
         "pi-codemode",
         "currentTimeout > 120",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.20 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.20 feature '{needle}'"
+        );
     }
 
     // Verify ap doctor flags retry.baseDelayMs=2000 on DeepSeek and clears when lowered to 1000
@@ -5512,7 +5562,13 @@ fn test_v220_codemode_multiblock_sieve_typeerror_instant_syntax_and_timeout_cap(
     assert!(d2.status.success());
     let v2: Value = serde_json::from_slice(&d2.stdout).unwrap();
     assert_eq!(v2["pi_runtime"]["retry_base_delay_ms"], 1000);
-    assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        v2["pi_runtime"]["recommendations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -5557,7 +5613,10 @@ fn test_v221_deepseek_cache_warmer_and_static_turn0_guidelines() {
         "cache_warming_decision",
         "cacheWarms=",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.21 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.21 feature '{needle}'"
+        );
     }
 
     fs::write(
@@ -5620,7 +5679,13 @@ fn test_v221_deepseek_cache_warmer_and_static_turn0_guidelines() {
     let v2: Value = serde_json::from_slice(&d2.stdout).unwrap();
     assert_eq!(v2["pi_runtime"]["deepseek_prompt_cache_ttl_s"], 120);
     assert_eq!(v2["pi_runtime"]["hints"].as_array().unwrap().len(), 0);
-    assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        v2["pi_runtime"]["recommendations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -5665,7 +5730,10 @@ fn test_v222_hashline_read_anchor_expand_edit_and_noncode_outline() {
         "const SIEVE_STRUCTURED_LINES = 180;",
         "File/path not found inside codemode",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.22 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.22 feature '{needle}'"
+        );
     }
 
     let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
@@ -5755,7 +5823,10 @@ fn test_v223_sieve_error_storm_cap_codemode_err_sieve_and_hashline_overlap_merge
         "miss >= 0.015",
         "if (event.toolName === \"codemode\") {",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.23 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.23 feature '{needle}'"
+        );
     }
 }
 
@@ -5800,7 +5871,10 @@ fn test_v224_no_double_cold_mask_post_edit_line_shift_piped_grep_and_provider_ti
         "const protectFreshColdRebuild =",
         "const alreadyHasApRule =",
     ] {
-        assert!(accel_ts.contains(needle), "Missing v2.24 feature '{needle}'");
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.24 feature '{needle}'"
+        );
     }
 
     // Verify ap doctor flags retry.provider.timeoutMs=3600000 shadowing httpIdleTimeoutMs, and clears when removed
@@ -5825,7 +5899,10 @@ fn test_v224_no_double_cold_mask_post_edit_line_shift_piped_grep_and_provider_ti
         .as_array()
         .unwrap()
         .iter()
-        .any(|r| r.as_str().unwrap_or("").contains("retry.provider.timeoutMs")));
+        .any(|r| r
+            .as_str()
+            .unwrap_or("")
+            .contains("retry.provider.timeoutMs")));
 
     fs::write(
         pi_agent.join("settings.json"),
@@ -5844,7 +5921,13 @@ fn test_v224_no_double_cold_mask_post_edit_line_shift_piped_grep_and_provider_ti
     assert!(d2.status.success());
     let v2: Value = serde_json::from_slice(&d2.stdout).unwrap();
     assert!(v2["pi_runtime"]["provider_timeout_ms"].is_null());
-    assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        v2["pi_runtime"]["recommendations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -5904,4 +5987,133 @@ fn test_v225_amortized_deep_sweep_settimeout_shim_read_eof_clamp_and_concrete_gu
     assert!(doc.status.success());
     let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}
+
+#[test]
+fn test_v226_surface_map_and_orthogonal_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let ap_home = root.join("ap_home_v226");
+    let store_path = root.join("custom_frontier.json");
+    fs::create_dir_all(root.join("src/exec")).unwrap();
+    fs::create_dir_all(root.join("src/net")).unwrap();
+    fs::create_dir_all(root.join("src/fs")).unwrap();
+    fs::write(
+        root.join("src/exec/runner.js"),
+        "const cp = require('child_process');\ncp.spawnSync('git', ['status']);\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/net/listener.java"),
+        "ServerSocket ss = new ServerSocket(0);\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/fs/reader.java"),
+        "Files.newBufferedReader(Paths.get(inputPath));\n",
+    )
+    .unwrap();
+
+    let env_vars = [("AP_HOME", ap_home.as_path())];
+    let surf = run_ap(root, &["atlas", "surface", ".", "--json"], None, &env_vars);
+    assert!(surf.status.success());
+    let sj: Value = serde_json::from_slice(&surf.stdout).unwrap();
+    let axes = sj["axes_present"].to_string();
+    assert!(axes.contains("exec_spawn"), "Missing exec_spawn: {sj}");
+    assert!(
+        axes.contains("net_listen_rpc"),
+        "Missing net_listen_rpc: {sj}"
+    );
+    assert!(axes.contains("fs_path_io"), "Missing fs_path_io: {sj}");
+
+    // Seed custom store from surface JSON via stdin
+    let seed = run_ap(
+        root,
+        &[
+            "baton",
+            "frontier",
+            "seed",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--stdin",
+            "--json",
+        ],
+        Some(&String::from_utf8_lossy(&surf.stdout)),
+        &env_vars,
+    );
+    assert!(seed.status.success());
+    let seed_j: Value = serde_json::from_slice(&seed.stdout).unwrap();
+    assert!(seed_j["added"].as_u64().unwrap_or(0) >= 3);
+
+    // Mark exec_spawn as stopped -> frontier next must surface unexplored axes first
+    let mark = run_ap(
+        root,
+        &[
+            "baton",
+            "frontier",
+            "mark",
+            "runner.js",
+            "--status",
+            "stopped",
+            "--reason",
+            "already checked",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(mark.status.success());
+
+    let nxt = run_ap(
+        root,
+        &[
+            "baton",
+            "frontier",
+            "next",
+            "--store",
+            store_path.to_str().unwrap(),
+            "-k",
+            "2",
+            "--json",
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(nxt.status.success());
+    let nj: Value = serde_json::from_slice(&nxt.stdout).unwrap();
+    let items = nj["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|it| it["axis"] != "exec_spawn"));
+
+    // Verify MCP ap_surface + ap_frontier in-process dispatch
+    let root_s = root.to_string_lossy().replace('\\', "/");
+    let store_s = store_path.to_string_lossy().replace('\\', "/");
+    let mcp_in = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "ap_surface", "arguments": {"path": root_s}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ap_frontier", "arguments": {"action": "status", "store": store_s}}}),
+    ]
+    .iter()
+    .map(|v| v.to_string())
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+    let mcp_out = run_ap(root, &["mcp"], Some(&mcp_in), &env_vars);
+    assert!(mcp_out.status.success());
+    let resps: Vec<Value> = String::from_utf8_lossy(&mcp_out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect();
+    assert_eq!(resps.len(), 3);
+    assert!(resps[1]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("net_listen_rpc"));
+    assert!(resps[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("unexplored_axes"));
 }

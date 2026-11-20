@@ -776,7 +776,7 @@ fn merge_pi_mcp(cfg_path: &Path, ap_bin_posix: &str) -> String {
             "command": ap_bin_posix,
             "args": ["mcp"],
             "exposure": "codemode",
-            "description": "Fast Pure-Rust MCP 2025-06-18 (34 annotated tools, Resources, Prompts; batch via Promise.allSettled in codemode): AST ap_read (--symbol/--outline/batch), parallel ap_search (-l/-c/-C), ap_edit/ap_rename, ap_orient/ap_impact/ap_changes/ap_locate/ap_trace, ap_query (named records), ap_sieve (compiler/test/diff), ap_baton/ap_recall & CDP/HTTP/TCP/WS/TLS probes"
+            "description": "Fast Pure-Rust MCP 2025-06-18 (36 annotated tools, Resources, Prompts; batch via Promise.allSettled in codemode): AST ap_read (--symbol/--outline/batch), parallel ap_search (-l/-c/-C), ap_edit/ap_rename, ap_orient/ap_surface/ap_impact/ap_changes/ap_locate/ap_trace, ap_query (named records), ap_sieve (compiler/test/diff), ap_baton/ap_frontier/ap_recall & CDP/HTTP/TCP/WS/TLS probes"
         }),
     );
     if let Some(p) = cfg_path.parent() {
@@ -2548,6 +2548,7 @@ export default function (pi: ExtensionAPI) {{
 	let lastCodemodeParallelTipTurn = -CODEMODE_PARALLEL_COOLDOWN_TURNS;
 	let sessionTurnCount = 0;
 	let lastMaskTurn = -MASK_COOLDOWN_TURNS;
+	let lastSeenCompactionId = "";
 	let expectedCacheReset = false;
 	let sessionInputTokens = 0;
 	let sessionCacheReadTokens = 0;
@@ -2692,6 +2693,7 @@ export default function (pi: ExtensionAPI) {{
 
 	pi.on("session_start", (_event, ctx) => {{
 		resetTransientState();
+		lastSeenCompactionId = "";
 		largeReadTipShown = false;
 		codemodeParallelTipsShown = 0;
 		lastCodemodeParallelTipTurn = -CODEMODE_PARALLEL_COOLDOWN_TURNS;
@@ -2800,6 +2802,20 @@ export default function (pi: ExtensionAPI) {{
 			if (bt.status === 0 && bt.stdout?.trim()) {{
 				batonBrief = `\n\n## Baton Task State\n${{bt.stdout.trim().slice(0, 1500)}}`;
 			}}
+			if (existsSync(join(ctx.cwd, ".baton", "frontier.json"))) {{
+				const fr = spawnSync(AP_BIN, ["baton", "frontier", "status", "-k", "4"], {{
+					cwd: ctx.cwd,
+					encoding: "utf8",
+					timeout: 2000,
+					windowsHide: true,
+				}});
+				if (fr.status === 0 && fr.stdout?.trim()) {{
+					batonBrief += `\n\n## Exploration Frontier\n${{fr.stdout.trim().slice(0, 1000)}}`;
+				}}
+			}}
+		}}
+		if (process.env.AP_YIELD_COMPACT === "1") {{
+			return undefined;
 		}}
 
 		// 2. Fast `reasoning: "low"` dead-end-preserving auto-compaction for DeepSeek models
@@ -2949,6 +2965,7 @@ export default function (pi: ExtensionAPI) {{
 					{{ value: "status", label: "status — Live KV-cache, masking, edit-heal & codemode-store telemetry" }},
 					{{ value: "doctor", label: "doctor — Run native ap doctor health check" }},
 					{{ value: "compact", label: "compact — Compact while anchoring verified facts & dead-ends" }},
+					{{ value: "fresh ", label: "fresh [goal] — Instant 0-history linked session seeded with .baton & frontier" }},
 					{{ value: "handoff ", label: "handoff <goal> — Transfer context cleanly to a fresh 0-rot session" }},
 					{{ value: "review", label: "review [focus] — Independent clean-context diff review (0 parent bloat)" }},
 				];
@@ -2988,6 +3005,49 @@ export default function (pi: ExtensionAPI) {{
 							`Preserve exact file paths, symbol names, verified facts, falsified dead-ends, and exact build/test commands needed to continue cleanly.${{storeAnchor}}`,
 					}});
 					ctx.ui.notify("[ap] Triggered focused compaction preserving verified facts, dead-ends & store keys.", "info");
+					return;
+				}}
+				if (sub === "fresh") {{
+					const parentSession = ctx.sessionManager?.getSessionFile?.();
+					const seedParts: string[] = [];
+					if (ctx.cwd && existsSync(join(ctx.cwd, ".baton"))) {{
+						const bt = spawnSync(AP_BIN, ["baton", "resume"], {{
+							cwd: ctx.cwd,
+							encoding: "utf8",
+							timeout: 2000,
+							windowsHide: true,
+						}});
+						if (bt.status === 0 && bt.stdout?.trim()) {{
+							seedParts.push(bt.stdout.trim().slice(0, 1500));
+						}}
+						if (existsSync(join(ctx.cwd, ".baton", "frontier.json"))) {{
+							const fr = spawnSync(AP_BIN, ["baton", "frontier", "status", "-k", "5"], {{
+								cwd: ctx.cwd,
+								encoding: "utf8",
+								timeout: 2000,
+								windowsHide: true,
+							}});
+							if (fr.status === 0 && fr.stdout?.trim()) {{
+								seedParts.push(fr.stdout.trim().slice(0, 1200));
+							}}
+						}}
+					}}
+					const kickoff = [rest || "Continue from the clean-slate frontier above.", ...seedParts].join("\n\n").trim();
+					if (typeof ctx.newSession === "function") {{
+						await ctx.newSession({{
+							parentSession,
+							withSession: async (nextCtx) => {{
+								if (rest && typeof nextCtx.sendUserMessage === "function") {{
+									await nextCtx.sendUserMessage(kickoff);
+								}} else {{
+									nextCtx.ui.setEditorText(kickoff);
+								}}
+								nextCtx.ui.notify("[ap fresh] Started 0-history child session linked to parent.", "info");
+							}},
+						}});
+					}} else {{
+						ctx.ui.setEditorText?.(kickoff);
+					}}
 					return;
 				}}
 				if (sub === "handoff") {{
@@ -3262,6 +3322,12 @@ export default function (pi: ExtensionAPI) {{
 	}});
 
 	pi.on("turn_end", (event, ctx) => {{
+		const firstCtxEntry = event.context?.contextEntries?.[0]?.sourceEntry as {{ id?: string; type?: string }} | undefined;
+		if (firstCtxEntry?.type === "compaction" && typeof firstCtxEntry.id === "string" && firstCtxEntry.id !== lastSeenCompactionId) {{
+			lastSeenCompactionId = firstCtxEntry.id;
+			resetTransientState();
+			expectedCacheReset = true;
+		}}
 		sessionTurnCount += 1;
 		const msg = event.message as {{
 			role?: string;
@@ -3375,6 +3441,11 @@ export default function (pi: ExtensionAPI) {{
 
 	pi.on("agent_before_settle", (event, ctx) => {{
 		if (event.outcome !== "completed" || settleGateFiredThisRun) {{
+			return undefined;
+		}}
+		if (Array.isArray(event.entries) && event.entries.some((e) => e?.type === "compaction")) {{
+			editedFilesThisRun.clear();
+			builtInCodeEditsThisRun.clear();
 			return undefined;
 		}}
 
@@ -4782,7 +4853,10 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         .map(|v| {
             if let Some(n) = v.as_u64() {
                 n
-            } else if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("disabled")) {
+            } else if v
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("disabled"))
+            {
                 0
             } else {
                 300_000
@@ -4925,6 +4999,8 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         );
     }
 
+    let runtime_patches = crate::pi_patch::inspect_pi_patches(None);
+
     json!({
         "detected": true,
         "accelerator_present": accelerator_present,
@@ -4943,6 +5019,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
         "cache_warming_mode": cache_warming_mode,
         "deepseek_mid_convo_system": deepseek_mid_convo_system,
         "deepseek_prompt_cache_ttl_s": deepseek_prompt_cache_ttl_s,
+        "runtime_patches": runtime_patches,
         "hints": hints,
         "recommendations": recommendations,
     })
@@ -5138,9 +5215,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
         let accel_ok = pi_runtime["accelerator_up_to_date"].as_bool() == Some(true);
         let mcp_ok = pi_runtime["mcp_codemode_wired"].as_bool() == Some(true);
         let cm_ok = pi_runtime["codemode_enabled"].as_bool() == Some(true);
-        let model = pi_runtime["default_model"]
-            .as_str()
-            .unwrap_or("unset");
+        let model = pi_runtime["default_model"].as_str().unwrap_or("unset");
         let badge = if accel_ok && mcp_ok && cm_ok {
             "[OK]"
         } else {
@@ -5150,8 +5225,27 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.14+ (99% UTF-8 heal + error-aware context_edit + settle-gate + flash-auto + /ap handoff)" } else { "stale/missing" }
+            if accel_ok { "v2.26+ (Hashline + CacheWarmer + context_edit + settle-gate + flash-auto + /ap fresh|handoff)" } else { "stale/missing" }
         );
+        if pi_runtime["runtime_patches"]["detected"].as_bool() == Some(true) {
+            let applied = pi_runtime["runtime_patches"]["applied_count"]
+                .as_u64()
+                .unwrap_or(0);
+            let total = pi_runtime["runtime_patches"]["total_count"]
+                .as_u64()
+                .unwrap_or(0);
+            let ver = pi_runtime["runtime_patches"]["pi_version"]
+                .as_str()
+                .unwrap_or("?");
+            let hint = if applied < total {
+                " (run `ap pi patch` to apply)"
+            } else {
+                ""
+            };
+            println!(
+                "         [pi-patch] Pi v{ver}: {applied}/{total} runtime patches applied{hint}"
+            );
+        }
         if let Some(hints) = pi_runtime["hints"].as_array() {
             for h in hints.iter().filter_map(Value::as_str) {
                 println!("         -> {h}");
