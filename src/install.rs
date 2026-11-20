@@ -897,19 +897,29 @@ export function isBenignGrepNoMatch(cmd: string, outText: string): boolean {{
 	return body.length < 15;
 }}
 
+const LEADING_SHELL_PREFIX_RE =
+	/^\s*(?:(?:export\s+\S+|unset\s+\S+|\$env:\w+\s*=\s*\S+|cd(?:\s+\/d)?\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)|chcp\s+\d+(?:\s*>\s*(?:\/dev\/null|NUL))?)\s*(?:&&|;)\s*)+/i;
 const READONLY_PROBE_TIMEOUT_RE =
-	/^\s*(?:export\s+\S+\s*;?\s*|\$env:\w+\s*=\s*\S+\s*;?\s*)*(?:grep|egrep|fgrep|rg|find|fd|ls|dir|tree|cat|head|tail|sed|awk|nl|wc|curl(?:\.exe)?|wget|Get-Content|Get-ChildItem|Select-String)\b/i;
+	/^\s*(?:grep|egrep|fgrep|rg|find|fd|ls|dir|tree|cat|head|tail|sed|awk|nl|wc|stat|file|strings|curl(?:\.exe)?|wget|Get-Content|Get-ChildItem|Select-String)\b/i;
+const READONLY_PS_INVOKE_RE = /^\s*(?:powershell|pwsh)(?:\.exe)?\b/i;
+const PS_MUTATING_CMDLET_RE =
+	/\b(?:Set-|New-|Add-|Out-|Remove-|Clear-|Stop-|Restart-|Install-|Start-Process|-OutFile\b)/i;
 const LONG_BUILD_TEST_RE =
 	/\b(?:cargo|rustc|npm|pnpm|yarn|bun|pytest|vitest|jest|go\s+test|make|cmake|gradle|mvn|docker|pip\s+install|uv\s+sync)\b/i;
 
 /**
  * Guard unbounded OR overly long (>120s) read-only shell probes with a 90s timeout so a hung
  * search/HTTP call fails fast BEFORE crossing DeepSeek's 2-5m KV-cache eviction cliff.
+ * Strips leading `cd ... &&` / env prefixes so chained probes are guarded too.
  * Never shortens <=120s explicit timeouts or touches build/test/write commands.
  */
 export function resolveSafeShellTimeout(cmd: string, currentTimeout: unknown): number | undefined {{
 	if (!cmd || LONG_BUILD_TEST_RE.test(cmd) || DESTRUCTIVE_OR_WRITE.test(cmd)) return undefined;
-	if (!READONLY_PROBE_TIMEOUT_RE.test(cmd)) return undefined;
+	const coreCmd = cmd.replace(LEADING_SHELL_PREFIX_RE, "");
+	const isReadonlyProbe =
+		READONLY_PROBE_TIMEOUT_RE.test(coreCmd) ||
+		(READONLY_PS_INVOKE_RE.test(coreCmd) && !PS_MUTATING_CMDLET_RE.test(coreCmd));
+	if (!isReadonlyProbe) return undefined;
 	if (currentTimeout === undefined || currentTimeout === null) return 90;
 	if (typeof currentTimeout === "number" && Number.isFinite(currentTimeout) && currentTimeout > 120) {{
 		return 90;
@@ -1105,7 +1115,7 @@ export function classifyCodemodeFailureTip(outText: string): string {{
 			outText,
 		)
 	) {{
-		return `[ap codemode-tip] TypeError: tools.bash(...) resolves to an OBJECT {{ output, exit_code, truncated, full_output_path }} (use res.output, NOT res.split/match!), tools.read(...) resolves to a string, and tools.mcp__* resolves to {{ content, structuredContent, isError }} (already parsed; do NOT JSON.parse). Run await describeTool("<name>") to verify exact fields.`;
+		return `[ap codemode-tip] TypeError: tools.bash(...) resolves to an OBJECT {{ output, exit_code, truncated, full_output_path }} (use (res.output ?? ""), NOT res.split/slice!), tools.read(...) resolves to a string, and tools.mcp__* resolves to {{ content, structuredContent, isError }} (already parsed; check Object.keys(res) instead of slicing undefined). Run await describeTool("<name>") to verify exact fields.`;
 	}}
 	if (/\bSyntaxError\b|options line/i.test(outText)) {{
 		return `[ap codemode-tip] Pass raw JS body only (no markdown code fences); // @options: {{...}} must be line 1 if used.`;
@@ -2031,7 +2041,98 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 		changed = true;
 	}}
 
+	// 6. Rewrite Windows cmd `type <file>` inside Git Bash -> `cat <posix-path>` (leaves POSIX `type -a/-t/-p` and bare commands untouched)
+	if (toolName === "bash") {{
+		const tm = cmd.match(
+			/^(\s*(?:cd(?:\s+\/d)?\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*(?:&&|;)\s*)?)type\s+(?!-[atpPf]\b)(?:'([^']+)'|"([^"]+)"|([^\s'"|;&>]+))([\s\S]*)$/,
+		);
+		const rawTarget = tm ? tm[2] || tm[3] || tm[4] || "" : "";
+		if (tm && rawTarget && /[./\\]/.test(rawTarget)) {{
+			const posixTarget = rawTarget.replace(/\\/g, "/");
+			const quoted = posixTarget.includes("'")
+				? `"${{posixTarget.replace(/"/g, '\\"')}}"`
+				: `'${{posixTarget}}'`;
+			cmd = `${{tm[1] || ""}}cat ${{quoted}}${{tm[5] || ""}}`;
+			changed = true;
+		}}
+	}}
+
+	// 7. Lock UTF-8 output encoding when Git Bash spawns `powershell -Command "..."` (eliminates GBK mojibake)
+	if (
+		toolName === "bash" &&
+		/\b(?:powershell|pwsh)(?:\.exe)?\b/i.test(cmd) &&
+		!/OutputEncoding|UTF8Encoding|-EncodedCommand\b|-enc\b/i.test(cmd)
+	) {{
+		const psFixed = cmd.replace(
+			/\b((?:powershell|pwsh)(?:\.exe)?\b[^|;&]*?\s-(?:Command|c)\s+)(['"])/i,
+			"$1$2[Console]::OutputEncoding=[Text.Encoding]::UTF8; ",
+		);
+		if (psFixed !== cmd) {{
+			cmd = psFixed;
+			changed = true;
+		}}
+	}}
+
 	return changed ? cmd : undefined;
+}}
+
+const HALLUCINATED_TOOL_ALIASES: Readonly<Record<string, string>> = {{
+	codemake: "codemode",
+	code_mode: "codemode",
+	"code-mode": "codemode",
+	read_file: "read",
+	view_file: "read",
+	edit_file: "edit",
+	replace_in_file: "edit",
+	write_file: "write",
+	create_file: "write",
+	run_command: "bash",
+	run_shell: "bash",
+	shell: "bash",
+	execute_command: "bash",
+	exec_command: "bash",
+}};
+
+/**
+ * Deterministically repair high-frequency hallucinated tool names (e.g. `codemake` -> `codemode`,
+ * `read_file` -> `read`, `run_command` -> `bash`) strictly when the target tool is active.
+ */
+export function repairHallucinatedToolName(
+	rawName: string,
+	activeTools: ReadonlySet<string>,
+): string | undefined {{
+	if (!rawName || activeTools.has(rawName)) return undefined;
+	const key = rawName.trim().toLowerCase();
+	if (!key) return undefined;
+	const mapped = HALLUCINATED_TOOL_ALIASES[key];
+	if (mapped && activeTools.has(mapped)) return mapped;
+	if (activeTools.has(key)) return key;
+	return undefined;
+}}
+
+function normalizeRepairedToolArgs(
+	targetName: string,
+	rawArgs: unknown,
+): Record<string, unknown> {{
+	const args: Record<string, unknown> =
+		rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+			? {{ ...(rawArgs as Record<string, unknown>) }}
+			: {{}};
+	if (targetName === "bash" && typeof args.command !== "string" && typeof args.cmd === "string") {{
+		args.command = args.cmd;
+		delete args.cmd;
+	}} else if (
+		(targetName === "read" || targetName === "edit" || targetName === "write") &&
+		typeof args.path !== "string" &&
+		typeof args.file_path === "string"
+	) {{
+		args.path = args.file_path;
+		delete args.file_path;
+	}} else if (targetName === "codemode" && typeof args.code !== "string" && typeof args.script === "string") {{
+		args.code = args.script;
+		delete args.script;
+	}}
+	return args;
 }}
 
 export interface DsmlRecoveredCall {{
@@ -2059,8 +2160,11 @@ export function extractDsmlToolCalls(
 	let match: RegExpExecArray | null;
 	let seq = 0;
 	while ((match = invokeRe.exec(text)) !== null) {{
-		const toolName = (match[1] || "").trim();
-		if (!toolName || !allowedTools.has(toolName)) continue;
+		const rawToolName = (match[1] || "").trim();
+		const toolName = allowedTools.has(rawToolName)
+			? rawToolName
+			: repairHallucinatedToolName(rawToolName, allowedTools) ?? "";
+		if (!toolName) continue;
 		const body = match[2] || "";
 		const args: Record<string, unknown> = {{}};
 		let pm: RegExpExecArray | null;
@@ -2085,7 +2189,7 @@ export function extractDsmlToolCalls(
 			type: "toolCall",
 			id: `ap_dsml_${{Date.now()}}_${{seq}}`,
 			name: toolName,
-			arguments: args,
+			arguments: toolName !== rawToolName ? normalizeRepairedToolArgs(toolName, args) : args,
 		}});
 	}}
 	if (calls.length === 0) return undefined;
@@ -2116,13 +2220,17 @@ export function extractXmlJsonToolCalls(
 				arguments?: unknown;
 				parameters?: unknown;
 			}};
-			const name = typeof obj?.name === "string" ? obj.name.trim() : "";
-			if (!name || !allowedTools.has(name)) continue;
+			const rawName = typeof obj?.name === "string" ? obj.name.trim() : "";
+			const name = allowedTools.has(rawName)
+				? rawName
+				: repairHallucinatedToolName(rawName, allowedTools) ?? "";
+			if (!name) continue;
 			const rawArgs = obj.arguments ?? obj.parameters ?? {{}};
-			const args =
+			const baseArgs =
 				rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
 					? (rawArgs as Record<string, unknown>)
 					: {{}};
+			const args = name !== rawName ? normalizeRepairedToolArgs(name, baseArgs) : baseArgs;
 			seq += 1;
 			calls.push({{
 				type: "toolCall",
@@ -3280,14 +3388,39 @@ export default function (pi: ExtensionAPI) {{
 	pi.on("message_end", (event) => {{
 		const msg = event.message as {{
 			role?: string;
-			content?: Array<{{ type?: string; text?: string; [k: string]: unknown }}>;
+			content?: Array<{{ type?: string; text?: string; name?: string; arguments?: unknown; [k: string]: unknown }}>;
 		}} | undefined;
 		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return undefined;
-		// Never interfere when native toolCall blocks already exist (or an earlier extension recovered them)
-		if (msg.content.some((b) => b?.type === "toolCall")) return undefined;
 
 		const active = new Set(pi.getActiveTools?.() ?? []);
 		if (active.size === 0) return undefined;
+
+		// 1. Repair hallucinated native toolCall names (e.g. `codemake` -> `codemode`, `read_file` -> `read`)
+		if (msg.content.some((b) => b?.type === "toolCall")) {{
+			let repairedAny = false;
+			const repairedContent = msg.content.map((blk) => {{
+				if (blk?.type === "toolCall" && typeof blk.name === "string" && !active.has(blk.name)) {{
+					const fixedName = repairHallucinatedToolName(blk.name, active);
+					if (fixedName) {{
+						repairedAny = true;
+						return {{
+							...blk,
+							name: fixedName,
+							arguments: normalizeRepairedToolArgs(fixedName, blk.arguments),
+						}};
+					}}
+				}}
+				return blk;
+			}});
+			if (!repairedAny) return undefined;
+			guardsTriggered += 1;
+			return {{
+				message: {{
+					...(msg as Record<string, unknown>),
+					content: repairedContent,
+				}} as typeof event.message,
+			}};
+		}}
 
 		let recoveredAny = false;
 		const nextContent: Array<Record<string, unknown>> = [];
@@ -4758,6 +4891,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("routeDeepSeekFlashEffort")
                 && s.contains("registerCommand(\"ap\"")
                 && s.contains("session_before_tree")
+                && s.contains("repairHallucinatedToolName")
         })
         .unwrap_or(false);
 

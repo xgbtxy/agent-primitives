@@ -207,7 +207,7 @@ enum SubCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Multi-axis entrypoint & sink surface map across source code, manifests & virtual archives (.asar/.vsix/.zip/.jar)
+    /// Multi-axis entrypoint & sink surface map across source code, manifests, virtual archives (.asar/.vsix/.zip/.jar) & optional native binaries
     Surface {
         #[arg(default_value = ".")]
         root: String,
@@ -217,6 +217,8 @@ enum SubCmd {
         max_per_axis: usize,
         #[arg(long)]
         include_vendor: bool,
+        #[arg(long)]
+        include_binaries: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1510,6 +1512,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             max_files,
             max_per_axis,
             include_vendor,
+            include_binaries,
             json,
         }) => {
             let root_p = PathBuf::from(&root);
@@ -1517,7 +1520,13 @@ pub fn run_cli(args: &[String]) -> i32 {
                 eprintln!("[atlas] path not found: {root}");
                 return 1;
             }
-            let map = surface::build_surface_map(&root_p, max_files, max_per_axis, include_vendor);
+            let map = surface::build_surface_map(
+                &root_p,
+                max_files,
+                max_per_axis,
+                include_vendor,
+                include_binaries,
+            );
             if json {
                 println!("{}", serde_json::to_string_pretty(&map).unwrap_or_default());
             } else {

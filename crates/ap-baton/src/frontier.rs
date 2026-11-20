@@ -52,6 +52,8 @@ pub struct FrontierItem {
     pub symbol: String,
     #[serde(default)]
     pub snippet: String,
+    #[serde(default)]
+    pub guard_hint: String,
     #[serde(default = "default_score")]
     pub score: u32,
     pub status: FrontierStatus,
@@ -197,6 +199,12 @@ pub fn seed_from_json_str(state: &mut FrontierState, raw: &str) -> Result<(usize
                 .unwrap_or(""),
             180,
         );
+        let guard_hint = row
+            .get("guard_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let score = row.get("score").and_then(|v| v.as_u64()).unwrap_or(80) as u32;
         let id = row
             .get("id")
@@ -225,6 +233,7 @@ pub fn seed_from_json_str(state: &mut FrontierState, raw: &str) -> Result<(usize
                 line,
                 symbol,
                 snippet,
+                guard_hint,
                 score,
                 status: FrontierStatus::Unvisited,
                 reason: String::new(),
@@ -662,6 +671,7 @@ pub fn run_frontier_seed(cwd: &Path, opts: &FrontierSeedOpts<'_>) -> i32 {
                 line: 0,
                 symbol: String::new(),
                 snippet: clip(opts.note.unwrap_or(""), 180),
+                guard_hint: String::new(),
                 score: opts.score,
                 status: FrontierStatus::Unvisited,
                 reason: String::new(),

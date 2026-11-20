@@ -31,6 +31,8 @@ pub struct SurfaceItem {
     pub line: usize,
     pub symbol: String,
     pub snippet: String,
+    #[serde(default)]
+    pub guard_hint: String,
     pub score: u32,
 }
 
@@ -48,10 +50,143 @@ pub struct SurfaceMap {
     pub elapsed_ms: f64,
     pub scanned_files: usize,
     pub scanned_archives: usize,
+    #[serde(default)]
+    pub scanned_binaries: usize,
     pub axes_present: Vec<String>,
     pub axes_absent: Vec<String>,
     pub axis_summaries: Vec<AxisSummary>,
     pub items: Vec<SurfaceItem>,
+}
+
+fn guard_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:startsWith|commonpath|path\.relative|realpath|canonical|normalize|verify|authenticate|authorize|checkPermission|hasPermission|isTrusted|isWorkspaceTrusted|allowlist|whitelist|csrf|hmac|signature|validate|sanitize|escapeHtml|isSafe|sameOrigin|checkOrigin|requireAuth|forbidden|403|401)\b",
+        )
+        .unwrap()
+    })
+}
+
+fn classify_guard_proximity(text: &str, byte_start: usize, byte_end: usize) -> (&'static str, i32) {
+    // Minified single-line bundles (>400 chars on the match line): scan +-320 byte window
+    let line_start = text[..byte_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = text[byte_end..]
+        .find('\n')
+        .map(|i| byte_end + i)
+        .unwrap_or(text.len());
+    let gre = guard_re();
+    let (before, after) = if line_end.saturating_sub(line_start) > 400 {
+        let mut b0 = byte_start.saturating_sub(320).max(line_start);
+        while b0 < byte_start && !text.is_char_boundary(b0) {
+            b0 += 1;
+        }
+        let mut a1 = (byte_end + 200).min(line_end);
+        while a1 > byte_end && !text.is_char_boundary(a1) {
+            a1 -= 1;
+        }
+        (&text[b0..byte_start], &text[byte_end..a1])
+    } else {
+        // Walk up to 12 lines before and 6 lines after
+        let mut b0 = line_start;
+        let mut back = 0usize;
+        while b0 > 0 && back < 12 {
+            if let Some(prev_nl) = text[..b0.saturating_sub(1)].rfind('\n') {
+                b0 = prev_nl + 1;
+                back += 1;
+            } else {
+                b0 = 0;
+                break;
+            }
+        }
+        let mut a1 = line_end;
+        let mut fwd = 0usize;
+        while a1 < text.len() && fwd < 6 {
+            let next_start = (a1 + 1).min(text.len());
+            if let Some(rel_nl) = text[next_start..].find('\n') {
+                a1 = next_start + rel_nl;
+                fwd += 1;
+            } else {
+                a1 = text.len();
+                break;
+            }
+        }
+        (&text[b0..byte_start], &text[byte_end..a1])
+    };
+
+    let has_before = gre.is_match(before);
+    let has_after = gre.is_match(after);
+    if has_before {
+        ("guard_before", -10)
+    } else if has_after {
+        ("guard_after", 18)
+    } else {
+        ("none_nearby", 14)
+    }
+}
+
+fn is_native_binary_ext(ext: &str) -> bool {
+    matches!(ext, "exe" | "dll" | "so" | "dylib" | "node")
+}
+
+fn extract_binary_strings(raw: &[u8]) -> String {
+    // Fast bounded ASCII + UTF-16LE printable string extractor for PE/ELF/Mach-O binaries
+    let cap = raw.len().min(3 * 1024 * 1024);
+    let slice = &raw[..cap];
+    let mut out = String::with_capacity(64 * 1024);
+
+    // 1. ASCII runs >= 5 chars
+    let mut run = Vec::with_capacity(128);
+    for &b in slice {
+        if (0x20..=0x7e).contains(&b) {
+            if run.len() < 240 {
+                run.push(b);
+            }
+        } else {
+            if run.len() >= 5 {
+                if let Ok(s) = std::str::from_utf8(&run) {
+                    out.push_str(s);
+                    out.push('\n');
+                }
+            }
+            run.clear();
+            if out.len() >= 384 * 1024 {
+                break;
+            }
+        }
+    }
+    if run.len() >= 5 && out.len() < 384 * 1024 {
+        if let Ok(s) = std::str::from_utf8(&run) {
+            out.push_str(s);
+            out.push('\n');
+        }
+    }
+
+    // 2. UTF-16LE printable runs >= 5 chars (critical for Windows PE binaries)
+    let mut u16_run = String::with_capacity(128);
+    let mut i = 0usize;
+    while i + 1 < slice.len() && out.len() < 512 * 1024 {
+        let lo = slice[i];
+        let hi = slice[i + 1];
+        if hi == 0 && (0x20..=0x7e).contains(&lo) {
+            if u16_run.len() < 240 {
+                u16_run.push(lo as char);
+            }
+            i += 2;
+        } else {
+            if u16_run.len() >= 5 {
+                out.push_str(&u16_run);
+                out.push('\n');
+            }
+            u16_run.clear();
+            i += 2;
+        }
+    }
+    if u16_run.len() >= 5 && out.len() < 512 * 1024 {
+        out.push_str(&u16_run);
+        out.push('\n');
+    }
+    out
 }
 
 struct AxisRule {
@@ -245,14 +380,30 @@ fn is_archive_ext(ext: &str) -> bool {
     matches!(ext, "asar" | "vsix" | "zip" | "jar")
 }
 
+struct ScanAcc {
+    axis_hits: HashMap<String, usize>,
+    axis_files: HashMap<String, HashSet<String>>,
+    axis_modules: HashMap<String, HashSet<String>>,
+    candidates: Vec<SurfaceItem>,
+}
+
+impl ScanAcc {
+    fn new() -> Self {
+        Self {
+            axis_hits: HashMap::new(),
+            axis_files: HashMap::new(),
+            axis_modules: HashMap::new(),
+            candidates: Vec::new(),
+        }
+    }
+}
+
 fn scan_text_into(
     rel_target: &str,
     text: &str,
+    is_binary_strings: bool,
     rules: &[AxisRule],
-    axis_hits: &mut HashMap<String, usize>,
-    axis_files: &mut HashMap<String, HashSet<String>>,
-    axis_modules: &mut HashMap<String, HashSet<String>>,
-    candidates: &mut Vec<SurfaceItem>,
+    acc: &mut ScanAcc,
 ) {
     let module = derive_module(rel_target);
     let is_manifest = rel_target.ends_with("package.json")
@@ -274,16 +425,20 @@ fn scan_text_into(
         for m in rule.re.find_iter(text) {
             // Skip obvious comment-only lines on non-minified files
             let (line_no, snippet) = clip_snippet(text, m.start(), m.end());
-            if snippet.starts_with("//") || snippet.starts_with('#') || snippet.starts_with('*') {
+            if !is_binary_strings
+                && (snippet.starts_with("//")
+                    || snippet.starts_with('#')
+                    || snippet.starts_with('*'))
+            {
                 continue;
             }
             let sym = m.as_str().trim().to_string();
-            *axis_hits.entry(rule.axis.to_string()).or_insert(0) += 1;
-            axis_files
+            *acc.axis_hits.entry(rule.axis.to_string()).or_insert(0) += 1;
+            acc.axis_files
                 .entry(rule.axis.to_string())
                 .or_default()
                 .insert(rel_target.to_string());
-            axis_modules
+            acc.axis_modules
                 .entry(rule.axis.to_string())
                 .or_default()
                 .insert(module.clone());
@@ -293,7 +448,13 @@ fn scan_text_into(
                 continue;
             }
 
-            let mut score = rule.base_score;
+            let (guard_hint, guard_delta) = if is_binary_strings {
+                ("binary_import_str", 6i32)
+            } else {
+                classify_guard_proximity(text, m.start(), m.end())
+            };
+
+            let mut score = (rule.base_score as i32 + guard_delta).max(10) as u32;
             if rel_target.contains("!/") {
                 score += 4;
             }
@@ -305,14 +466,15 @@ fn scan_text_into(
             }
             let key = format!("{}|{}|{}", rule.axis, rel_target, sym.to_ascii_lowercase());
             let id = format!("{}:{}", rule.axis, fnv1a_hex(&key));
-            candidates.push(SurfaceItem {
+            acc.candidates.push(SurfaceItem {
                 id,
                 axis: rule.axis.to_string(),
                 module: module.clone(),
                 target: rel_target.to_string(),
-                line: line_no,
+                line: if is_binary_strings { 0 } else { line_no },
                 symbol: sym,
                 snippet,
+                guard_hint: guard_hint.to_string(),
                 score,
             });
         }
@@ -366,10 +528,7 @@ fn scan_asar_archive(
     archive_path: &Path,
     rel_archive: &str,
     rules: &[AxisRule],
-    axis_hits: &mut HashMap<String, usize>,
-    axis_files: &mut HashMap<String, HashSet<String>>,
-    axis_modules: &mut HashMap<String, HashSet<String>>,
-    candidates: &mut Vec<SurfaceItem>,
+    acc: &mut ScanAcc,
 ) -> usize {
     let Ok(bytes) = fs::read(archive_path) else {
         return 0;
@@ -401,15 +560,7 @@ fn scan_asar_archive(
         }
         let text = String::from_utf8_lossy(&bytes[start..end]);
         let vpath = format!("{rel_archive}!/{inner_path}");
-        scan_text_into(
-            &vpath,
-            &text,
-            rules,
-            axis_hits,
-            axis_files,
-            axis_modules,
-            candidates,
-        );
+        scan_text_into(&vpath, &text, false, rules, acc);
         scanned += 1;
     }
     scanned
@@ -419,10 +570,7 @@ fn scan_zip_archive(
     archive_path: &Path,
     rel_archive: &str,
     rules: &[AxisRule],
-    axis_hits: &mut HashMap<String, usize>,
-    axis_files: &mut HashMap<String, HashSet<String>>,
-    axis_modules: &mut HashMap<String, HashSet<String>>,
-    candidates: &mut Vec<SurfaceItem>,
+    acc: &mut ScanAcc,
 ) -> usize {
     let Ok(meta) = archive_path.metadata() else {
         return 0;
@@ -466,15 +614,7 @@ fn scan_zip_archive(
         }
         let text = String::from_utf8_lossy(&buf);
         let vpath = format!("{rel_archive}!/{name}");
-        scan_text_into(
-            &vpath,
-            &text,
-            rules,
-            axis_hits,
-            axis_files,
-            axis_modules,
-            candidates,
-        );
+        scan_text_into(&vpath, &text, false, rules, acc);
         scanned += 1;
     }
     scanned
@@ -485,15 +625,14 @@ pub fn build_surface_map(
     max_files: usize,
     max_per_axis: usize,
     include_vendor: bool,
+    include_binaries: bool,
 ) -> SurfaceMap {
     let t0 = Instant::now();
     let rules = axis_rules();
-    let mut axis_hits: HashMap<String, usize> = HashMap::new();
-    let mut axis_files: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut axis_modules: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut candidates: Vec<SurfaceItem> = Vec::new();
+    let mut acc = ScanAcc::new();
     let mut scanned_files = 0usize;
     let mut scanned_archives = 0usize;
+    let mut scanned_binaries = 0usize;
 
     let hard_skip = [
         ".git",
@@ -524,39 +663,22 @@ pub fn build_surface_map(
             .unwrap_or("")
             .to_ascii_lowercase();
         if ext == "asar" {
-            scanned_files += scan_asar_archive(
-                root,
-                &rel,
-                rules,
-                &mut axis_hits,
-                &mut axis_files,
-                &mut axis_modules,
-                &mut candidates,
-            );
+            scanned_files += scan_asar_archive(root, &rel, rules, &mut acc);
             scanned_archives += 1;
         } else if is_archive_ext(&ext) {
-            scanned_files += scan_zip_archive(
-                root,
-                &rel,
-                rules,
-                &mut axis_hits,
-                &mut axis_files,
-                &mut axis_modules,
-                &mut candidates,
-            );
+            scanned_files += scan_zip_archive(root, &rel, rules, &mut acc);
             scanned_archives += 1;
+        } else if is_native_binary_ext(&ext) {
+            if let Ok(raw) = fs::read(root) {
+                let text = extract_binary_strings(&raw);
+                scan_text_into(&rel, &text, true, rules, &mut acc);
+                scanned_binaries += 1;
+                scanned_files += 1;
+            }
         } else if let Ok(raw) = fs::read(root) {
             let cap = raw.len().min(1_048_576);
             let text = String::from_utf8_lossy(&raw[..cap]);
-            scan_text_into(
-                &rel,
-                &text,
-                rules,
-                &mut axis_hits,
-                &mut axis_files,
-                &mut axis_modules,
-                &mut candidates,
-            );
+            scan_text_into(&rel, &text, false, rules, &mut acc);
             scanned_files += 1;
         }
     } else {
@@ -601,29 +723,25 @@ pub fn build_surface_map(
                 .to_ascii_lowercase();
 
             if ext == "asar" && scanned_archives < 16 {
-                scanned_files += scan_asar_archive(
-                    p,
-                    &rel,
-                    rules,
-                    &mut axis_hits,
-                    &mut axis_files,
-                    &mut axis_modules,
-                    &mut candidates,
-                );
+                scanned_files += scan_asar_archive(p, &rel, rules, &mut acc);
                 scanned_archives += 1;
                 continue;
             }
             if is_archive_ext(&ext) && scanned_archives < 24 {
-                scanned_files += scan_zip_archive(
-                    p,
-                    &rel,
-                    rules,
-                    &mut axis_hits,
-                    &mut axis_files,
-                    &mut axis_modules,
-                    &mut candidates,
-                );
+                scanned_files += scan_zip_archive(p, &rel, rules, &mut acc);
                 scanned_archives += 1;
+                continue;
+            }
+            if include_binaries && is_native_binary_ext(&ext) && scanned_binaries < 40 {
+                let Ok(meta) = p.metadata() else { continue };
+                if meta.len() > 0 && meta.len() <= 32 * 1024 * 1024 {
+                    if let Ok(raw) = fs::read(p) {
+                        let text = extract_binary_strings(&raw);
+                        scan_text_into(&rel, &text, true, rules, &mut acc);
+                        scanned_binaries += 1;
+                        scanned_files += 1;
+                    }
+                }
                 continue;
             }
             if !is_scannable_text_ext(&ext, file_name) {
@@ -636,18 +754,17 @@ pub fn build_surface_map(
             let Ok(raw) = fs::read(p) else { continue };
             let cap = raw.len().min(768_000);
             let text = String::from_utf8_lossy(&raw[..cap]);
-            scan_text_into(
-                &rel,
-                &text,
-                rules,
-                &mut axis_hits,
-                &mut axis_files,
-                &mut axis_modules,
-                &mut candidates,
-            );
+            scan_text_into(&rel, &text, false, rules, &mut acc);
             scanned_files += 1;
         }
     }
+
+    let ScanAcc {
+        axis_hits,
+        axis_files,
+        axis_modules,
+        candidates,
+    } = acc;
 
     // Rank & diversify per axis (module diversity first, then score)
     let mut by_axis: BTreeMap<String, Vec<SurfaceItem>> = BTreeMap::new();
@@ -720,6 +837,7 @@ pub fn build_surface_map(
         elapsed_ms: (t0.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0,
         scanned_files,
         scanned_archives,
+        scanned_binaries,
         axes_present,
         axes_absent,
         axis_summaries,
@@ -730,8 +848,8 @@ pub fn build_surface_map(
 pub fn render_surface_md(map: &SurfaceMap) -> String {
     let mut out = Vec::new();
     out.push(format!(
-        "# ATLAS SURFACE MAP ({} files, {} archives, {:.1}ms)",
-        map.scanned_files, map.scanned_archives, map.elapsed_ms
+        "# ATLAS SURFACE MAP ({} files, {} archives, {} binaries, {:.1}ms)",
+        map.scanned_files, map.scanned_archives, map.scanned_binaries, map.elapsed_ms
     ));
     out.push(format!("**Root**: `{}`", map.root));
     out.push(format!(
@@ -762,10 +880,16 @@ pub fn render_surface_md(map: &SurfaceMap) -> String {
     if !map.items.is_empty() {
         out.push("\n## Top Entrypoint / Sink Surfaces".to_string());
         for it in map.items.iter().take(36) {
+            let guard_tag = if it.guard_hint.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", it.guard_hint)
+            };
             out.push(format!(
-                "- `{}` [{}] `{}:{}` (`{}`) — {}",
+                "- `{}` [{}]{} `{}:{}` (`{}`) — {}",
                 it.id,
                 it.axis,
+                guard_tag,
                 it.target,
                 it.line,
                 it.symbol,
@@ -814,7 +938,7 @@ mod tests {
             zw.finish().unwrap();
         }
 
-        let map = build_surface_map(&dir, 500, 10, false);
+        let map = build_surface_map(&dir, 500, 10, false, false);
         assert!(map.axes_present.contains(&"net_listen_rpc".to_string()));
         assert!(map.axes_present.contains(&"ipc_pipe_proto".to_string()));
         assert!(map.axes_present.contains(&"fs_path_io".to_string()));
@@ -824,6 +948,51 @@ mod tests {
             .items
             .iter()
             .any(|it| it.target.contains("ext.vsix!/extension/main.js")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prioritizes_unguarded_sinks_and_scans_native_binaries() {
+        let dir = std::env::temp_dir().join(format!("ap_surface_guard_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/safe_io.js"),
+            "function readSafe(base, p) {\n  if (!p.startsWith(base)) throw new Error('403');\n  return fs.readFileSync(p);\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/raw_io.js"),
+            "function readRaw(p) {\n  return fs.readFileSync(p);\n}\n",
+        )
+        .unwrap();
+        // Mock PE binary containing ASCII + UTF-16LE pipe/exec imports
+        let mut bin = b"MZ\x00\x00CreateProcessW\x00\\\\.\\pipe\\demo_svc\x00".to_vec();
+        for ch in "ShellExecuteW".encode_utf16() {
+            bin.extend_from_slice(&ch.to_le_bytes());
+        }
+        bin.extend_from_slice(&[0, 0]);
+        fs::write(dir.join("helper.dll"), &bin).unwrap();
+
+        let map = build_surface_map(&dir, 100, 10, false, true);
+        assert_eq!(map.scanned_binaries, 1);
+        let raw_item = map
+            .items
+            .iter()
+            .find(|i| i.target == "src/raw_io.js")
+            .unwrap();
+        let safe_item = map
+            .items
+            .iter()
+            .find(|i| i.target == "src/safe_io.js")
+            .unwrap();
+        assert_eq!(raw_item.guard_hint, "none_nearby");
+        assert_eq!(safe_item.guard_hint, "guard_before");
+        assert!(raw_item.score > safe_item.score);
+        assert!(map
+            .items
+            .iter()
+            .any(|i| i.target == "helper.dll" && i.guard_hint == "binary_import_str"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -852,7 +1021,7 @@ mod tests {
         asar.extend_from_slice(body);
         fs::write(dir.join("app.asar"), &asar).unwrap();
 
-        let map = build_surface_map(&dir, 100, 10, false);
+        let map = build_surface_map(&dir, 100, 10, false, false);
         assert_eq!(map.scanned_archives, 1);
         assert!(map.axes_present.contains(&"webview_browser".to_string()));
         assert!(map.items.iter().any(|it| it.target == "app.asar!/main.js"));

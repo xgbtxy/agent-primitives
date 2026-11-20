@@ -6117,3 +6117,152 @@ fn test_v226_surface_map_and_orthogonal_frontier() {
         .unwrap()
         .contains("unexplored_axes"));
 }
+
+#[test]
+fn test_v227_guard_surface_binary_scan_and_pi_accelerator_self_heal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v227");
+    let ap_home = root.join("ap_home_v227");
+    let store_path = root.join("frontier_v227.json");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("bin")).unwrap();
+
+    // 1. Guard-order awareness: guard_before vs none_nearby vs guard_after
+    fs::write(
+        root.join("src/guarded.js"),
+        "function safeRun(cmd, user) {\n  if (!checkPermission(user)) throw new Error('deny');\n  return require('child_process').execFile(cmd, []);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/unguarded.js"),
+        "function rawRun(cmd) {\n  const out = require('child_process').execSync(cmd);\n  return out;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/postcheck.js"),
+        "function lateRun(cmd) {\n  const out = require('child_process').spawnSync(cmd, []);\n  if (!authorize(cmd)) return null;\n  return out;\n}\n",
+    )
+    .unwrap();
+
+    // Synthetic PE binary containing ASCII + UTF-16LE entrypoint strings
+    let mut bin_bytes = b"MZ\x90\x00PE\x00\x00".to_vec();
+    bin_bytes.extend_from_slice(b"\x00CreateProcessW\x00ShellExecuteExW\x00");
+    for ch in "\\\\.\\pipe\\local_agent_rpc".encode_utf16() {
+        bin_bytes.extend_from_slice(&ch.to_le_bytes());
+    }
+    bin_bytes.extend_from_slice(b"\x00\x00");
+    fs::write(root.join("bin/helper.dll"), &bin_bytes).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let surf = run_ap(
+        root,
+        &["atlas", "surface", ".", "--include-binaries", "--json"],
+        None,
+        &env_vars,
+    );
+    assert!(
+        surf.status.success(),
+        "surface failed: {}",
+        String::from_utf8_lossy(&surf.stderr)
+    );
+    let sj: Value = serde_json::from_slice(&surf.stdout).unwrap();
+    let items = sj["items"].as_array().unwrap();
+    let find_hint = |needle: &str| {
+        items
+            .iter()
+            .find(|e| e["target"].as_str().unwrap_or("").contains(needle))
+            .and_then(|e| e["guard_hint"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(find_hint("guarded.js"), "guard_before", "items={items:?}");
+    assert_eq!(find_hint("unguarded.js"), "none_nearby", "items={items:?}");
+    assert_eq!(find_hint("postcheck.js"), "guard_after", "items={items:?}");
+    assert_eq!(
+        find_hint("helper.dll"),
+        "binary_import_str",
+        "items={items:?}"
+    );
+
+    // Verify frontier seed retains guard_hint
+    let seed = run_ap(
+        root,
+        &[
+            "baton",
+            "frontier",
+            "seed",
+            "--store",
+            store_path.to_str().unwrap(),
+            "--stdin",
+            "--json",
+        ],
+        Some(&String::from_utf8_lossy(&surf.stdout)),
+        &env_vars,
+    );
+    assert!(seed.status.success());
+    let nxt = run_ap(
+        root,
+        &[
+            "baton",
+            "frontier",
+            "next",
+            "--store",
+            store_path.to_str().unwrap(),
+            "-k",
+            "4",
+            "--json",
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(nxt.status.success());
+    let nj: Value = serde_json::from_slice(&nxt.stdout).unwrap();
+    assert!(nj["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|it| !it["guard_hint"].as_str().unwrap_or("").is_empty()));
+
+    // 2. Verify v2.27 Pi accelerator self-healing additions + ap doctor status
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function repairHallucinatedToolName",
+        "codemake: \"codemode\"",
+        "LEADING_SHELL_PREFIX_RE",
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;",
+        "check Object.keys(res)",
+    ] {
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.27 accelerator feature '{needle}'"
+        );
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}

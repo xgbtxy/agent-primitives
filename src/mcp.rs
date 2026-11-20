@@ -567,14 +567,15 @@ fn mcp_tools_schema() -> Value {
         }),
         json!({
             "name": "ap_surface",
-            "description": "Multi-axis entrypoint & sink surface mapper (<150ms in-process): scans source code, manifests, minified bundles, and virtual archives (.asar/.vsix/.zip/.jar) across 9 orthogonal axes (exec_spawn, net_listen_rpc, ipc_pipe_proto, fs_path_io, deserialize_parse, loader_plugin_ext, auth_token_cred, webview_browser, service_priv_acl).",
+            "description": "Multi-axis guard-aware entrypoint & sink surface mapper (<150ms in-process): scans source code, manifests, minified bundles, virtual archives (.asar/.vsix/.zip/.jar) & optional native PE/ELF/SO binaries across 9 orthogonal axes and prioritizes unprotected/post-guard sinks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Directory, file, or archive (.asar/.vsix/.zip/.jar) to scan (default: '.')" },
+                    "path": { "type": "string", "description": "Directory, file, archive (.asar/.vsix/.zip/.jar), or native binary to scan (default: '.')" },
                     "max_files": { "type": "integer", "description": "Max files to scan (default: 1500)" },
                     "max_per_axis": { "type": "integer", "description": "Max ranked diverse items per axis (default: 12)" },
-                    "include_vendor": { "type": "boolean", "description": "Also scan gitignored/vendor directories (default: false)" }
+                    "include_vendor": { "type": "boolean", "description": "Also scan gitignored/vendor directories (default: false)" },
+                    "include_binaries": { "type": "boolean", "description": "Also scan native .exe/.dll/.so/.dylib binary strings/imports (default: false)" }
                 }
             }
         }),
@@ -2417,11 +2418,16 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                 .get("include_vendor")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let include_binaries = args
+                .get("include_binaries")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let map = ap_atlas::surface::build_surface_map(
                 root_p,
                 max_files,
                 max_per_axis,
                 include_vendor,
+                include_binaries,
             );
             let js = serde_json::to_string_pretty(&map).unwrap_or_default();
             crate::stats::record_event("surface", 0, js.len() as u64, 0, 1, "mcp-surface");
@@ -2448,7 +2454,7 @@ fn dispatch_tool_call(name: &str, args: &Value) -> (bool, String) {
                         if !p.exists() {
                             return (false, format!("[frontier] scan_path not found: {sp}"));
                         }
-                        let map = ap_atlas::surface::build_surface_map(p, 1500, 12, false);
+                        let map = ap_atlas::surface::build_surface_map(p, 1500, 12, false, false);
                         let raw = serde_json::to_string(&map).unwrap_or_default();
                         ap_baton::frontier::seed_from_json_str(&mut state, &raw)
                     } else if let Some(tgt) = args
