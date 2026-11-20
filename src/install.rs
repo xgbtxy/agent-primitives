@@ -808,7 +808,7 @@ pub fn render_pi_accelerator_ts(ap_bin_posix: &str) -> String {
 // - Native Pi v1.5 `agent_before_settle` closed-loop syntax + diff blocker gate (max 1 retry/run)
 // - Opt-in `deepseek/flash-auto` virtual model (dynamic low/high/max effort, zero cache-bust switch)
 import {{ spawnSync }} from "node:child_process";
-import {{ existsSync, readFileSync }} from "node:fs";
+import {{ existsSync, readFileSync, statSync }} from "node:fs";
 import {{ homedir }} from "node:os";
 import {{ isAbsolute, join, resolve }} from "node:path";
 import type {{
@@ -861,6 +861,8 @@ const LIGHT_THINKING_CHARS = 1500;
 const STAGNATION_TURNS = 3;
 const SERIAL_BATCH_THRESHOLD = 6;
 const BATCH_TIP_COOLDOWN_TURNS = 25;
+const CODEMODE_PARALLEL_COOLDOWN_TURNS = 20;
+const CODEMODE_PARALLEL_MAX_TIPS = 2;
 const WRITE_OVERWRITE_TIP_CHARS = 4000;
 const WRITE_TIP_COOLDOWN_TURNS = 15;
 const LARGE_CODE_READ_CHARS = 20000;
@@ -868,22 +870,23 @@ const SIEVE_HARD_CHARS = 20000;
 const SIEVE_STRUCTURED_CHARS = 14000;
 const SIEVE_GIANT_LINE_CHARS = 4500;
 const SIEVE_STRUCTURED_LINES = 180;
+const BINARY_READ_EXT = /\.(?:png|jpe?g|gif|webp|bmp|ico|pdf|zip|gz|tar|7z|exe|dll|so|dylib|wasm|sqlite|db|docx|xlsx|pptx)$/i;
 
-// Two-tier batch observation masking constants (keeps DeepSeek V4.1 Flash in its <240k Peak-IQ zone)
+// Two-tier amortized deep-sweep observation masking constants (keeps DeepSeek V4.1 Flash in its <240k Peak-IQ zone)
 const MASK_PREFIX = "[ap masked stale toolResult:";
 const MASK_HIGH_WATER_PCT = 72;
 const MASK_HIGH_WATER_TOKENS = 180000;
 const MASK_TIER2_PCT = 78;
 const MASK_TIER2_TOKENS = 240000;
 const MASK_TIER2_MIN_ENTRY_CHARS = 1800;
-const MASK_TIER2_KEEP_RECENT = 10;
+const MASK_TIER2_KEEP_RECENT = 6;
 const MASK_TIER2_MIN_RECLAIMED = 10000;
-const MASK_STALE_CHARS_FALLBACK = 120000;
+const MASK_STALE_CHARS_FALLBACK = 240000;
 const FREE_MASK_MIN_TOKENS = 80000;
-const MASK_KEEP_RECENT_ENTRIES = 12;
-const MASK_MIN_ENTRY_CHARS = 4500;
+const MASK_KEEP_RECENT_ENTRIES = 10;
+const MASK_MIN_ENTRY_CHARS = 2400;
 const MASK_MIN_BATCH_ENTRIES = 2;
-const MASK_MIN_RECLAIMED_CHARS = 16000;
+const MASK_MIN_RECLAIMED_CHARS = 48000;
 const MASK_COOLDOWN_TURNS = 15;
 
 export function isBenignGrepNoMatch(cmd: string, outText: string): boolean {{
@@ -960,10 +963,14 @@ export function stabilizeProviderTools(payload: unknown): unknown {{
 	return {{ ...(p as Record<string, unknown>), tools: sorted }};
 }}
 
+const CODEMODE_SETTIMEOUT_SHIM =
+	`const setTimeout = (fn, ms = 0, ...a) => {{ if (typeof sleep === "function") {{ sleep(ms).then(() => {{ if (typeof fn === "function") fn(...a); }}); }} else if (typeof fn === "function") {{ fn(...a); }} return 0; }};`;
+
 /**
  * Lossless pre-execution auto-heal for Pi `codemode` JS scripts:
  * 1) Strips outer markdown code fences (```js ... ```) that break QuickJS parsing / `// @options:` line 1.
  * 2) Repairs `tools.mcp__agent-primitives__` -> `tools.mcp__agent_primitives__` (avoids JS subtraction ReferenceError).
+ * 3) Auto-shims `setTimeout(...)` via host `sleep(ms)` (eliminating 100% of QuickJS timer ReferenceErrors while keeping `// @options:` on line 1).
  */
 export function healCodemodeSource(code: string): string | undefined {{
 	if (!code) return undefined;
@@ -974,6 +981,14 @@ export function healCodemodeSource(code: string): string | undefined {{
 	}}
 	if (next.includes("tools.mcp__agent-primitives__")) {{
 		next = next.replace(/tools\.mcp__agent-primitives__/g, "tools.mcp__agent_primitives__");
+	}}
+	if (/\bsetTimeout\s*\(/.test(next) && !/\b(?:const|let|var|function)\s+setTimeout\b/.test(next)) {{
+		const optLine = next.match(/^([ \t]*\/\/[ \t]*@options:[^\r\n]*\r?\n)([\s\S]*)$/);
+		if (optLine) {{
+			next = `${{optLine[1]}}${{CODEMODE_SETTIMEOUT_SHIM}}\n${{optLine[2]}}`;
+		}} else {{
+			next = `${{CODEMODE_SETTIMEOUT_SHIM}}\n${{next}}`;
+		}}
 	}}
 	return next !== code ? next : undefined;
 }}
@@ -1083,7 +1098,7 @@ export function formatInstantSyntaxAlert(
  */
 export function classifyCodemodeFailureTip(outText: string): string {{
 	if (/\bReferenceError\b|is not defined/i.test(outText)) {{
-		return `[ap codemode-tip] QuickJS sandbox has NO Node APIs (fs/path/require/process/fetch/Buffer/setTimeout). Call tools via tools.<name>(args) (e.g. tools.read, tools.bash, tools.mcp__agent_primitives__ap_search) or inspect ALL_TOOLS.`;
+		return `[ap codemode-tip] QuickJS sandbox has NO Node APIs (fs/path/require/process/fetch/Buffer); use await sleep(ms) for delays and tools.<name>(args) (e.g. tools.read, tools.bash, tools.mcp__agent_primitives__ap_search) or inspect ALL_TOOLS.`;
 	}}
 	if (
 		/\bTypeError\b|(?:split|trim|match|replace|includes|slice|indexOf|toLowerCase|toUpperCase|startsWith|endsWith)\s+is not a function|cannot read propert|not iterable|unexpected token.*\[object Object\]/i.test(
@@ -1111,14 +1126,14 @@ export function classifyCodemodeFailureTip(outText: string): string {{
 }}
 
 /**
- * Static, 100% KV-cache-locked DeepSeek Flash execution guidelines (~95 tokens total, cached at $0.006/1M)
- * injected via `before_agent_start` -> `systemPromptOptions.promptGuidelines` to crush serial 1-tool streaks,
- * QuickJS `codemode` ReferenceError/TypeError mistakes, and duplicate-line `edit` ambiguity at Turn 0.
+ * Static, 100% KV-cache-locked DeepSeek Flash execution guidelines (~145 tokens total, cached at $0.006/1M)
+ * injected via `before_agent_start` -> `systemPromptOptions.promptGuidelines` with concrete copy-paste idioms
+ * (empirical production telemetry showed abstract prose had 0% ap-CLI & codemode-parallel adoption).
  */
 export const AP_DEEPSEEK_GUIDELINES: readonly string[] = [
-	"Batch independent read/search/check calls in parallel tool calls or a single codemode script with Promise.allSettled([...]); keep cross-turn structured state in store(key, value)/load(key).",
-	"In codemode (QuickJS sandbox, no Node fs/path/require/process/fetch): tools.bash(...) returns {{ output, exit_code, truncated }} (read .output), tools.read(...) returns a string, and tools.mcp__agent_primitives__* returns parsed {{ content, structuredContent, isError }}.",
-	"Direct read output uses L:HH| hashline anchors (pass L:HH| lines in edit oldText to disambiguate duplicate lines in 1 shot, or use plain oldText); prefer ap CLI / tools.mcp__agent_primitives__* for AST/search/Office/SQL/binary/verify tasks and keep read-only shell probes <=90s.",
+	"Parallel-first execution: batch 2+ independent reads/searches/checks in parallel tool calls OR one codemode script via `const res = await Promise.allSettled([tools.read({{path}}), tools.bash({{command}})]);` (cuts latency & thinking tokens ~40%); persist cross-turn state via `store(key, val)`/`load(key)`.",
+	"In codemode (QuickJS sandbox — NO Node fs/path/require/process/fetch; `await sleep(ms)` is available): `tools.bash({{command}})` returns `{{ output, exit_code, truncated }}` (read `.output`), `tools.read({{path}})` returns a string, and `tools.mcp__agent_primitives__*` returns parsed `{{ content, structuredContent, isError }}`.",
+	'Fast local CLI & exact edits: direct `read` shows `L:HH|` hashline anchors (pass `L:HH|` lines in `edit` `oldText` to disambiguate duplicates in 1 shot). In bash, prefer zero-dep `ap` over slow grep/python one-liners: `ap search "<re>" [dir] -e <ext>`, `ap read <file> --outline|--symbol <S>|--lines 1-80|--json-path <P>|--hex`, `ap query -f db=<db> "<sql>"`, `ap atlas map .`; keep read-only probes <=90s.',
 ];
 
 export function injectDeepSeekGuidelines(guidelines: string[]): boolean {{
@@ -1306,6 +1321,27 @@ export function annotateReadWithHashlines(outText: string, startOffset = 1): str
 	const base = Number.isFinite(startOffset) && startOffset >= 1 ? Math.floor(startOffset) : 1;
 	const tagged = lines.map((l, idx) => `${{base + idx}}:${{hashlineTag(l)}}|${{l}}`).join("\n");
 	return tagged + trailer;
+}}
+
+/**
+ * Clamp out-of-bounds `read(offset=...)` requests to the file's tail before Pi throws
+ * `Offset N is beyond end of file (M lines total)`, eliminating wasted error round-trips.
+ */
+export function clampReadOffsetToEof(
+	fileContent: string,
+	offset: unknown,
+	limit: unknown,
+): {{ requestedOffset: number; clampedOffset: number; totalLines: number }} | undefined {{
+	if (typeof offset !== "number" || !Number.isFinite(offset) || offset < 2) return undefined;
+	const req = Math.floor(offset);
+	const totalLines = fileContent.split("\n").length;
+	if (req <= totalLines) return undefined;
+	const win =
+		typeof limit === "number" && Number.isFinite(limit) && limit > 0
+			? Math.min(80, Math.max(20, Math.floor(limit)))
+			: 60;
+	const clampedOffset = Math.max(1, totalLines - win + 1);
+	return {{ requestedOffset: req, clampedOffset, totalLines }};
 }}
 
 /**
@@ -1906,10 +1942,14 @@ export function formatPostEditLineShiftTip(
 }}
 
 function rewriteSlowRecursiveGrep(cmd: string, toolName: string): string | undefined {{
-	// Match optional leading `cd <dir> && `, recursive `grep -r... [--include="*.ext"] <pat> [path]`,
-	// and optional safe read-only pipe suffix (`| head/tail/wc/sort/cut ...`).
-	if (/[;>]/.test(cmd)) return undefined;
-	const m = cmd.match(
+	// Match optional leading `cd <dir> && `, recursive `grep -r... [--exclude-dir=...] [--include="*.ext"] <pat> [path]`,
+	// optional `2>/dev/null` stderr suppression, and optional safe read-only pipe suffix (`| head/tail/wc/sort/cut ...`).
+	if (/[;]/.test(cmd)) return undefined;
+	const cleaned = cmd
+		.replace(/\s+2>\s*(?:\/dev\/null|NUL)\b/gi, "")
+		.replace(/\s+--exclude-dir=(?:'[^']+'|"[^"]+"|[^\s|&;]+)/g, "");
+	if (/>/.test(cleaned)) return undefined;
+	const m = cleaned.match(
 		/^(\s*cd\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*&&\s*)?\s*grep\s+-([rRnwiEHlc]+)(?:\s+--include=(?:'([^']+)'|"([^"]+)"|([^\s]+)))?\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?(\s*\|\s*(?:head|tail|wc|sort|cut)\b[^;&|>]*)?\s*$/,
 	);
 	if (!m || !/[rR]/.test(m[2])) return undefined;
@@ -2287,7 +2327,9 @@ export function planObservationMasking(
 
 	const pctTriggered = pct !== null && pct >= highPct;
 	const tokTriggered = tok !== null && tok >= highTok;
-	const fallbackTriggered = totalStaleChars >= staleFallback && candidates.length >= 4;
+	// Never let stale-payload fallback bust a hot <180k KV-cache when exact token count is known!
+	const fallbackTriggered =
+		(tok === null || tok >= highTok) && totalStaleChars >= staleFallback && candidates.length >= 4;
 
 	if (!pctTriggered && !tokTriggered && !fallbackTriggered) {{
 		return {{ edits: [], maskedCount: 0, reclaimedChars: 0, reason: "below-high-water" }};
@@ -2492,6 +2534,7 @@ export default function (pi: ExtensionAPI) {{
 	const editedFilesThisRun = new Set<string>();
 	const builtInCodeEditsThisRun = new Set<string>();
 	const largeOverwriteCallIds = new Set<string>();
+	const clampedReadCallIds = new Map<string, {{ requestedOffset: number; clampedOffset: number; totalLines: number }}>();
 	let settleGateFiredThisRun = false;
 	let stagnantHeavyTurns = 0;
 	let consecutiveLightTurns = 0;
@@ -2501,7 +2544,8 @@ export default function (pi: ExtensionAPI) {{
 	let lastWriteTipTurn = -WRITE_TIP_COOLDOWN_TURNS;
 	let pendingBatchNudge = false;
 	let largeReadTipShown = false;
-	let codemodeParallelTipShown = false;
+	let codemodeParallelTipsShown = 0;
+	let lastCodemodeParallelTipTurn = -CODEMODE_PARALLEL_COOLDOWN_TURNS;
 	let sessionTurnCount = 0;
 	let lastMaskTurn = -MASK_COOLDOWN_TURNS;
 	let expectedCacheReset = false;
@@ -2528,6 +2572,7 @@ export default function (pi: ExtensionAPI) {{
 		unchangedReads.clear();
 		outlinedPaths.clear();
 		largeOverwriteCallIds.clear();
+		clampedReadCallIds.clear();
 		resetRunState();
 		stagnantHeavyTurns = 0;
 		consecutiveLightTurns = 0;
@@ -2648,7 +2693,8 @@ export default function (pi: ExtensionAPI) {{
 	pi.on("session_start", (_event, ctx) => {{
 		resetTransientState();
 		largeReadTipShown = false;
-		codemodeParallelTipShown = false;
+		codemodeParallelTipsShown = 0;
+		lastCodemodeParallelTipTurn = -CODEMODE_PARALLEL_COOLDOWN_TURNS;
 		sessionInputTokens = 0;
 		sessionCacheReadTokens = 0;
 		expectedCacheReset = false;
@@ -2719,7 +2765,8 @@ export default function (pi: ExtensionAPI) {{
 	pi.on("session_before_switch", () => {{
 		resetTransientState();
 		largeReadTipShown = false;
-		codemodeParallelTipShown = false;
+		codemodeParallelTipsShown = 0;
+		lastCodemodeParallelTipTurn = -CODEMODE_PARALLEL_COOLDOWN_TURNS;
 		sessionInputTokens = 0;
 		sessionCacheReadTokens = 0;
 		expectedCacheReset = false;
@@ -3272,7 +3319,7 @@ export default function (pi: ExtensionAPI) {{
 				totalToolTurns += 1;
 				if (toolCallCount === 1) serialSingleTotalTurns += 1;
 			}}
-			if (toolCallCount === 1 && SERIAL_BATCHABLE_TOOLS.has(singleToolName) && !didEdit) {{
+			if (toolCallCount === 1 && SERIAL_BATCHABLE_TOOLS.has(singleToolName) && !didEdit && !hadToolError) {{
 				serialSingleToolTurns += 1;
 				if (
 					serialSingleToolTurns >= SERIAL_BATCH_THRESHOLD &&
@@ -3281,7 +3328,7 @@ export default function (pi: ExtensionAPI) {{
 					pendingBatchNudge = true;
 					lastBatchTipTurn = sessionTurnCount;
 				}}
-			}} else if (toolCallCount !== 1 || didEdit || singleToolName === "codemode") {{
+			}} else if (toolCallCount !== 1 || didEdit || hadToolError || singleToolName === "codemode") {{
 				serialSingleToolTurns = 0;
 			}}
 			if (didEdit) {{
@@ -3524,6 +3571,38 @@ export default function (pi: ExtensionAPI) {{
 			}}
 			return undefined;
 		}}
+		if (event.toolName === "read" && event.input && typeof event.input === "object") {{
+			const inp = event.input as {{ path?: string; file_path?: string; offset?: unknown; limit?: unknown }};
+			const rawPath = String(inp.path ?? inp.file_path ?? "").trim();
+			if (
+				rawPath &&
+				!BINARY_READ_EXT.test(rawPath) &&
+				typeof inp.offset === "number" &&
+				Number.isFinite(inp.offset) &&
+				inp.offset >= 2
+			) {{
+				const cwd = ctx?.cwd || process.cwd();
+				const absPath = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+				if (existsSync(absPath)) {{
+					try {{
+						const st = statSync(absPath);
+						if (st.isFile() && st.size <= 2_000_000) {{
+							const content = readFileSync(absPath, "utf8");
+							const clamped = clampReadOffsetToEof(content, inp.offset, inp.limit);
+							if (clamped) {{
+								inp.offset = clamped.clampedOffset;
+								if (typeof event.toolCallId === "string" && event.toolCallId) {{
+									clampedReadCallIds.set(event.toolCallId, clamped);
+								}}
+							}}
+						}}
+					}} catch {{
+						// ignore unreadable files
+					}}
+				}}
+			}}
+			return undefined;
+		}}
 		if (event.toolName === "codemode" && event.input && typeof event.input === "object") {{
 			const code = typeof event.input.code === "string" ? event.input.code : "";
 			const healedCode = healCodemodeSource(code);
@@ -3627,6 +3706,15 @@ export default function (pi: ExtensionAPI) {{
 				outText = hashed;
 				textMutated = true;
 				mutated = true;
+			}}
+			if (typeof event.toolCallId === "string") {{
+				const clamped = clampedReadCallIds.get(event.toolCallId);
+				if (clamped) {{
+					clampedReadCallIds.delete(event.toolCallId);
+					outText += `\n[ap read-clamped] Requested offset=${{clamped.requestedOffset}} > EOF (${{clamped.totalLines}} lines); showing tail from L${{clamped.clampedOffset}}.`;
+					textMutated = true;
+					mutated = true;
+				}}
 			}}
 			if (p) {{
 				const key = `${{p}}::${{off}}::${{lim}}`;
@@ -3776,12 +3864,16 @@ export default function (pi: ExtensionAPI) {{
 				outText += `\n${{classifyCodemodeFailureTip(fullText)}}`;
 				textMutated = true;
 				mutated = true;
-			}} else if (!codemodeParallelTipShown) {{
+			}} else if (
+				codemodeParallelTipsShown < CODEMODE_PARALLEL_MAX_TIPS &&
+				sessionTurnCount - lastCodemodeParallelTipTurn >= CODEMODE_PARALLEL_COOLDOWN_TURNS
+			) {{
 				const code = typeof event.input?.code === "string" ? event.input.code : "";
 				const awaitCount = (code.match(/\bawait\s+/g) ?? []).length;
 				if (awaitCount >= 3 && !/Promise\.all(?:Settled)?\s*\(/.test(code)) {{
-					outText += `\n[ap codemode-parallel] Sequential awaits detected (${{awaitCount}}x); batch independent calls with Promise.allSettled([...]) inside codemode for 3-5x faster multi-step runs.`;
-					codemodeParallelTipShown = true;
+					outText += `\n[ap codemode-parallel] ${{awaitCount}} sequential awaits detected. Batch independent calls concurrently: \`const [a, b] = await Promise.allSettled([tools.bash({{command}}), tools.read({{path}})]);\` for 3-5x faster multi-step runs.`;
+					codemodeParallelTipsShown += 1;
+					lastCodemodeParallelTipTurn = sessionTurnCount;
 					textMutated = true;
 					mutated = true;
 				}}
@@ -3847,9 +3939,9 @@ export default function (pi: ExtensionAPI) {{
 			mutated = true;
 		}}
 
-		// E. Serial single-tool exploration batch nudge (rate-limited: once per 25 turns after 6 consecutive 1-tool turns)
+		// E. Serial single-tool exploration batch nudge (rate-limited: once per 25 turns after 6 clean 1-tool turns)
 		if (pendingBatchNudge) {{
-			outText += `\n[ap batch-tip] ${{SERIAL_BATCH_THRESHOLD}} consecutive single-tool turns. Batch independent read/search checks via parallel tool calls or codemode Promise.allSettled to cut 3-5x round-trip latency.`;
+			outText += `\n[ap batch-tip] ${{SERIAL_BATCH_THRESHOLD}} consecutive clean single-tool turns. Combine independent reads/searches/probes now via parallel tool calls or one codemode script: \`await Promise.allSettled([tools.read({{path}}), tools.bash({{command}})])\`.`;
 			pendingBatchNudge = false;
 			serialSingleToolTurns = 0;
 			guardsTriggered += 1;

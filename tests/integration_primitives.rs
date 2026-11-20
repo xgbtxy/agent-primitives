@@ -5846,3 +5846,62 @@ fn test_v224_no_double_cold_mask_post_edit_line_shift_piped_grep_and_provider_ti
     assert!(v2["pi_runtime"]["provider_timeout_ms"].is_null());
     assert_eq!(v2["pi_runtime"]["recommendations"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_v225_amortized_deep_sweep_settimeout_shim_read_eof_clamp_and_concrete_guidelines() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v225");
+    let ap_home = root.join("ap_home_v225");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "const MASK_MIN_ENTRY_CHARS = 2400;",
+        "const MASK_MIN_RECLAIMED_CHARS = 48000;",
+        "const MASK_KEEP_RECENT_ENTRIES = 10;",
+        "const MASK_TIER2_KEEP_RECENT = 6;",
+        "(tok === null || tok >= highTok) && totalStaleChars >= staleFallback",
+        "const CODEMODE_SETTIMEOUT_SHIM =",
+        "export function clampReadOffsetToEof",
+        "[ap read-clamped]",
+        "await sleep(ms)",
+        "ap read <file> --outline|--symbol <S>|--lines 1-80|--json-path <P>|--hex",
+        "SERIAL_BATCHABLE_TOOLS.has(singleToolName) && !didEdit && !hadToolError",
+        "CODEMODE_PARALLEL_COOLDOWN_TURNS = 20",
+        "--exclude-dir=",
+    ] {
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.25 feature '{needle}'"
+        );
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}
