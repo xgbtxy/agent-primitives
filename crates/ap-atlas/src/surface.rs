@@ -216,6 +216,14 @@ fn axis_rules() -> &'static [AxisRule] {
                 .unwrap(),
             },
             AxisRule {
+                axis: "net_listen_rpc",
+                base_score: 83,
+                re: Regex::new(
+                    r"['\x22`](/[a-zA-Z0-9_-]{2,24}/(?:v[1-9]|api|rest|graphql|rpc|admin|console|internal|auth|oauth|upload|download|export|import|file|files|proxy|webhook)/[a-zA-Z0-9_./{}$:-]{2,80})['\x22`]|['\x22`](/(?:api|rest|v[1-9]|graphql|rpc|admin|console|internal)/[a-zA-Z0-9_./{}$:-]{3,80})['\x22`]",
+                )
+                .unwrap(),
+            },
+            AxisRule {
                 axis: "ipc_pipe_proto",
                 base_score: 88,
                 re: Regex::new(
@@ -432,7 +440,11 @@ fn scan_text_into(
             {
                 continue;
             }
-            let sym = m.as_str().trim().to_string();
+            let sym = m
+                .as_str()
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+                .to_string();
             *acc.axis_hits.entry(rule.axis.to_string()).or_insert(0) += 1;
             acc.axis_files
                 .entry(rule.axis.to_string())
@@ -444,7 +456,8 @@ fn scan_text_into(
                 .insert(module.clone());
 
             file_axis_hits += 1;
-            if file_axis_hits > 3 || !seen_symbols.insert(sym.to_ascii_lowercase()) {
+            let per_rule_cap = if rule.base_score == 83 { 6 } else { 3 };
+            if file_axis_hits > per_rule_cap || !seen_symbols.insert(sym.to_ascii_lowercase()) {
                 continue;
             }
 

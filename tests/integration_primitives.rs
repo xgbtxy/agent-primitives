@@ -6266,3 +6266,80 @@ fn test_v227_guard_surface_binary_scan_and_pi_accelerator_self_heal() {
     let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
 }
+
+#[test]
+fn test_v228_web_route_surface_multiedit_and_shell_self_heal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v228");
+    let ap_home = root.join("ap_home_v228");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+    fs::create_dir_all(root.join("web")).unwrap();
+
+    // Minified frontend bundle with multiple REST/API routes
+    fs::write(
+        root.join("web/app.bundle.js"),
+        r#"function init(){fetch("/console/rest/orders/export");fetch("/api/v2/users/profile");fetch("/billing/internal/invoices/download");}"#,
+    )
+    .unwrap();
+
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+    let surf = run_ap(root, &["atlas", "surface", ".", "--json"], None, &env_vars);
+    assert!(surf.status.success());
+    let sj: Value = serde_json::from_slice(&surf.stdout).unwrap();
+    let syms: Vec<String> = sj["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|it| it["symbol"].as_str().map(String::from))
+        .collect();
+    assert!(
+        syms.iter()
+            .any(|s| s.contains("/console/rest/orders/export")),
+        "Missing REST route in surface map: {syms:?}"
+    );
+    assert!(
+        syms.iter().any(|s| s.contains("/api/v2/users/profile")),
+        "Missing /api/v2 route in surface map: {syms:?}"
+    );
+
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function healMultiEditsSequential",
+        "punctuation-loose-unique",
+        "search --around",
+        "failIdxMatch",
+        "powershell.exe -NoProfile -Command",
+    ] {
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.28 accelerator feature '{needle}'"
+        );
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+}

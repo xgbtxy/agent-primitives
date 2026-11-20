@@ -822,7 +822,7 @@ import type {{
 const AP_BIN = "{escaped}";
 const SIEVE_HOME = process.env.SIEVE_HOME || join(homedir(), ".ap", "sieve");
 const DESTRUCTIVE_OR_WRITE =
-	/\b(?:Remove-Item|rm|del|erase|rmdir|rd|Move-Item|Rename-Item|mv|ren|Set-Content|Add-Content|Clear-Content|Out-File|Copy-Item|cpi|copy)\b|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|\.rmdir\(|\bgit(?:\.exe)?\b[\s\S]{{0,80}}?\bclean\b/i;
+	/(?:^|[;&|]\s*)(?:Remove-Item|rm|del|erase|rmdir|rd|Move-Item|Rename-Item|mv|ren|Set-Content|Add-Content|Clear-Content|Out-File|Copy-Item|cpi|copy)\b|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|\.rmdir\(|\bgit(?:\.exe)?\b[\s\S]{{0,80}}?\bclean\b/i;
 const BARE_SLOW_GREP =
 	/^\s*grep\s+-([rRnwiEHlc]+)\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?\s*$/;
 const PY_INVOKE = /\b(?:python3?(?:\.exe)?|py(?:\.exe)?|pytest)\b/i;
@@ -991,6 +991,13 @@ export function healCodemodeSource(code: string): string | undefined {{
 	}}
 	if (next.includes("tools.mcp__agent-primitives__")) {{
 		next = next.replace(/tools\.mcp__agent-primitives__/g, "tools.mcp__agent_primitives__");
+	}}
+	// Strip accidental TypeScript `as any|unknown|string|number|boolean|object|const` assertions in QuickJS scripts
+	if (/\bas\s+(?:any|unknown|string|number|boolean|object|const)\b/.test(next)) {{
+		next = next.replace(
+			/(\)|\]|\b[A-Za-z_$][A-Za-z0-9_$]*)\s+as\s+(?:any|unknown|string|number|boolean|object|const)\b(?=\s*[;,)\]\r\n.?:&|])/g,
+			"$1",
+		);
 	}}
 	if (/\bsetTimeout\s*\(/.test(next) && !/\b(?:const|let|var|function)\s+setTimeout\b/.test(next)) {{
 		const optLine = next.match(/^([ \t]*\/\/[ \t]*@options:[^\r\n]*\r?\n)([\s\S]*)$/);
@@ -1758,7 +1765,150 @@ export function healEditBlock(
 			}}
 		}}
 	}}
+
+	// Tier 3: Punctuation & collapsed-whitespace normalized unique match (heals full-width `：`/`，`/`（` vs ASCII drift)
+	if (nonBlankOld.some((l) => l.trim().length >= 8)) {{
+		const normLoose = (s: string) =>
+			s
+				.trim()
+				.replace(/[：]/g, ":")
+				.replace(/[，]/g, ",")
+				.replace(/[（]/g, "(")
+				.replace(/[）]/g, ")")
+				.replace(/[“”]/g, '"')
+				.replace(/[‘’]/g, "'")
+				.replace(/\s+/g, " ")
+				.replace(/\s*([:,()])\s*/g, "$1");
+		const looseHits: number[] = [];
+		for (let i = 0; i <= fileLines.length - n; i++) {{
+			let ok = true;
+			for (let k = 0; k < n; k++) {{
+				if (normLoose(fileLines[i + k]) !== normLoose(oldLines[k])) {{
+					ok = false;
+					break;
+				}}
+			}}
+			if (ok) {{
+				looseHits.push(i);
+				if (looseHits.length > 1) break;
+			}}
+		}}
+		if (looseHits.length === 1) {{
+			const matched = fileLines.slice(looseHits[0], looseHits[0] + n);
+			const healedOld = matched.join("\n");
+			if (healedOld !== lfOld) {{
+				return {{
+					oldText: healedOld,
+					newText: reindentReplacement(effectiveNew, oldLines, matched),
+					strategy: "punctuation-loose-unique",
+				}};
+			}}
+		}}
+	}}
 	return undefined;
+}}
+
+/**
+ * Heal multi-hunk `edit.edits[]` arrays:
+ * 1) Heals each hunk independently against the original file (matching Pi's non-incremental semantics).
+ * 2) If a hunk only resolves sequentially after an earlier hunk (or two hunks overlap), simulates
+ *    sequentially and collapses compact (<=80-line) changes into a single unique edit on the original file.
+ */
+export function healMultiEditsSequential(
+	fileContent: string,
+	edits: ReadonlyArray<{{ oldText?: string; newText?: string }}>,
+): {{ edits: Array<{{ oldText: string; newText: string }}>; healed: number }} | undefined {{
+	if (!fileContent || !Array.isArray(edits) || edits.length === 0) return undefined;
+	const lfOrig = fileContent.replace(/\r\n/g, "\n");
+	const origOut: Array<{{ oldText: string; newText: string }}> = [];
+	const origRanges: Array<[number, number]> = [];
+	let origHealed = 0;
+	let allMatchOrigUnique = true;
+	for (const item of edits) {{
+		if (typeof item?.oldText !== "string" || typeof item?.newText !== "string") return undefined;
+		let curOld = item.oldText;
+		let curNew = item.newText;
+		const fixed = healEditBlock(lfOrig, curOld, curNew);
+		if (fixed) {{
+			curOld = fixed.oldText;
+			curNew = fixed.newText;
+			origHealed += 1;
+		}}
+		const lfOld = curOld.replace(/\r\n/g, "\n");
+		const idx = lfOld.length > 0 ? lfOrig.indexOf(lfOld) : -1;
+		if (idx < 0 || lfOrig.indexOf(lfOld, idx + 1) >= 0) {{
+			allMatchOrigUnique = false;
+		}} else {{
+			origRanges.push([idx, idx + lfOld.length]);
+		}}
+		origOut.push({{ oldText: curOld, newText: curNew }});
+	}}
+	let hasOrigOverlap = false;
+	if (allMatchOrigUnique && origRanges.length >= 2) {{
+		const sorted = [...origRanges].sort((a, b) => a[0] - b[0]);
+		for (let i = 1; i < sorted.length; i++) {{
+			if (sorted[i - 1][1] > sorted[i][0]) {{
+				hasOrigOverlap = true;
+				break;
+			}}
+		}}
+	}}
+	if (allMatchOrigUnique && !hasOrigOverlap) {{
+		return origHealed > 0 ? {{ edits: origOut, healed: origHealed }} : undefined;
+	}}
+	if (edits.length < 2) {{
+		return origHealed > 0 ? {{ edits: origOut, healed: origHealed }} : undefined;
+	}}
+	let virtual = lfOrig;
+	let allApplied = true;
+	for (const item of edits) {{
+		if (typeof item?.oldText !== "string" || typeof item?.newText !== "string") return undefined;
+		let curOld = item.oldText;
+		let curNew = item.newText;
+		const fixed = healEditBlock(virtual, curOld, curNew);
+		if (fixed) {{
+			curOld = fixed.oldText;
+			curNew = fixed.newText;
+		}}
+		const lfOld = curOld.replace(/\r\n/g, "\n");
+		const lfNew = curNew.replace(/\r\n/g, "\n");
+		const idx = lfOld.length > 0 ? virtual.indexOf(lfOld) : -1;
+		if (idx < 0 || virtual.indexOf(lfOld, idx + 1) >= 0) {{
+			allApplied = false;
+			break;
+		}}
+		virtual = virtual.slice(0, idx) + lfNew + virtual.slice(idx + lfOld.length);
+	}}
+	if (allApplied && virtual !== lfOrig) {{
+		const origLines = lfOrig.split("\n");
+		const finalLines = virtual.split("\n");
+		let prefix = 0;
+		const minLen = Math.min(origLines.length, finalLines.length);
+		while (prefix < minLen && origLines[prefix] === finalLines[prefix]) prefix++;
+		let suffix = 0;
+		while (
+			suffix < minLen - prefix &&
+			origLines[origLines.length - 1 - suffix] === finalLines[finalLines.length - 1 - suffix]
+		) {{
+			suffix++;
+		}}
+		const origEnd = origLines.length - suffix;
+		const finalEnd = finalLines.length - suffix;
+		if (origEnd - prefix <= 80) {{
+			for (let pad = 0; pad <= 8; pad++) {{
+				const lo = prefix - Math.min(pad, prefix);
+				const rightPad = Math.min(pad, suffix);
+				const hiOrig = origEnd + rightPad;
+				const hiFinal = finalEnd + rightPad;
+				const candOld = origLines.slice(lo, hiOrig).join("\n");
+				if (candOld.length > 0 && countSubstringOccurrences(lfOrig, candOld) === 1) {{
+					const candNew = finalLines.slice(lo, hiFinal).join("\n");
+					return {{ edits: [{{ oldText: candOld, newText: candNew }}], healed: edits.length }};
+				}}
+			}}
+		}}
+	}}
+	return origHealed > 0 ? {{ edits: origOut, healed: origHealed }} : undefined;
 }}
 
 /**
@@ -1952,60 +2102,96 @@ export function formatPostEditLineShiftTip(
 }}
 
 function rewriteSlowRecursiveGrep(cmd: string, toolName: string): string | undefined {{
-	// Match optional leading `cd <dir> && `, recursive `grep -r... [--exclude-dir=...] [--include="*.ext"] <pat> [path]`,
+	// Match optional leading `cd <dir> && ` or `cd <dir>; `, recursive `grep -r[nwiEHlcIsF] [--exclude-dir=...] [--include="*.ext"...] [-e] <pat> [path]`,
 	// optional `2>/dev/null` stderr suppression, and optional safe read-only pipe suffix (`| head/tail/wc/sort/cut ...`).
-	if (/[;]/.test(cmd)) return undefined;
 	const cleaned = cmd
 		.replace(/\s+2>\s*(?:\/dev\/null|NUL)\b/gi, "")
 		.replace(/\s+--exclude-dir=(?:'[^']+'|"[^"]+"|[^\s|&;]+)/g, "");
 	if (/>/.test(cleaned)) return undefined;
-	const m = cleaned.match(
-		/^(\s*cd\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*&&\s*)?\s*grep\s+-([rRnwiEHlc]+)(?:\s+--include=(?:'([^']+)'|"([^"]+)"|([^\s]+)))?\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?(\s*\|\s*(?:head|tail|wc|sort|cut)\b[^;&|>]*)?\s*$/,
+
+	// Fast-path A: slow minified-JS context regex `grep -oE '.{{0,N}}PAT.{{0,M}}' file [| head ...]` -> `<25ms` `ap search --around`
+	const aroundMatch = cleaned.match(
+		/^(\s*cd\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*(?:&&|;)\s*)?\s*grep\s+-[oEP]+\s+['"]\.\{{0,(\d+)\}}([^'"]+?)(\.\{{0,(\d+)\}})?['"]\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(\s*\|\s*(?:head|tail|wc|sort|cut)\b[^;&|>]*)?\s*$/,
+	);
+	if (aroundMatch) {{
+		const cdPrefix = aroundMatch[1] || "";
+		const leftN = Math.min(800, Math.max(40, Number(aroundMatch[2]) || 160));
+		const rightN = Math.min(800, Math.max(40, Number(aroundMatch[5]) || leftN));
+		const around = Math.max(leftN, rightN);
+		const pat = (aroundMatch[3] || "").replace(/"/g, '\\"');
+		const target = aroundMatch[6] || aroundMatch[7] || aroundMatch[8] || ".";
+		const pipeSuffix = aroundMatch[9] || "";
+		if (pat && !pat.includes("{{")) {{
+			const prefix = toolName === "powershell" ? "& " : "";
+			return `${{cdPrefix}}${{prefix}}"${{AP_BIN}}" search --around ${{around}} "${{pat}}" "${{target}}"${{pipeSuffix}}`;
+		}}
+	}}
+
+	// Collect one or more `--include=*.ext` flags anywhere in the grep command
+	const exts: string[] = [];
+	let complexGlob = false;
+	const withoutIncludes = cleaned.replace(
+		/\s+--include=(?:'([^']+)'|"([^"]+)"|([^\s|&;]+))/g,
+		(_m, g1: string, g2: string, g3: string) => {{
+			const glob = g1 || g2 || g3 || "";
+			const em = glob.match(/^\*\.([A-Za-z0-9]+)$/);
+			if (em) exts.push(em[1]);
+			else complexGlob = true;
+			return "";
+		}},
+	);
+	if (complexGlob) return undefined;
+
+	const m = withoutIncludes.match(
+		/^(\s*cd\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*(?:&&|;)\s*)?\s*grep\s+-([rRnwiEHlcIsF]+)(?:\s+-e)?\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+))(?:\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&]+)))?(\s*\|\s*(?:head|tail|wc|sort|cut)\b[^;&|>]*)?\s*$/,
 	);
 	if (!m || !/[rR]/.test(m[2])) return undefined;
 	const cdPrefix = m[1] || "";
 	const flags = m[2];
-	const incGlob = m[3] || m[4] || m[5] || "";
-	const pat = (m[6] || m[7] || m[8] || "").replace(/"/g, '\\"');
+	const pat = (m[3] || m[4] || m[5] || "").replace(/"/g, '\\"');
 	if (!pat) return undefined;
-	const target = m[9] || m[10] || m[11] || ".";
-	const pipeSuffix = m[12] || "";
-	let extFlag = "";
-	if (incGlob) {{
-		const em = incGlob.match(/^\*\.([A-Za-z0-9]+)$/);
-		if (!em) return undefined; // leave complex globs untouched
-		extFlag = ` -e ${{em[1]}}`;
-	}}
+	const target = m[6] || m[7] || m[8] || ".";
+	const pipeSuffix = m[9] || "";
+	const extFlag = exts.length > 0 ? ` -e ${{[...new Set(exts)].join(",")}}` : "";
 	const prefix = toolName === "powershell" ? "& " : "";
 	const extra = flags.includes("l") ? " -l" : flags.includes("c") ? " -c" : "";
 	return `${{cdPrefix}}${{prefix}}"${{AP_BIN}}" search${{extra}}${{extFlag}} "${{pat}}" "${{target}}"${{pipeSuffix}}`;
 }}
 
 export function healCommand(raw: string, toolName: string): string | undefined {{
-	if (!raw || DESTRUCTIVE_OR_WRITE.test(raw)) return undefined;
+	if (!raw) return undefined;
+	const isDestructive = DESTRUCTIVE_OR_WRITE.test(raw);
 	let cmd = raw;
 	let changed = false;
 
-	// 1. Recursive GNU `grep -r[nwiEHlc] [--include=*.ext] <pat> [path]` (bare, `cd &&`, or `| head/tail/wc`) -> `<50ms` parallel `ap search`
-	const fastGrep = rewriteSlowRecursiveGrep(cmd, toolName);
-	if (fastGrep) {{
-		return fastGrep;
-	}}
-	if (!/[|;&>]/.test(cmd)) {{
-		const gm = cmd.match(BARE_SLOW_GREP);
-		if (gm && /[rR]/.test(gm[1])) {{
-			const flags = gm[1];
-			const pat = (gm[2] || gm[3] || gm[4] || "").replace(/"/g, '\\"');
-			const target = gm[5] || gm[6] || gm[7] || ".";
-			const prefix = toolName === "powershell" ? "& " : "";
-			const extra = flags.includes("l") ? " -l" : flags.includes("c") ? " -c" : "";
-			return `${{prefix}}"${{AP_BIN}}" search${{extra}} "${{pat}}" "${{target}}"`;
+	// 1. Recursive GNU `grep -r[nwiEHlc] [--include=*.ext...] <pat> [path]` & minified `grep -oE '.{{0,N}}...'` -> `<50ms` `ap search`
+	if (!isDestructive) {{
+		const fastGrep = rewriteSlowRecursiveGrep(cmd, toolName);
+		if (fastGrep) {{
+			return fastGrep;
+		}}
+		if (!/[|;&>]/.test(cmd)) {{
+			const gm = cmd.match(BARE_SLOW_GREP);
+			if (gm && /[rR]/.test(gm[1])) {{
+				const flags = gm[1];
+				const pat = (gm[2] || gm[3] || gm[4] || "").replace(/"/g, '\\"');
+				const target = gm[5] || gm[6] || gm[7] || ".";
+				const prefix = toolName === "powershell" ? "& " : "";
+				const extra = flags.includes("l") ? " -l" : flags.includes("c") ? " -c" : "";
+				return `${{prefix}}"${{AP_BIN}}" search${{extra}} "${{pat}}" "${{target}}"`;
+			}}
 		}}
 	}}
 
-	// 2. Prevent accidental literal `NUL` file creation in Git Bash
+	// 2. Prevent accidental literal `NUL` file creation in Git Bash (always safe)
 	if (toolName === "bash" && REDIR_NUL.test(cmd)) {{
 		cmd = cmd.replace(REDIR_NUL, "$1 /dev/null");
+		changed = true;
+	}}
+
+	// 2b. Strip Windows cmd `cd /d <path>` flag inside Git Bash -> `cd <path>`
+	if (toolName === "bash" && /(?:^|[;&|]\s*)cd\s+\/d\s+/i.test(cmd)) {{
+		cmd = cmd.replace(/(^|[;&|]\s*)cd\s+\/d\s+/gi, "$1cd ");
 		changed = true;
 	}}
 
@@ -2042,7 +2228,7 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 	}}
 
 	// 6. Rewrite Windows cmd `type <file>` inside Git Bash -> `cat <posix-path>` (leaves POSIX `type -a/-t/-p` and bare commands untouched)
-	if (toolName === "bash") {{
+	if (toolName === "bash" && !isDestructive) {{
 		const tm = cmd.match(
 			/^(\s*(?:cd(?:\s+\/d)?\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*(?:&&|;)\s*)?)type\s+(?!-[atpPf]\b)(?:'([^']+)'|"([^"]+)"|([^\s'"|;&>]+))([\s\S]*)$/,
 		);
@@ -2053,6 +2239,17 @@ export function healCommand(raw: string, toolName: string): string | undefined {
 				? `"${{posixTarget.replace(/"/g, '\\"')}}"`
 				: `'${{posixTarget}}'`;
 			cmd = `${{tm[1] || ""}}cat ${{quoted}}${{tm[5] || ""}}`;
+			changed = true;
+		}}
+	}}
+
+	// 6b. Wrap bare read-only PowerShell cmdlets accidentally sent to Git Bash (fixes syntax error near unexpected token)
+	if (toolName === "bash" && !isDestructive && !/\b(?:powershell|pwsh)(?:\.exe)?\b/i.test(cmd)) {{
+		const psBare = cmd.match(
+			/^(\s*(?:cd\s+(?:'[^']+'|"[^"]+"|[^\s&|;]+)\s*(?:&&|;)\s*)?)((?:Get-ChildItem|Get-Content|Get-Process|Get-CimInstance|Select-String)\b[\s\S]*)$/,
+		);
+		if (psBare && !psBare[2].includes("'")) {{
+			cmd = `${{psBare[1] || ""}}powershell.exe -NoProfile -Command '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ${{psBare[2].trim()}}'`;
 			changed = true;
 		}}
 	}}
@@ -3747,15 +3944,10 @@ export default function (pi: ExtensionAPI) {{
 										inp.edits = merged.edits;
 										healedEditsCount += merged.healed;
 									}} else {{
-										for (const item of inp.edits) {{
-											if (typeof item?.oldText === "string" && typeof item?.newText === "string") {{
-												const fixed = healEditBlock(content, item.oldText, item.newText);
-												if (fixed) {{
-													item.oldText = fixed.oldText;
-													item.newText = fixed.newText;
-													healedEditsCount += 1;
-												}}
-											}}
+										const seqHealed = healMultiEditsSequential(content, inp.edits);
+										if (seqHealed) {{
+											inp.edits = seqHealed.edits;
+											healedEditsCount += seqHealed.healed;
 										}}
 									}}
 								}} else if (typeof inp.oldText === "string" && typeof inp.newText === "string") {{
@@ -3819,7 +4011,6 @@ export default function (pi: ExtensionAPI) {{
 		const cmd = typeof event.input?.command === "string" ? event.input.command : "";
 		if (DESTRUCTIVE_OR_WRITE.test(cmd)) {{
 			unchangedReads.clear();
-			return undefined;
 		}}
 		const healed = healCommand(cmd, event.toolName);
 		if (healed && healed !== cmd) {{
@@ -3983,11 +4174,15 @@ export default function (pi: ExtensionAPI) {{
 				edits?: Array<{{ oldText?: string }}>;
 			}} | undefined;
 			const rawPath = String(inp?.path ?? inp?.file_path ?? "").trim();
+			const failIdxMatch = outText.match(/\bedits\[(\d+)\]/);
+			const failIdx = failIdxMatch ? Number(failIdxMatch[1]) : -1;
 			const targetOld =
 				typeof inp?.oldText === "string"
 					? inp.oldText
 					: Array.isArray(inp?.edits)
-						? inp.edits.find((e) => typeof e?.oldText === "string" && e.oldText.trim().length > 0)?.oldText ?? ""
+						? (failIdx >= 0 && typeof inp.edits[failIdx]?.oldText === "string"
+							? inp.edits[failIdx].oldText
+							: inp.edits.find((e) => typeof e?.oldText === "string" && e.oldText.trim().length > 0)?.oldText) ?? ""
 						: "";
 			if (rawPath && targetOld) {{
 				const cwd = ctx?.cwd || process.cwd();
@@ -4892,6 +5087,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("registerCommand(\"ap\"")
                 && s.contains("session_before_tree")
                 && s.contains("repairHallucinatedToolName")
+                && s.contains("healMultiEditsSequential")
         })
         .unwrap_or(false);
 
@@ -5359,7 +5555,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.26+ (Hashline + CacheWarmer + context_edit + settle-gate + flash-auto + /ap fresh|handoff)" } else { "stale/missing" }
+            if accel_ok { "v2.28+ (Hashline + MultiEdit + CacheWarmer + context_edit + settle-gate + flash-auto + /ap fresh|handoff)" } else { "stale/missing" }
         );
         if pi_runtime["runtime_patches"]["detected"].as_bool() == Some(true) {
             let applied = pi_runtime["runtime_patches"]["applied_count"]
