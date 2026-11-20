@@ -2717,6 +2717,25 @@ export interface DeepSeekRouteInput {{
 	recentToolSuccessesAfterEdit?: number;
 	stagnantHeavyTurns?: number;
 	consecutiveLightTurns?: number;
+	cachedPrefixTokens?: number;
+}}
+
+/**
+ * Detect deep-discount prefix-cache models (e.g. DeepSeek V4.1 Flash's 50:1 $0.30 vs $0.006/1M ratio)
+ * where mid-prefix mutation (`context_edit` / effort-switch) costs 20-50x more than clean-slate resets.
+ */
+export function isDeepCacheDiscountModel(model?: {{
+	provider?: string;
+	id?: string;
+	cost?: {{ input?: number; cacheRead?: number }};
+}}): boolean {{
+	if (!model) return false;
+	const inp = Number(model.cost?.input ?? 0);
+	const cr = Number(model.cost?.cacheRead ?? 0);
+	if (inp > 0 && cr > 0 && inp / cr >= 20) return true;
+	const prov = String(model.provider ?? "").toLowerCase();
+	const id = String(model.id ?? "").toLowerCase();
+	return prov.includes("deepseek") || id.includes("deepseek") || id.includes("flash-auto");
 }}
 
 function clampDeepSeekEffort(raw?: string): DeepSeekEffort {{
@@ -2726,8 +2745,11 @@ function clampDeepSeekEffort(raw?: string): DeepSeekEffort {{
 }}
 
 /**
- * KV-cache-friendly dynamic reasoning-effort router staying strictly on the SAME physical
- * `deepseek-flash` model (zero provider switch, 100% `reasoning_content` continuity).
+ * KV-cache-preserving reasoning-effort router staying strictly on the SAME physical `deepseek-flash`
+ * model. Locks effort once a hot cached prefix (>=16k tokens) is established because switching
+ * `reasoning_effort` mid-session mutates token-0 template headers and busts 100% of DeepSeek KV-cache;
+ * picks fresh effort cleanly on Turn 0 or right after a clean-slate compaction, and only breaks lock
+ * on explicit retry or >=3 repeated tool errors.
  */
 export function routeDeepSeekFlashEffort(input: DeepSeekRouteInput): {{
 	thinkingLevel: DeepSeekEffort;
@@ -2738,16 +2760,24 @@ export function routeDeepSeekFlashEffort(input: DeepSeekRouteInput): {{
 		return {{ thinkingLevel: "low", phase: "direct-summary" }};
 	}}
 	const prev = input.previousLevel ? clampDeepSeekEffort(input.previousLevel) : ceiling;
+	const errs = input.recentToolErrors ?? 0;
+	const hotPrefix = !!input.previousLevel && (input.cachedPrefixTokens ?? 0) >= 16000;
 	if (input.reason === "retry") {{
 		const next: DeepSeekEffort = prev === "low" ? "high" : "max";
 		return {{ thinkingLevel: next, phase: "retry-escalate" }};
+	}}
+	if (hotPrefix) {{
+		if (errs >= 3 && prev !== "max") {{
+			const next: DeepSeekEffort = prev === "low" ? "high" : "max";
+			return {{ thinkingLevel: next, phase: "error-escalate" }};
+		}}
+		return {{ thinkingLevel: prev, phase: "cache-locked" }};
 	}}
 	if (input.reason === "user") {{
 		const chosen = classifyDeepSeekEffort(input.userText ?? "", ceiling);
 		return {{ thinkingLevel: chosen, phase: `user-${{chosen}}` }};
 	}}
-	// continuation: sticky by default, escalate on repeated tool errors, cool down on stalls or routine loops
-	const errs = input.recentToolErrors ?? 0;
+	// continuation on cold/small prefix: escalate on repeated tool errors, cool down on stalls or routine loops
 	if (errs >= 2) {{
 		const next: DeepSeekEffort = prev === "low" ? "high" : "max";
 		return {{ thinkingLevel: next, phase: "error-escalate" }};
@@ -2857,6 +2887,7 @@ export default function (pi: ExtensionAPI) {{
 	let expectedCacheReset = false;
 	let sessionInputTokens = 0;
 	let sessionCacheReadTokens = 0;
+	let lastKnownPromptTokens = 0;
 	let lastCacheDropPct: number | null = null;
 	let sievedCount = 0;
 	let maskedCount = 0;
@@ -2889,6 +2920,7 @@ export default function (pi: ExtensionAPI) {{
 		pendingBatchNudge = false;
 		sessionTurnCount = 0;
 		lastMaskTurn = -MASK_COOLDOWN_TURNS;
+		lastKnownPromptTokens = 0;
 		lastCacheDropPct = null;
 	}};
 
@@ -2943,6 +2975,7 @@ export default function (pi: ExtensionAPI) {{
 					recentToolSuccessesAfterEdit,
 					stagnantHeavyTurns,
 					consecutiveLightTurns,
+					cachedPrefixTokens: lastKnownPromptTokens,
 				}});
 				const nextState =
 					request.reason === "direct"
@@ -3742,17 +3775,26 @@ export default function (pi: ExtensionAPI) {{
 
 		// Native Pi v1.5 batch observation masking using monotonic sessionTurnCount
 		// (Pi resets event.turnIndex=0 on each agent_start). Protect a brand-new cache right after
-		// a cold turn paid full price to rebuild it (eliminates double-cold-prefill), unless >=240k Peak-IQ guard!
+		// a cold turn paid full price to rebuild it, AND on 50:1 deep-cache-discount models (e.g. DeepSeek Flash)
+		// defer mid-prefix context_edit until emergency >=210k so normal 0-160k runs keep 99.5%+ pure KV-cache hits!
 		const contextEntries = event.context?.contextEntries;
-		const cooldownReady = sessionTurnCount - lastMaskTurn >= MASK_COOLDOWN_TURNS;
 		const usage = ctx?.getContextUsage?.();
 		const effTokens = usage?.tokens ?? (turnPrompt > 0 ? turnPrompt : null);
+		if (typeof effTokens === "number" && effTokens > 0) {{
+			lastKnownPromptTokens = effTokens;
+		}}
+		const deepCacheDiscount = isDeepCacheDiscountModel(
+			ctx?.model as {{ provider?: string; id?: string; cost?: {{ input?: number; cacheRead?: number }} }} | undefined,
+		);
+		const effCooldown = deepCacheDiscount ? 25 : MASK_COOLDOWN_TURNS;
+		const cooldownReady = sessionTurnCount - lastMaskTurn >= effCooldown;
 		const protectFreshColdRebuild =
 			justRebuiltColdCache && (effTokens === null || effTokens < MASK_TIER2_TOKENS);
 		if (Array.isArray(contextEntries) && cooldownReady && !protectFreshColdRebuild) {{
 			const plan = planObservationMasking(contextEntries, {{
 				usagePercent: usage?.percent ?? null,
 				usageTokens: effTokens,
+				...(deepCacheDiscount ? {{ highWaterTokens: 210000, staleCharsFallback: 360000 }} : {{}}),
 			}});
 			if (plan.edits.length > 0) {{
 				lastMaskTurn = sessionTurnCount;
@@ -5088,6 +5130,7 @@ fn inspect_pi_runtime(home: &Path) -> Value {
                 && s.contains("session_before_tree")
                 && s.contains("repairHallucinatedToolName")
                 && s.contains("healMultiEditsSequential")
+                && s.contains("isDeepCacheDiscountModel")
         })
         .unwrap_or(false);
 
@@ -5555,7 +5598,7 @@ pub fn cmd_doctor(as_json: bool) -> i32 {
             "  {badge} Pi Runtime        : model={model}, codemode={}, mcp_deferred={}, accelerator={}",
             if cm_ok { "on" } else { "off" },
             if mcp_ok { "yes" } else { "no" },
-            if accel_ok { "v2.28+ (Hashline + MultiEdit + CacheWarmer + context_edit + settle-gate + flash-auto + /ap fresh|handoff)" } else { "stale/missing" }
+            if accel_ok { "v2.29+ (Hashline + MultiEdit + CachePhysics + CacheWarmer + context_edit + settle-gate + flash-auto + /ap fresh|handoff)" } else { "stale/missing" }
         );
         if pi_runtime["runtime_patches"]["detected"].as_bool() == Some(true) {
             let applied = pi_runtime["runtime_patches"]["applied_count"]

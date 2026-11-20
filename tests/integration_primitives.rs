@@ -6343,3 +6343,56 @@ fn test_v228_web_route_surface_multiedit_and_shell_self_heal() {
     let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
     assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
 }
+
+#[test]
+fn test_v229_pi_runtime_patches_10_and_deepseek_cache_physics() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fake_home = root.join("home_v229");
+    let ap_home = root.join("ap_home_v229");
+    let pi_agent = fake_home.join(".pi").join("agent");
+    fs::create_dir_all(&pi_agent).unwrap();
+    let env_vars = [
+        ("HOME", fake_home.as_path()),
+        ("USERPROFILE", fake_home.as_path()),
+        ("AP_HOME", ap_home.as_path()),
+    ];
+
+    let init_out = run_ap(
+        root,
+        &[
+            "init",
+            "-a",
+            "pi",
+            "--with-hooks",
+            "--no-rules",
+            "--home",
+            fake_home.to_str().unwrap(),
+        ],
+        None,
+        &env_vars,
+    );
+    assert!(init_out.status.success());
+    let accel_ts =
+        fs::read_to_string(pi_agent.join("extensions").join("zz-ap-accelerator.ts")).unwrap();
+    for needle in [
+        "export function isDeepCacheDiscountModel",
+        "cachedPrefixTokens",
+        "\"cache-locked\"",
+        "highWaterTokens: 210000",
+        "staleCharsFallback: 360000",
+    ] {
+        assert!(
+            accel_ts.contains(needle),
+            "Missing v2.29 accelerator feature '{needle}'"
+        );
+    }
+
+    let doc = run_ap(root, &["doctor", "--json"], None, &env_vars);
+    assert!(doc.status.success());
+    let dv: Value = serde_json::from_slice(&doc.stdout).unwrap();
+    assert_eq!(dv["pi_runtime"]["accelerator_up_to_date"], true);
+    if dv["pi_runtime"]["runtime_patches"]["detected"] == Value::Bool(true) {
+        assert_eq!(dv["pi_runtime"]["runtime_patches"]["total_count"], 10);
+    }
+}
